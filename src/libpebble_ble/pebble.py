@@ -21,6 +21,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
+from loguru import logger
 
 from . import appmessage, protocol
 from .appmessage import AppMessageCmd, AppMessageValue
@@ -33,8 +34,6 @@ from .uuids import (
     MTU_CHARACTERISTIC,
     PAIRING_TRIGGER_CHARACTERISTIC,
 )
-
-log = logging.getLogger("pebble_le.pebble")
 
 # Handler signatures:
 #   AppMessageHandler(app_uuid: str, data: dict)   - inbound PUSH from a watchapp
@@ -121,7 +120,7 @@ class Pebble:
                 return ble_device, connected
             return None
         except Exception as e:
-            log.debug("could not query known devices: %s", e)
+            logger.debug(f"could not query known devices: {e}")
             return None
         finally:
             if bus:
@@ -141,11 +140,11 @@ class Pebble:
 
         # 2. Resolve and connect to the watch as a central (for the fed9
         #    connectivity/pairing-trigger handshake).
-        log.info("locating %s ...", self.address)
+        logger.info(f"locating {self.address} ...")
         known = await self._find_known_device()
         if known is not None:
             device, connected = known
-            log.info("watch already known to BlueZ (connected=%s)", connected)
+            logger.info(f"watch already known to BlueZ (connected={connected})")
         else:
             device = await BleakScanner.find_device_by_address(self.address, timeout=timeout)
             if device is None:
@@ -165,18 +164,18 @@ class Pebble:
             if "already connected" not in str(e).lower():
                 await self._server.stop()
                 raise
-            log.info("device was already connected; attaching")
-        log.info("connected to %s", self.address)
+            logger.info("device was already connected; attaching")
+        logger.info(f"connected to {self.address}")
 
         already_bonded = bool(known and known[0].details.get("props", {}).get("Bonded"))
         if pairing and not already_bonded:
             try:
                 paired = await self._client.pair()
-                log.info("bonding result: %s", paired)
+                logger.info(f"bonding result: {paired}")
             except Exception as e:
-                log.warning("explicit pair() failed (may already be bonded): %s", e)
+                logger.warning(f"explicit pair() failed (may already be bonded): {e}")
         elif already_bonded:
-            log.info("already bonded; skipping pair()")
+            logger.info("already bonded; skipping pair()")
 
         # 3. fed9 handshake. Subscribe to connectivity, MTU and connection-
         #    params updates, then write the pairing trigger. With our GATT
@@ -190,9 +189,9 @@ class Pebble:
             try:
                 await self._client.start_notify(char_uuid, cb)
                 self._subscribed.append(char_uuid)
-                log.info("subscribed to %s", label)
+                logger.info(f"subscribed to {label}")
             except Exception as e:
-                log.warning("%s subscribe failed: %s", label, e)
+                logger.warning(f"{label} subscribe failed: {e}")
 
         # The watch publishes its preferred MTU on the MTU characteristic; read
         # the current value too in case the notification already fired.
@@ -200,7 +199,7 @@ class Pebble:
             mtu_val = await self._client.read_gatt_char(MTU_CHARACTERISTIC)
             self._on_mtu(None, bytearray(mtu_val))
         except Exception as e:
-            log.debug("MTU characteristic read failed: %s", e)
+            logger.debug(f"MTU characteristic read failed: {e}")
 
         # Pairing trigger. In the server (non-clientOnly) path Gadgetbridge
         # writes 0x09; clientOnly writes 0x11. We use the server path here.
@@ -210,31 +209,30 @@ class Pebble:
                 bytes([0x09]),
                 response=True,
             )
-            log.info("wrote 0x09 to pairing trigger (server mode)")
+            logger.info("wrote 0x09 to pairing trigger (server mode)")
         except Exception as e:
-            log.warning("pairing trigger write failed: %s", e)
+            logger.warning(f"pairing trigger write failed: {e}")
 
         # 4. Wait for the watch to connect back to our GATT server and subscribe
         #    to the write characteristic. That subscription is the signal the
         #    PPoGATT data channel is live.
-        log.info("waiting for watch to connect back to our GATT server ...")
+        logger.info("waiting for watch to connect back to our GATT server ...")
         ok = await self._server.wait_connected(timeout=timeout)
         if not ok:
-            log.warning(
-                "watch did not connect back to our GATT server within %.0fs. "
+            logger.warning(
+                f"watch did not connect back to our GATT server within {timeout}. "
                 "The PPoGATT data channel is not established; sends may not "
                 "reach the watch.",
-                timeout,
             )
         else:
-            log.info("PPoGATT data channel established")
+            logger.info("PPoGATT data channel established")
 
         mtu = getattr(self._client, "mtu_size", 0) or 23
         if mtu >= 23 and self._server.mtu == 23:
             # Only fall back to the link MTU if the watch never told us its
             # preferred MTU via the MTU characteristic.
             self._server.set_mtu(mtu)
-        log.info("ATT MTU = %d", self._server.mtu)
+        logger.info(f"ATT MTU = {self._server.mtu}")
 
         self._connected.set()
 
@@ -255,23 +253,23 @@ class Pebble:
 
     # ---- fed9 characteristic callbacks ----
     def _on_connectivity(self, _char, data: bytearray):
-        log.info("connectivity update from watch: %s", bytes(data).hex())
+        logger.info(f"connectivity update from watch: {bytes(data).hex()}")
 
     def _on_conn_params(self, _char, data: bytearray):
-        log.debug("connection-params update: %s", bytes(data).hex())
+        logger.debug(f"connection-params update: {bytes(data).hex()}")
 
     def _on_mtu(self, _char, data: bytearray):
         # The watch reports its preferred MTU here as a little-endian u16.
         if len(data) >= 2:
             watch_mtu = int.from_bytes(bytes(data[:2]), "little")
-            log.info("watch requested MTU: %d", watch_mtu)
+            logger.info(f"watch requested MTU: {watch_mtu}")
             if self._server and watch_mtu >= 23:
                 self._server.set_mtu(watch_mtu)
 
     # ---- inbound Pebble Protocol dispatch ----
     def _on_pebble_message(self, message: bytes):
         endpoint, payload = protocol.pebble_unpack(message)
-        log.debug("rx endpoint=%s len=%d", endpoint, len(payload))
+        logger.debug(f"rx endpoint={endpoint} len={len(payload)}")
 
         if endpoint == Endpoint.PHONE_VERSION:
             self._on_phone_version(payload)
@@ -285,52 +283,52 @@ class Pebble:
     def _on_phone_version(self, payload: bytes):
         # The watch is asking who we are. If we don't answer it will conclude
         # the phone app is absent and drop the session after a timeout.
-        log.info("watch requested phone version; replying")
+        logger.info("watch requested phone version; replying")
         self._send_pebble(Endpoint.PHONE_VERSION, protocol.build_phone_version_response())
 
     def _on_ping(self, payload: bytes):
         cookie = protocol.parse_ping(payload)
         if cookie is not None:
-            log.debug("ping cookie=%d; replying pong", cookie)
+            logger.debug(f"ping cookie={cookie}; replying pong")
             self._send_pebble(Endpoint.PING, protocol.build_pong(cookie))
 
     def _on_app_message_payload(self, payload: bytes):
         # Log the raw AppMessage bytes — invaluable for reconciling the watch's
         # actual command/transaction values against what we sent.
-        log.debug("inbound APP_MESSAGE raw: %s", payload.hex())
+        logger.debug(f"inbound APP_MESSAGE raw: {payload.hex()}")
         cmd, txn, app_uuid, data = appmessage.parse_app_message(payload)
 
         if cmd == AppMessageCmd.PUSH:
             # The watchapp pushed data to us. ACK it so it doesn't retransmit,
             # then fan out to handlers.
             self._send_pebble(Endpoint.APP_MESSAGE, appmessage.build_app_message_ack(txn))
-            log.debug("inbound PUSH txn=%s uuid=%s data=%s", txn, app_uuid, data)
+            logger.debug(f"inbound PUSH txn={txn} uuid={app_uuid} data={data}")
             for h in self._handlers:
                 try:
                     h(app_uuid, data)
                 except Exception:
-                    log.exception("app message handler raised")
+                    logger.exception("app message handler raised")
 
         elif cmd == AppMessageCmd.ACK:
             # The watch confirmed one of our sends.
-            log.debug("inbound ACK txn=%s", txn)
+            logger.debug(f"inbound ACK txn={txn}")
             self._resolve_pending(txn, True)
             for h in self._ack_handlers:
                 try:
                     h(txn)
                 except Exception:
-                    log.exception("ack handler raised")
+                    logger.exception("ack handler raised")
 
         elif cmd == AppMessageCmd.NACK:
             # The watch rejected one of our sends (e.g. app not listening, or
             # the app's inbox was too small for the message).
-            log.debug("inbound NACK txn=%s", txn)
+            logger.debug(f"inbound NACK txn={txn}")
             self._resolve_pending(txn, False)
             for h in self._nack_handlers:
                 try:
                     h(txn)
                 except Exception:
-                    log.exception("nack handler raised")
+                    logger.exception("nack handler raised")
         # any other (unknown) command byte is ignored
 
     def _resolve_pending(self, txn: int, acked: bool):
@@ -342,7 +340,7 @@ class Pebble:
             # resolve the oldest one — ACKs are ordered, so this stays correct
             # for the common one-in-flight case.
             oldest = next(iter(self._pending))
-            log.debug("ACK txn=%s had no exact match; resolving oldest pending txn=%s", txn, oldest)
+            logger.debug(f"ACK txn={txn} had no exact match; resolving oldest pending txn={oldest}")
             fut = self._pending.pop(oldest, None)
         if fut is not None and not fut.done():
             fut.set_result(acked)
@@ -436,10 +434,8 @@ class Pebble:
                 if raise_on_timeout:
                     msg_0 = f"no ACK/NACK for transaction {txn} within {ack_timeout}s"
                     raise TimeoutError(msg_0)
-                log.warning(
-                    "no ACK for transaction %s within %.1fs (message may still have arrived)",
-                    txn,
-                    ack_timeout,
+                logger.warning(
+                    f"no ACK for transaction {txn} within {ack_timeout} (message may still have arrived)"
                 )
                 return txn
             if not acked:

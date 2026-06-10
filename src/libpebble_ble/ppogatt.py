@@ -28,7 +28,7 @@ import logging
 import struct
 from enum import IntEnum
 
-log = logging.getLogger("pebble_le.ppogatt")
+from loguru import logger
 
 # Window size we advertise in the reset reply and honor on our TX side.
 PPOGATT_WINDOW = 0x19  # 25 packets
@@ -115,8 +115,9 @@ class PPoGATTSession:
         still being reassembled).
         """
         if serial != self.rx_seq:
-            log.warning("PPoGATT DATA serial=%d, expected %d — dropping "
-                        "(duplicate or out-of-order)", serial, self.rx_seq)
+            logger.warning(
+                f"PPoGATT DATA serial={serial}, expected {self.rx_seq} — dropping (duplicate or out-of-order)",
+            )
             return None
         self.rx_seq = (self.rx_seq + 1) & 0x1F
         self.reassembly += body
@@ -128,8 +129,9 @@ class PPoGATTSession:
             length = struct.unpack(">H", self.reassembly[:2])[0]
             total = 4 + length
             if total > MAX_REASSEMBLY:
-                log.error("PPoGATT framing desync (claimed length %d); "
-                          "dropping reassembly buffer", length)
+                logger.error(
+                    f"PPoGATT framing desync (claimed length {length}); dropping reassembly buffer",
+                )
                 self.reassembly.clear()
                 return out
             if len(self.reassembly) < total:
@@ -137,6 +139,6 @@ class PPoGATTSession:
             out.append(bytes(self.reassembly[:total]))
             del self.reassembly[:total]
         if len(self.reassembly) > MAX_REASSEMBLY:
-            log.error("PPoGATT reassembly buffer overflow; dropping buffer")
+            logger.error("PPoGATT reassembly buffer overflow; dropping buffer")
             self.reassembly.clear()
         return out

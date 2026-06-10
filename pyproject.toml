@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "bleak>=3.0.2",
     "dbus-fast>=5.0.22",
+    "loguru>=0.7.3",
 ]
 
 [dependency-groups]

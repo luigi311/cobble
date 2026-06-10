@@ -8,8 +8,9 @@ Examples:
 
 import argparse
 import asyncio
-import logging
+import sys
 
+from loguru import logger
 from src.libpebble_ble import Pebble
 
 
@@ -65,16 +66,13 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logger(args.verbose)
 
     async def _main():
         if args.scan:
-            print("scanning...")
+            logger.info("scanning...")
             for addr, name in await Pebble.scan():
-                print(f"  {addr}  {name}")
+                logger.debug(f"  {addr}  {name}")
             return
         if not args.address:
             parser.error("address required (or use --scan)")
@@ -85,21 +83,29 @@ def main():
 
             @pebble.on_app_message
             def show(app_uuid, data):
-                print(f"<< {app_uuid}: {data}")
+                logger.info(f"<< {app_uuid}: {data}")
 
             if args.launch:
                 await pebble.launch_app(args.app_uuid)
                 await asyncio.sleep(1.0)  # give the app a moment to open
 
             txn = await pebble.send_app_message(args.app_uuid, data)
-            print(f"sent AppMessage txn={txn} to {args.app_uuid}: {data}")
-            print(f"listening {args.listen:.0f}s for replies (Ctrl-C to stop)")
+            logger.info(f"sent AppMessage txn={txn} to {args.app_uuid}: {data}")
+            logger.info(f"listening {args.listen:.0f}s for replies (Ctrl-C to stop)")
             try:
                 await asyncio.sleep(args.listen)
             except KeyboardInterrupt:
                 pass
 
     asyncio.run(_main())
+
+
+def configure_logger(verbose: bool) -> None:
+    # Remove default logger to configure our own
+    logger.remove()
+
+    # Add a sink for file logging and the console.
+    logger.add(sys.stdout, level="TRACE" if verbose else "INFO")
 
 
 if __name__ == "__main__":

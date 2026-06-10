@@ -73,9 +73,7 @@ PHONEVERSION_REMOTE_CAPS_BTLE = 0x00000080
 PROTOCOL_CAPS_APP_RUN_STATE = 0x0000000000000001
 
 
-def build_phone_version_response(
-    major: int = 4, minor: int = 4, bugfix: int = 2
-) -> bytes:
+def build_phone_version_response(major: int = 4, minor: int = 4, bugfix: int = 2) -> bytes:
     """AppVersionResponse payload for the PHONE_VERSION endpoint.
 
     Layout follows libpebble2's PhoneAppVersion/AppVersionResponse (and
@@ -107,6 +105,7 @@ def build_phone_version_response(
 # PING (endpoint 2001)
 # ---------------------------------------------------------------------------
 
+
 def build_pong(cookie: int) -> bytes:
     """PING endpoint reply: u8 command (1 = pong) + u32 echoed cookie."""
     return struct.pack(">BI", 0x01, cookie & 0xFFFFFFFF)
@@ -122,6 +121,7 @@ def parse_ping(payload: bytes) -> int | None:
 # ---------------------------------------------------------------------------
 # APP_RUN_STATE (endpoint 52)
 # ---------------------------------------------------------------------------
+
 
 class AppRunStateCmd(IntEnum):
     START = 0x01

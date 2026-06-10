@@ -17,6 +17,7 @@ from dbus_fast import Variant
 from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 from dbus_fast.service import PropertyAccess, ServiceInterface, dbus_property, method
+from loguru import logger
 
 from .ppogatt import (
     PPOGATT_WINDOW,
@@ -34,8 +35,6 @@ from .uuids import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-log = logging.getLogger("pebble_le.gatt_server")
 
 BLUEZ = "org.bluez"
 GATT_MANAGER_IFACE = "org.bluez.GattManager1"
@@ -89,18 +88,18 @@ class _Characteristic(ServiceInterface):
     # --- methods the watch (via BlueZ) calls ---
     @method()
     def ReadValue(self, options: "a{sv}") -> "ay":
-        log.debug("GATT-server ReadValue on %s", self._uuid)
+        logger.debug(f"GATT-server ReadValue on {self._uuid}")
         return bytes(self._value)
 
     @method()
     def WriteValue(self, value: "ay", options: "a{sv}"):
-        log.debug("GATT-server WriteValue on %s: %s", self._uuid, bytes(value).hex())
+        logger.debug(f"GATT-server WriteValue on {self._uuid}: {bytes(value).hex()}")
         if self._on_write:
             self._on_write(bytes(value))
 
     @method()
     def StartNotify(self):
-        log.info("GATT-server StartNotify on %s (watch subscribed)", self._uuid)
+        logger.info(f"GATT-server StartNotify on {self._uuid} (watch subscribed)")
         self._notifying = True
         if self._on_subscribe:
             self._on_subscribe()
@@ -257,10 +256,8 @@ class PebbleGattServer:
         adapter_obj = self._bus.get_proxy_object(BLUEZ, f"/org/bluez/{self.adapter}", introspect)
         gatt_mgr = adapter_obj.get_interface(GATT_MANAGER_IFACE)
         await gatt_mgr.call_register_application(APP_PATH, {})
-        log.info(
-            "GATT server registered: hosting %s (+BADBAD) on %s",
-            PPOGATT_SERVER_SERVICE,
-            self.adapter,
+        logger.info(
+            f"GATT server registered: hosting {PPOGATT_SERVER_SERVICE} (+BADBAD) on {self.adapter}",
         )
 
     def set_mtu(self, mtu: int):
@@ -279,7 +276,7 @@ class PebbleGattServer:
             return False
 
     def _on_watch_subscribed(self):
-        log.info("watch subscribed to PPoGATT server characteristic")
+        logger.info("watch subscribed to PPoGATT server characteristic")
         if not self._connected_evt.is_set():
             self._connected_evt.set()
 
@@ -289,7 +286,7 @@ class PebbleGattServer:
             return
         command, serial = parse_ppogatt_header(packet[0])
         body = packet[1:]
-        log.debug("PPoGATT rx cmd=%s serial=%d len=%d", command, serial, len(body))
+        logger.debug(f"PPoGATT rx cmd={command} serial={serial} len={len(body)}")
 
         if command == PPoGATTType.RESET_REQUEST:
             # Gadgetbridge replies {0x03,0x19,0x19} if a payload was present,
@@ -303,10 +300,10 @@ class PebbleGattServer:
                 self._send_raw(bytes([0x03]))
             return
         if command == PPoGATTType.RESET_COMPLETE:
-            log.debug("PPoGATT reset complete")
+            logger.debug("PPoGATT reset complete")
             return
         if command == PPoGATTType.ACK:
-            log.debug("PPoGATT ack serial=%d", serial)
+            logger.debug(f"PPoGATT ack serial={serial}")
             self._session.on_ack()
             self._pump_tx()
             return
@@ -319,7 +316,7 @@ class PebbleGattServer:
                 for message in messages:
                     self.on_data(message)
             return
-        log.debug("PPoGATT unknown command %s ignored", command)
+        logger.debug(f"PPoGATT unknown command {command} ignored")
 
     def _send_raw(self, packet: bytes):
         """Notify a raw PPoGATT packet to the watch on the write characteristic."""
@@ -352,6 +349,6 @@ class PebbleGattServer:
                 gatt_mgr = adapter_obj.get_interface(GATT_MANAGER_IFACE)
                 await gatt_mgr.call_unregister_application(APP_PATH)
             except Exception as e:
-                log.debug("unregister application failed: %s", e)
+                logger.debug(f"unregister application failed: {e}")
             self._bus.disconnect()
             self._bus = None

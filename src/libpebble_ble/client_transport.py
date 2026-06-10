@@ -13,8 +13,9 @@ up yourself if you need it.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING
+
+from loguru import logger
 
 from .ppogatt import (
     PPOGATT_WINDOW,
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from bleak import BleakClient
-
-log = logging.getLogger("pebble_le.client_transport")
 
 
 class PebblePPoGATTClient:
@@ -78,7 +77,7 @@ class PebblePPoGATTClient:
         # answer with RESET_COMPLETE; from then on DATA packets carry Pebble
         # Protocol messages.
         await self._client.start_notify(PPOGATT_WATCH_NOTIFY, self._on_notify)
-        log.info("subscribed to PPoGATT notify %s", PPOGATT_WATCH_NOTIFY)
+        logger.info(f"subscribed to PPoGATT notify {PPOGATT_WATCH_NOTIFY}")
         await self._write_ppogatt(PPoGATTType.RESET_REQUEST, b"")
 
     async def _await_characteristic(self, uuid: str, timeout: float):
@@ -95,10 +94,10 @@ class PebblePPoGATTClient:
                         if c.uuid.lower() == uuid:
                             return c
             except Exception as e:
-                log.debug("service scan error: %s", e)
+                logger.debug(f"service scan error: {e}")
             attempt += 1
             if attempt == 1:
-                log.info(
+                logger.info(
                     "PPoGATT service not present yet; waiting for the "
                     "watch to expose it (the connectivity handshake may "
                     "still be in progress) ..."
@@ -110,7 +109,7 @@ class PebblePPoGATTClient:
                 if getter is not None:
                     await getter()
             except Exception as e:
-                log.debug("get_services refresh failed: %s", e)
+                logger.debug(f"get_services refresh failed: {e}")
             await asyncio.sleep(1.0)
         return None
 
@@ -124,7 +123,7 @@ class PebblePPoGATTClient:
             return
         ptype, seq = parse_ppogatt_header(packet[0])
         body = packet[1:]
-        log.debug("PPoGATT rx type=%s seq=%d len=%d", ptype, seq, len(body))
+        logger.debug(f"PPoGATT rx type={ptype} seq={seq} len={len(body)}")
         if ptype == PPoGATTType.RESET_REQUEST:
             self._session.reset()
             self._tx_space.set()
@@ -132,7 +131,7 @@ class PebblePPoGATTClient:
         elif ptype == PPoGATTType.RESET_COMPLETE:
             self._session.reset()
             self._tx_space.set()
-            log.info("PPoGATT reset complete; transport ready")
+            logger.info("PPoGATT reset complete; transport ready")
         elif ptype == PPoGATTType.ACK:
             self._session.on_ack()
             if self._session.can_send():
@@ -145,7 +144,7 @@ class PebblePPoGATTClient:
                 for message in messages:
                     self.on_data(message)
         else:
-            log.debug("PPoGATT unknown command %s ignored", ptype)
+            logger.debug(f"PPoGATT unknown command {ptype} ignored")
 
     async def _write_ppogatt(self, ptype: PPoGATTType, body: bytes, seq: int | None = None):
         if seq is None:
@@ -158,9 +157,9 @@ class PebblePPoGATTClient:
         packet = bytes([ppogatt_header(ptype, seq)]) + body
         try:
             await self._client.write_gatt_char(PPOGATT_WATCH_WRITE, packet, response=False)
-            log.debug("PPoGATT tx type=%s seq=%d len=%d", ptype, seq, len(body))
+            logger.debug(f"PPoGATT tx type={ptype} seq={seq} len={len(body)}")
         except Exception as e:
-            log.warning("PPoGATT write failed: %s", e)
+            logger.warning(f"PPoGATT write failed: {e}")
 
     async def send(self, pebble_message: bytes):
         """Send one whole Pebble Protocol message, chunked to the MTU and
