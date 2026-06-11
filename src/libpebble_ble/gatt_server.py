@@ -286,7 +286,7 @@ class PebbleGattServer:
             return
         command, serial = parse_ppogatt_header(packet[0])
         body = packet[1:]
-        logger.debug(f"PPoGATT rx cmd={command} serial={serial} len={len(body)}")
+        logger.trace(f"PPoGATT rx cmd={command} serial={serial} len={len(body)}")
 
         if command == PPoGATTType.RESET_REQUEST:
             # Gadgetbridge replies {0x03,0x19,0x19} if a payload was present,
@@ -303,7 +303,7 @@ class PebbleGattServer:
             logger.debug("PPoGATT reset complete")
             return
         if command == PPoGATTType.ACK:
-            logger.debug(f"PPoGATT ack serial={serial}")
+            logger.trace(f"PPoGATT ack serial={serial}")
             self._session.on_ack()
             self._pump_tx()
             return
