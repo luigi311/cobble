@@ -15,6 +15,7 @@ encodePhoneVersion.
 
 from __future__ import annotations
 
+import os
 import struct
 import uuid as _uuid
 from enum import IntEnum
@@ -26,6 +27,7 @@ class Endpoint(IntEnum):
     SYSTEM_MESSAGE = 18
     APP_MESSAGE = 48
     APP_RUN_STATE = 52
+    BLOB_DB = 0xB1DB
     PING = 2001
     APP_FETCH = 6001
 
@@ -170,3 +172,174 @@ def build_set_utc(
         + struct.pack(">B", len(name))
         + name
     )
+
+
+# ---------------------------------------------------------------------------
+# BlobDB (endpoint 0xb1db) + notifications
+# ---------------------------------------------------------------------------
+
+
+class BlobDBCommand(IntEnum):
+    INSERT = 0x01
+    DELETE = 0x04
+    CLEAR = 0x05
+
+
+class BlobDBId(IntEnum):
+    PIN = 1
+    APP = 2
+    REMINDER = 3
+    NOTIFICATION = 4
+    WEATHER = 5
+
+
+class BlobDBStatus(IntEnum):
+    SUCCESS = 1
+    GENERAL_FAILURE = 2
+    INVALID_OPERATION = 3
+    INVALID_DATABASE_ID = 4
+    INVALID_DATA = 5
+    KEY_DOES_NOT_EXIST = 6
+    DATABASE_FULL = 7
+    DATA_STALE = 8
+
+
+def build_blobdb_insert(
+    db: BlobDBId, key_uuid: bytes, blob: bytes, token: int | None = None
+) -> bytes:
+    """BlobDB INSERT payload (endpoint 0xb1db).
+
+    Mirrors Gadgetbridge encodeBlobdb. Endianness is mixed: the section
+    after the BE length/endpoint prefix (command, token, db, key_length) is
+    LITTLE-endian, the 16-byte UUID key is BIG-endian, and the blob length
+    prefix is LITTLE-endian. Get this wrong and the watch drops the insert
+    with no visible error.
+
+    Returns the payload only (no Pebble Protocol header); pass it to
+    pebble_pack(Endpoint.BLOB_DB, payload).
+    """
+    if token is None:
+        token = int.from_bytes(os.urandom(2), "little")
+    if len(key_uuid) != 16:
+        msg = f"blobdb key must be 16 bytes, got {len(key_uuid)}"
+        raise ValueError(msg)
+    return (
+        struct.pack("<BHB", int(BlobDBCommand.INSERT), token & 0xFFFF, int(db))
+        + struct.pack("<B", len(key_uuid))
+        + key_uuid  # 16 raw big-endian UUID bytes (already in BE order)
+        + struct.pack("<H", len(blob))
+        + blob
+    )
+
+
+def _attr_string(attr_id: int, value: str, max_len: int = 512) -> bytes:
+    """One notification attribute holding a string: id(u8) + len(u16 LE) + bytes."""
+    raw = value.encode("utf-8")[:max_len]
+    return struct.pack("<BH", attr_id, len(raw)) + raw
+
+
+def _attr_uint32(attr_id: int, value: int) -> bytes:
+    """One notification attribute holding a u32: id(u8) + len(u16 LE=4) + u32 LE."""
+    return struct.pack("<BHI", attr_id, 4, value & 0xFFFFFFFF)
+
+
+# Attribute ids from Gadgetbridge / PebbleOS timeline attributes.
+ATTR_TITLE = 1
+ATTR_SUBTITLE = 2
+ATTR_BODY = 3
+ATTR_ICON = 4
+
+# A safe generic notification icon. 0x80000000 | id is how Gadgetbridge tags
+# system icon ids; this one is a generic notification glyph.
+NOTIFICATION_ICON_GENERIC = 0x80000037
+
+
+def build_notification_blob(
+    title: str,
+    body: str,
+    subtitle: str = "",
+    timestamp: int | None = None,
+    icon: int = NOTIFICATION_ICON_GENERIC,
+) -> bytes:
+    """Build the notification pin blob (the value stored under BlobDB NOTIFICATION).
+
+    Layout follows Gadgetbridge encodeNotification's 46-byte pin header plus
+    attributes, no actions (first pass keeps it simple: title/subtitle/body
+    plus an icon attribute).
+
+    Pin header (46 bytes):
+      item_uuid   (16 BE)   random
+      parent_uuid (16 BE)   the notifications app uuid
+      timestamp   (u32 LE)
+      duration    (u16 LE)  0
+      type        (u8)      0x01 = notification
+      flags       (u16 LE)  0x0001
+      layout      (u8)      0x04 = notification layout
+      attr+act_len(u16 LE)  total bytes of attributes+actions
+      attr_count  (u8)
+      act_count   (u8)      0
+    """
+    if timestamp is None:
+        timestamp = int(__import__("time").time())
+
+    # The notifications "app" parent uuid Gadgetbridge uses
+    # (UUID_NOTIFICATIONS = b2cae818-10f8-46df-ad2b-98ad2254a3c1).
+    parent_uuid = _uuid.UUID("b2cae818-10f8-46df-ad2b-98ad2254a3c1").bytes
+    item_uuid = _uuid.uuid4().bytes
+
+    # Build attributes.
+    attrs = b""
+    attr_count = 0
+    for attr_id, value in ((ATTR_TITLE, title), (ATTR_SUBTITLE, subtitle), (ATTR_BODY, body)):
+        if value:
+            attrs += _attr_string(attr_id, value)
+            attr_count += 1
+    # Icon attribute (u32).
+    attrs += _attr_uint32(ATTR_ICON, icon)
+    attr_count += 1
+
+    attributes_length = len(attrs)
+
+    header = (
+        item_uuid
+        + parent_uuid
+        + struct.pack(
+            "<IHBHBHBB",
+            timestamp & 0xFFFFFFFF,  # u32 timestamp
+            0,  # u16 duration
+            0x01,  # u8 type = notification
+            0x0001,  # u16 flags
+            0x04,  # u8 layout = notification
+            attributes_length,  # u16 attributes+actions length
+            attr_count,  # u8 attribute count
+            0,  # u8 action count
+        )
+    )
+    return header + attrs
+
+
+def build_notification(
+    title: str,
+    body: str,
+    subtitle: str = "",
+    timestamp: int | None = None,
+    icon: int = NOTIFICATION_ICON_GENERIC,
+    token: int | None = None,
+) -> bytes:
+    """Full BlobDB-INSERT payload that delivers a notification to the watch.
+
+    Returns the payload for Endpoint.BLOB_DB. The blob's key is a fresh random
+    UUID (each notification is its own database entry).
+    """
+    blob = build_notification_blob(title, body, subtitle, timestamp, icon)
+    key = _uuid.uuid4().bytes
+    return build_blobdb_insert(BlobDBId.NOTIFICATION, key, blob, token=token)
+
+
+def parse_blobdb_response(payload: bytes) -> tuple[int, int] | None:
+    """Parse a BlobDB response: u16 token (LE) + u8 status. Returns (token, status)."""
+    if len(payload) < 3:
+        return None
+    token = int.from_bytes(payload[0:2], "little")
+    status = payload[2]
+    return token, status

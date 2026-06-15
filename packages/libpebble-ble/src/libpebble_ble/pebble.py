@@ -562,6 +562,8 @@ class Pebble:
             self._on_ping(payload)
         elif endpoint == Endpoint.APP_MESSAGE:
             self._on_app_message_payload(payload)
+        elif endpoint == Endpoint.BLOB_DB:
+            self._on_blobdb(payload)
         # Other endpoints (system messages, app run state notifications, etc.)
         # flow here too; we don't model them. Ignore quietly rather than crash.
 
@@ -615,6 +617,21 @@ class Pebble:
                 except Exception:
                     logger.exception("nack handler raised")
         # any other (unknown) command byte is ignored
+
+    def _on_blobdb(self, payload: bytes):
+        parsed = protocol.parse_blobdb_response(payload)
+        if parsed is None:
+            logger.debug(f"unparseable BlobDB response: {payload.hex()}")
+            return
+        token, status = parsed
+        try:
+            status_name = protocol.BlobDBStatus(status).name
+        except ValueError:
+            status_name = f"unknown({status})"
+        if status == protocol.BlobDBStatus.SUCCESS:
+            logger.debug(f"BlobDB token={token} -> {status_name}")
+        else:
+            logger.warning(f"BlobDB token={token} -> {status_name}")
 
     def _resolve_pending(self, txn: int, acked: bool):
         fut = self._pending.pop(txn, None)
@@ -752,6 +769,29 @@ class Pebble:
                 msg_1 = f"watch NACKed transaction {txn}"
                 raise PebbleNackError(msg_1)
         return txn
+
+    async def send_notification(
+        self,
+        title: str,
+        body: str,
+        subtitle: str = "",
+        icon: int | None = None,
+    ) -> int:
+        """Push a notification to the watch's notification center (BlobDB).
+
+        Returns the BlobDB token used, so a caller can correlate the watch's
+        async BlobDB response (logged in _on_blobdb) if it wants confirmation.
+        """
+        if not self._connected.is_set():
+            msg = "not connected"
+            raise RuntimeError(msg)
+
+        token = int.from_bytes(__import__("os").urandom(2), "little")
+        kwargs = {} if icon is None else {"icon": icon}
+        payload = protocol.build_notification(title, body, subtitle, token=token, **kwargs)
+        logger.debug(f"sending notification token={token} title={title!r}")
+        self._send_pebble(Endpoint.BLOB_DB, payload)
+        return token
 
     def _send_pebble(self, endpoint: Endpoint, payload: bytes):
         message = protocol.pebble_pack(endpoint, payload)

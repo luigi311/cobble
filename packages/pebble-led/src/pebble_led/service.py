@@ -213,6 +213,10 @@ class PebbleDaemon(ServiceInterface):
         await self._require_connected().update_time()
 
     @method()
+    async def Notify(self, title: "s", body: "s", subtitle: "s") -> "u":  # noqa: N802, F821
+        return await self._require_connected().send_notification(title, body, subtitle)
+
+    @method()
     def Ping(self) -> "b":  # noqa: N802, F821
         return True
 
