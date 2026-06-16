@@ -79,12 +79,14 @@ class PPoGATTSession:
 
     def __init__(self) -> None:
         self.tx_seq = 0
+        self.tx_ack_seq = 0
         self.tx_inflight = 0
         self.rx_seq = 0
         self.reassembly = bytearray()
 
     def reset(self) -> None:
         self.tx_seq = 0
+        self.tx_ack_seq = 0
         self.tx_inflight = 0
         self.rx_seq = 0
         self.reassembly.clear()
@@ -100,9 +102,19 @@ class PPoGATTSession:
         self.tx_inflight += 1
         return seq
 
-    def on_ack(self) -> None:
-        if self.tx_inflight > 0:
-            self.tx_inflight -= 1
+    def on_ack(self, serial: int) -> None:
+        """Cumulative ACK: the watch ACKs the highest serial it has received,
+        confirming every in-flight packet up to and including it. Credit all
+        of them back to the window, accounting for the 5-bit serial wrap.
+        """
+        # Number of packets from tx_ack_seq..serial inclusive, modulo 32.
+        covered = ((serial - self.tx_ack_seq) & 0x1F) + 1
+        if covered > self.tx_inflight:
+            # An ACK for more than we think is in flight — clamp; this can
+            # happen after a reset race. Don't let inflight go negative.
+            covered = self.tx_inflight
+        self.tx_inflight -= covered
+        self.tx_ack_seq = (serial + 1) & 0x1F
 
     # ---- RX side ----
     def on_data(self, serial: int, body: bytes) -> list[bytes] | None:

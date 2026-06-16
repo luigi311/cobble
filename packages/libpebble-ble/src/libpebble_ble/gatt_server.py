@@ -309,7 +309,7 @@ class PebbleGattServer:
             return
         if command == PPoGATTType.ACK:
             logger.trace(f"PPoGATT ack serial={serial}")
-            self._session.on_ack()
+            self._session.on_ack(serial)
             self._pump_tx()
             return
         if command == PPoGATTType.DATA:

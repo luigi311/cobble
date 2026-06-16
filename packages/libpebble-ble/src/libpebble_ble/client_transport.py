@@ -132,7 +132,7 @@ class PebblePPoGATTClient:
             self._tx_space.set()
             logger.debug("PPoGATT reset complete; transport ready")
         elif ptype == PPoGATTType.ACK:
-            self._session.on_ack()
+            self._session.on_ack(seq)
             if self._session.can_send():
                 self._tx_space.set()
         elif ptype == PPoGATTType.DATA:
