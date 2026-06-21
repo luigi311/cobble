@@ -48,7 +48,27 @@ pub async fn run_supervisor(daemon: PebbleDaemon, address: String, adapter: Stri
                     warn!("time sync on connect failed: {e}");
                 }
 
+                if let Err(e) = pebble.fetch_health_data() {
+                    warn!("health sync on connect failed: {e}");
+                }
+
+                // Periodic health sync while connected.
+                let pebble_sync = Arc::clone(&pebble);
+                let sync_task = tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+                    interval.tick().await; // skip the immediate first tick
+                    loop {
+                        interval.tick().await;
+                        if let Err(e) = pebble_sync.fetch_health_data() {
+                            warn!("periodic health sync failed: {e}");
+                        }
+                        debug!("periodic health sync triggered");
+                    }
+                });
+
                 pebble.wait_disconnected().await;
+                sync_task.abort();
                 warn!("watch link went down");
             }
             Err(e) => {
