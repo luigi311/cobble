@@ -74,15 +74,90 @@ pub fn parse_blobdb_response(payload: &[u8]) -> Option<(u16, u8)> {
 // Notifications (built on top of BlobDB inserts)
 // ---------------------------------------------------------------------------
 
-const NOTIFICATION_ICON_GENERIC: u32 = 0x80000037;
 const NOTIFICATIONS_APP_UUID: &str = "b2cae818-10f8-46df-ad2b-98ad2254a3c1";
 
-pub fn build_notification_blob(
+/// Pebble system icon resource IDs (0x80000000 flag = system resource).
+/// Values from Gadgetbridge's PebbleIconID enum.
+mod icon_id {
+    pub const GENERIC: u32 = 0x80000037;
+    pub const EMAIL: u32 = 0x8000003C;
+    pub const SMS: u32 = 0x80000035;
+    pub const MISSED_CALL: u32 = 0x80000005;
+    pub const TWITTER: u32 = 0x8000000E;
+    pub const FACEBOOK: u32 = 0x80000007;
+    pub const FACEBOOK_MESSENGER: u32 = 0x8000006F;
+    pub const INSTAGRAM: u32 = 0x80000029;
+    pub const GOOGLE_HANGOUTS: u32 = 0x80000022;
+    pub const WHATSAPP: u32 = 0x80000057;
+}
+
+/// Pebble 8-bit ARGB color constants (alpha always 0b11 = opaque).
+/// Format: bits [7:6]=alpha, [5:4]=Red, [3:2]=Green, [1:0]=Blue (2 bits each).
+mod pebble_color {
+    pub const BLUE: u8 = 0xC3;           // 11_00_00_11
+    pub const GREEN: u8 = 0xCC;          // 11_00_11_00
+    pub const RED: u8 = 0xF0;            // 11_11_00_00
+    pub const VIVID_CERULEAN: u8 = 0xCB; // 11_00_10_11 — Twitter blue
+    pub const JAZZBERRY_JAM: u8 = 0xD5;  // 11_01_01_01 — Facebook pink/red
+    pub const ORANGE: u8 = 0xF4;         // 11_11_01_00 — Instagram orange
+}
+
+/// Notification category, used to select the correct Pebble icon and background
+/// color so the notification renders with the right visual treatment on the watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotificationCategory {
+    #[default]
+    Generic,
+    Email,
+    /// SMS and general instant-messaging apps.
+    Messaging,
+    MissedCall,
+    Twitter,
+    Facebook,
+    FacebookMessenger,
+    Instagram,
+    Hangouts,
+    WhatsApp,
+}
+
+impl NotificationCategory {
+    fn icon(self) -> u32 {
+        match self {
+            Self::Generic => icon_id::GENERIC,
+            Self::Email => icon_id::EMAIL,
+            Self::Messaging => icon_id::SMS,
+            Self::MissedCall => icon_id::MISSED_CALL,
+            Self::Twitter => icon_id::TWITTER,
+            Self::Facebook => icon_id::FACEBOOK,
+            Self::FacebookMessenger => icon_id::FACEBOOK_MESSENGER,
+            Self::Instagram => icon_id::INSTAGRAM,
+            Self::Hangouts => icon_id::GOOGLE_HANGOUTS,
+            Self::WhatsApp => icon_id::WHATSAPP,
+        }
+    }
+
+    fn background_color(self) -> u8 {
+        match self {
+            Self::Generic => pebble_color::BLUE,
+            Self::Email => pebble_color::BLUE,
+            Self::Messaging => pebble_color::GREEN,
+            Self::MissedCall => pebble_color::RED,
+            Self::Twitter => pebble_color::VIVID_CERULEAN,
+            Self::Facebook => pebble_color::JAZZBERRY_JAM,
+            Self::FacebookMessenger => pebble_color::JAZZBERRY_JAM,
+            Self::Instagram => pebble_color::ORANGE,
+            Self::Hangouts => pebble_color::GREEN,
+            Self::WhatsApp => pebble_color::GREEN,
+        }
+    }
+}
+
+fn build_notification_blob(
     title: &str,
     body: &str,
     subtitle: &str,
     timestamp: u32,
-    icon: u32,
+    category: NotificationCategory,
 ) -> Vec<u8> {
     let parent_uuid = Uuid::parse_str(NOTIFICATIONS_APP_UUID).unwrap().into_bytes();
     let item_uuid = Uuid::new_v4().into_bytes();
@@ -98,10 +173,15 @@ pub fn build_notification_blob(
             attr_count += 1;
         }
     }
-    // Icon attribute (u32)
+    // Attribute 4: icon (u32)
     attrs.push(4u8);
     attrs.extend_from_slice(&4u16.to_le_bytes());
-    attrs.extend_from_slice(&icon.to_le_bytes());
+    attrs.extend_from_slice(&category.icon().to_le_bytes());
+    attr_count += 1;
+    // Attribute 28: background color (u8)
+    attrs.push(28u8);
+    attrs.extend_from_slice(&1u16.to_le_bytes());
+    attrs.push(category.background_color());
     attr_count += 1;
 
     let mut out = Vec::new();
@@ -125,8 +205,9 @@ pub fn build_notification(
     subtitle: &str,
     timestamp: u32,
     token: u16,
+    category: NotificationCategory,
 ) -> Vec<u8> {
-    let blob = build_notification_blob(title, body, subtitle, timestamp, NOTIFICATION_ICON_GENERIC);
+    let blob = build_notification_blob(title, body, subtitle, timestamp, category);
     let key: [u8; 16] = Uuid::new_v4().into_bytes();
     build_blobdb_insert(BlobDBId::Notification, &key, &blob, token)
 }

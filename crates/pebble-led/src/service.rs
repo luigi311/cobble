@@ -30,7 +30,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use libpebble_ble::{AppMessageValue, Pebble};
+use libpebble_ble::{AppMessageValue, NotificationCategory, Pebble};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use zbus::{
@@ -52,6 +52,49 @@ enum DaemonError {
 
 pub const BUS_NAME: &str = "org.pebble_le.Daemon";
 pub const OBJECT_PATH: &str = "/org/pebble_le/Daemon";
+
+// ---------------------------------------------------------------------------
+// Desktop app-name → notification category mapping
+// ---------------------------------------------------------------------------
+
+fn app_name_to_category(app_name: &str) -> NotificationCategory {
+    let lower = app_name.to_lowercase();
+    let lower = lower.trim();
+
+    if matches!(lower, "thunderbird" | "evolution" | "kmail" | "geary"
+        | "mutt" | "neomutt" | "protonmail" | "gmail" | "outlook"
+        | "apple mail" | "mail" | "fastmail" | "tutanota")
+    {
+        return NotificationCategory::Email;
+    }
+    if lower == "whatsapp" {
+        return NotificationCategory::WhatsApp;
+    }
+    if lower.contains("facebook messenger") || lower == "messenger" {
+        return NotificationCategory::FacebookMessenger;
+    }
+    if lower == "facebook" {
+        return NotificationCategory::Facebook;
+    }
+    if matches!(lower, "twitter" | "tweetbot" | "tweetdeck" | "birdsite") {
+        return NotificationCategory::Twitter;
+    }
+    if lower == "instagram" {
+        return NotificationCategory::Instagram;
+    }
+    if matches!(lower, "hangouts" | "google hangouts") {
+        return NotificationCategory::Hangouts;
+    }
+    if matches!(lower, "signal" | "telegram" | "discord" | "slack"
+        | "element" | "fractal" | "nheko" | "fluffychat" | "mattermost"
+        | "rocketchat" | "zulip" | "wire" | "viber" | "line"
+        | "skype" | "teams" | "microsoft teams" | "google chat"
+        | "messages" | "sms" | "kde connect" | "kdeconnect")
+    {
+        return NotificationCategory::Messaging;
+    }
+    NotificationCategory::Generic
+}
 
 // ---------------------------------------------------------------------------
 // Wire codec (matches Python pebble-le-proto codec.py)
@@ -210,8 +253,10 @@ impl PebbleDaemon {
         }
         if let Some(pebble) = state.pebble.clone() {
             drop(state);
+            let category = app_name_to_category(&app_name);
+            debug!("notification from {app_name:?} -> category {category:?}");
             tokio::spawn(async move {
-                if let Err(e) = pebble.send_notification(&summary, &body, &app_name).await {
+                if let Err(e) = pebble.send_notification(&summary, &body, &app_name, category).await {
                     warn!("send notification failed: {e}");
                 }
             });
@@ -278,8 +323,10 @@ impl PebbleDaemon {
 
     async fn notify(&self, title: String, body: String, subtitle: String) -> Result<u32, DaemonError> {
         let pebble = self.require_pebble()?;
+        // subtitle is conventionally the app_name; use it for category detection.
+        let category = app_name_to_category(&subtitle);
         let token = pebble
-            .send_notification(&title, &body, &subtitle)
+            .send_notification(&title, &body, &subtitle, category)
             .await
             .map_err(|e| DaemonError::Failed(e.to_string()))?;
         Ok(token as u32)

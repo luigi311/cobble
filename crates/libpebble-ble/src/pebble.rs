@@ -34,7 +34,7 @@ use crate::{
             AppMessageValue,
         },
         app_run_state::{build_app_run_state, AppRunStateCmd},
-        blob_db::{build_notification, parse_blobdb_response, BlobDBStatus},
+        blob_db::{build_notification, parse_blobdb_response, BlobDBStatus, NotificationCategory},
         phone_version::build_phone_version_response,
         ping::{build_pong, parse_ping},
         time::build_set_utc,
@@ -537,17 +537,19 @@ impl Pebble {
         title: &str,
         body: &str,
         subtitle: &str,
+        category: NotificationCategory,
     ) -> Result<u16, PebbleError> {
         if !self.is_connected() {
             return Err(PebbleError::NotConnected);
         }
         let token = rand_u16();
         let now = Local::now().timestamp() as u32;
-        let payload = build_notification(title, body, subtitle, now, token);
-        debug!("sending notification token={token} title={title:?}");
+        let payload = build_notification(title, body, subtitle, now, token, category);
+        debug!("sending notification token={token} title={title:?} category={category:?}");
         self.send_pebble(Endpoint::BlobDb, &payload)?;
         Ok(token)
     }
+
 
     fn send_pebble(&self, endpoint: Endpoint, payload: &[u8]) -> Result<(), PebbleError> {
         let message = pebble_pack(endpoint, payload);
