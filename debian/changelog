@@ -1,3 +1,13 @@
+pebble-led (0.2.0-1) UNRELEASED; urgency=medium
+
+  * Swap to rust
+  * Add health support
+  * Add BlobDB2
+  * Add Weather
+  * Add timezone sync
+
+ -- Luis Garcia <luigi311@Luigi311-Desktop>  Tue, 23 Jun 2026 05:39:08 +0000
+
 pebble-led (0.1.0-1) unstable; urgency=medium
 
   * Initial release.
