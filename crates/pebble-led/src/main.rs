@@ -6,7 +6,7 @@
 //! connection, and runs until signalled.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use tokio::{signal, signal::unix::SignalKind, sync::mpsc};
@@ -75,10 +75,10 @@ async fn main() -> anyhow::Result<()> {
         Some(p) => p,
         None => default_db_path()?,
     };
-    let health_db = match HealthDb::open(&db_path) {
+    let health_db: Option<Arc<Mutex<HealthDb>>> = match HealthDb::open(&db_path) {
         Ok(db) => {
             info!("health DB opened at {}", db_path.display());
-            Some(db)
+            Some(Arc::new(Mutex::new(db)))
         }
         Err(e) => {
             warn!("could not open health DB at {}: {e}", db_path.display());
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    let daemon = PebbleDaemon::new(cfg.address.clone(), cfg.adapter.clone(), event_tx);
+    let daemon = PebbleDaemon::new(cfg.address.clone(), cfg.adapter.clone(), config_path, event_tx, health_db.clone());
 
     // Build the session D-Bus connection.
     let conn = zbus::connection::Builder::session()?
@@ -118,10 +118,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the reconnect supervisor in the background.
     let daemon_for_super = daemon.clone();
-    let address = cfg.address.clone();
-    let adapter = cfg.adapter.clone();
     tokio::spawn(async move {
-        run_supervisor(daemon_for_super, address, adapter).await;
+        run_supervisor(daemon_for_super).await;
     });
 
     // Run until SIGINT or SIGTERM.
