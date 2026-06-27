@@ -21,6 +21,12 @@ pub struct HealthDb {
     conn: Connection,
 }
 
+struct RawRecord {
+    id:        i64,
+    data:      Vec<u8>,
+    item_size: usize,
+}
+
 impl HealthDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -75,7 +81,7 @@ impl HealthDb {
              --   [chunk header, 9 bytes]
              --     u16 record_version
              --     u32 timestamp         unix ts of first minute in chunk
-             --     i8  utc_offset_15min  15-min segments (skipped)
+             --     i8  utc_offset        15-min segments, stored as utc_offset (× 900 s)
              --     u8  record_length     bytes per sub-record
              --     u8  record_num        count of sub-records
              --   [sub-record, record_length bytes each]
@@ -94,7 +100,8 @@ impl HealthDb {
                  id                    INTEGER PRIMARY KEY,
                  health_record_id      INTEGER NOT NULL REFERENCES health_records(id),
                  record_version        INTEGER NOT NULL,
-                 record_ts             INTEGER NOT NULL,
+                 start_ts              INTEGER NOT NULL,
+                 utc_offset            INTEGER NOT NULL,
                  steps                 INTEGER NOT NULL,
                  orientation           INTEGER NOT NULL,
                  vmc                   INTEGER NOT NULL,
@@ -107,9 +114,9 @@ impl HealthDb {
                  heart_rate_weight     INTEGER,
                  heart_rate_zone       INTEGER,
                  raw                   BLOB    NOT NULL,
-                 UNIQUE(record_ts)
+                 UNIQUE(start_ts)
              );
-             CREATE INDEX IF NOT EXISTS idx_activity_min_ts ON health_activity_minutes(record_ts);
+             CREATE INDEX IF NOT EXISTS idx_activity_min_ts ON health_activity_minutes(start_ts);
 
              -- Overlay session records (tags 83 and 84).
              --
@@ -121,8 +128,8 @@ impl HealthDb {
              --   u16 version
              --   u16 (unused)
              --   u16 session_type   1=sleep 2=deep_sleep 3=nap 4=deep_nap 5=walk 6=run
-             --   u32 utc_offset     seconds east of UTC
              --   u32 start_ts       unix timestamp
+             --   u32 utc_offset     seconds west of UTC (negative for east zones, signed i32 on wire)
              --   u32 duration_secs
              --   [walk/run extension, version >= 3, session_type 5 or 6, 8 extra bytes]
              --   u16 steps
@@ -163,13 +170,13 @@ impl HealthDb {
 
         conn.execute_batch(
             "CREATE VIEW v_sleep AS
-             SELECT s.id, s.start_ts, s.duration_secs, t.name AS type
+             SELECT s.id, s.start_ts, s.utc_offset, s.duration_secs, t.name AS type
              FROM health_activity_sessions s
              JOIN session_types t ON s.session_type = t.id
              WHERE s.session_type <= 4;
 
              CREATE VIEW v_workouts AS
-             SELECT s.id, s.start_ts, s.duration_secs, t.name AS type,
+             SELECT s.id, s.start_ts, s.utc_offset, s.duration_secs, t.name AS type,
                     s.steps, s.active_kcal, s.resting_kcal, s.distance_m
              FROM health_activity_sessions s
              JOIN session_types t ON s.session_type = t.id
@@ -245,16 +252,16 @@ impl HealthDb {
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR IGNORE INTO health_activity_minutes
-                 (health_record_id, record_version, record_ts, steps, orientation, vmc, light,
-                  flags, resting_gram_calories, active_gram_calories, distance_cm,
+                 (health_record_id, record_version, start_ts, utc_offset, steps, orientation,
+                  vmc, light, flags, resting_gram_calories, active_gram_calories, distance_cm,
                   heart_rate_bpm, heart_rate_weight, heart_rate_zone, raw)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?;
 
         for item in data.chunks_exact(item_size) {
             let record_version = u16::from_le_bytes([item[0], item[1]]);
             let mut ts = u32::from_le_bytes([item[2], item[3], item[4], item[5]]) as i64;
-            // item[6]: utc_offset in 15-min segments — not stored
+            let utc_offset = (item[6] as i8) as i64 * 900;
             let record_length = item[7] as usize;
             let record_num = item[8] as usize;
 
@@ -267,7 +274,7 @@ impl HealthDb {
 
             for i in 0..count {
                 let rec = &sub_data[i * record_length..(i + 1) * record_length];
-                let record_ts = ts;
+                let start_ts = ts;
                 ts += 60;
 
                 // Minimum: steps(1) + orientation(1) + vmc(2) + light(1) = 5 bytes
@@ -331,7 +338,8 @@ impl HealthDb {
                 stmt.execute(params![
                     record_id,
                     record_version as i64,
-                    record_ts,
+                    start_ts,
+                    utc_offset,
                     steps,
                     orientation,
                     vmc,
@@ -390,7 +398,7 @@ impl HealthDb {
 
         let mut stmt = conn.prepare_cached(
             "INSERT OR IGNORE INTO health_activity_sessions
-                 (health_record_id, record_version, session_type, utc_offset, start_ts,
+                 (health_record_id, record_version, session_type, start_ts, utc_offset,
                   duration_secs, steps, active_kcal, resting_kcal, distance_m, raw)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
@@ -399,7 +407,7 @@ impl HealthDb {
             let version = u16::from_le_bytes([item[0], item[1]]);
             // item[2..4]: skip (u16)
             let session_type = u16::from_le_bytes([item[4], item[5]]);
-            let utc_offset = u32::from_le_bytes([item[6], item[7], item[8], item[9]]) as i64;
+            let utc_offset = u32::from_le_bytes([item[6], item[7], item[8], item[9]]) as i32 as i64;
             let start_ts = u32::from_le_bytes([item[10], item[11], item[12], item[13]]) as i64;
             let duration = u32::from_le_bytes([item[14], item[15], item[16], item[17]]) as i64;
 
@@ -420,8 +428,8 @@ impl HealthDb {
                 record_id,
                 version as i64,
                 session_type as i64,
-                utc_offset,
                 start_ts,
+                utc_offset,
                 duration,
                 steps,
                 active_kcal,
@@ -431,5 +439,53 @@ impl HealthDb {
             ])?;
         }
         Ok(())
+    }
+
+    /// Rebuild both derived tables from the raw blobs in `health_records`.
+    /// Use this to populate `utc_offset` for rows inserted before the column existed,
+    /// or to pick up any parser fix without re-syncing from the watch.
+    pub fn reprocess(&self) -> anyhow::Result<()> {
+        // Load raw records before opening the write transaction.
+        let steps_records   = Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_STEPS as i64)?;
+        let sleep_records   = Self::load_raw_records(&self.conn, datalog_tag::SLEEP as i64)?;
+        let session_records = Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_SESSIONS as i64)?;
+
+        // Rebuild both tables atomically: a failure mid-loop leaves neither table
+        // partially cleared.
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> anyhow::Result<()> {
+            self.conn.execute("DELETE FROM health_activity_minutes", [])?;
+            for rec in &steps_records {
+                self.insert_activity_minutes(rec.id, &rec.data, rec.item_size)?;
+            }
+            self.conn.execute("DELETE FROM health_activity_sessions", [])?;
+            for rec in sleep_records.iter().chain(&session_records) {
+                Self::do_insert_activity_sessions(&self.conn, rec.id, &rec.data, rec.item_size)?;
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn load_raw_records(conn: &Connection, tag: i64) -> anyhow::Result<Vec<RawRecord>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, data, item_size FROM health_records WHERE tag = ?1 ORDER BY id ASC",
+        )?;
+        let rows: Vec<RawRecord> = stmt
+            .query_map(params![tag], |r| {
+                Ok(RawRecord {
+                    id:        r.get(0)?,
+                    data:      r.get(1)?,
+                    item_size: r.get::<_, i64>(2)? as usize,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 }

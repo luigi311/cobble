@@ -10,10 +10,11 @@ use tracing::{debug, info, warn};
 
 use crate::service::{DaemonEvent, PebbleDaemon};
 
-pub async fn run_supervisor(daemon: PebbleDaemon, address: String, adapter: String) {
+pub async fn run_supervisor(daemon: PebbleDaemon) {
     let mut backoff = 2.0f64;
 
     while !daemon.is_stopping() {
+        let (address, adapter) = daemon.current_connection_params();
         info!("connecting to watch {address} ...");
         let pebble = Arc::new(Pebble::new(&address, &adapter));
 
@@ -40,6 +41,16 @@ pub async fn run_supervisor(daemon: PebbleDaemon, address: String, adapter: Stri
 
         match pebble.connect().await {
             Ok(()) => {
+                // Verify the config hasn't changed while connect() was in flight.
+                // If it has, discard this connection and retry immediately with the
+                // new params rather than calling set_connected with a stale handle.
+                let (cur_addr, cur_adapter) = daemon.current_connection_params();
+                if cur_addr != address || cur_adapter != adapter {
+                    let _ = pebble.disconnect().await;
+                    backoff = 2.0;
+                    continue;
+                }
+
                 backoff = 2.0;
                 daemon.set_connected(Arc::clone(&pebble));
                 info!("watch connected; daemon ready");

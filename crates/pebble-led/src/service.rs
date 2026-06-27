@@ -17,6 +17,7 @@
 //!     ActivateHealth(q height_cm, q weight_kg, y age, y gender, b hrm_enabled)
 //!     FetchHealthData()
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
+//!     ReprocessHealthData()
 //!
 //!   Signals
 //!     AppMessageReceived(s uuid, a{i(sv)} data)
@@ -29,6 +30,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -79,6 +81,7 @@ pub enum DaemonEvent {
 struct DaemonState {
     address: String,
     adapter: String,
+    config_path: PathBuf,
     pebble: Option<Arc<Pebble>>,
     connected: bool,
     stopping: bool,
@@ -87,6 +90,7 @@ struct DaemonState {
     // not be forwarded to the watch.
     notify_blocklist: Vec<String>,
     event_tx: mpsc::UnboundedSender<DaemonEvent>,
+    db: Option<Arc<Mutex<HealthDb>>>,
 }
 
 #[derive(Clone)]
@@ -95,18 +99,33 @@ pub struct PebbleDaemon {
 }
 
 impl PebbleDaemon {
-    pub fn new(address: String, adapter: String, event_tx: mpsc::UnboundedSender<DaemonEvent>) -> Self {
+
+    pub fn new(
+        address: String,
+        adapter: String,
+        config_path: PathBuf,
+        event_tx: mpsc::UnboundedSender<DaemonEvent>,
+        db: Option<Arc<Mutex<HealthDb>>>,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(DaemonState {
                 address,
                 adapter,
+                config_path,
                 pebble: None,
                 connected: false,
                 stopping: false,
                 notify_blocklist: vec!["".to_string()],
                 event_tx,
+                db,
             })),
         }
+    }
+
+    /// Returns the current (address, adapter) used by the supervisor on each reconnect.
+    pub fn current_connection_params(&self) -> (String, String) {
+        let s = self.state.lock().unwrap();
+        (s.address.clone(), s.adapter.clone())
     }
 
     pub(crate) fn event_tx(&self) -> mpsc::UnboundedSender<DaemonEvent> {
@@ -318,6 +337,47 @@ impl PebbleDaemon {
             .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
+    /// Rebuild health_activity_minutes and health_activity_sessions from the raw
+    /// blobs in health_records. Call this after a schema change or to backfill
+    /// utc_offset for rows that were stored before the column existed.
+    async fn reprocess_health_data(&self) -> Result<(), DaemonError> {
+        let db = self.state.lock().unwrap().db.clone();
+        let db = db.ok_or_else(|| DaemonError::Failed("health database not available".into()))?;
+        tokio::task::spawn_blocking(move || db.lock().unwrap().reprocess())
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))?
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Re-read the config file from disk and apply changes.
+    /// If address or adapter changed, disconnects the current session so the
+    /// supervisor reconnects with the new parameters on the next cycle.
+    async fn reload_config(&self) -> Result<(), DaemonError> {
+        let config_path = self.state.lock().unwrap().config_path.clone();
+
+        let new_cfg = crate::config::load(&config_path)
+            .map_err(|e| DaemonError::Failed(e.to_string()))?;
+
+        // Read state.pebble in the same lock scope as the config update so
+        // we always disconnect the handle that was live when the new params
+        // were applied — no window for the supervisor to slip in a new
+        // connection that we'd then miss.
+        let pebble_to_disconnect = {
+            let mut state = self.state.lock().unwrap();
+            let changed =
+                state.address != new_cfg.address || state.adapter != new_cfg.adapter;
+            state.address = new_cfg.address;
+            state.adapter = new_cfg.adapter;
+            if changed { state.pebble.clone() } else { None }
+        };
+
+        if let Some(pebble) = pebble_to_disconnect {
+            let _ = pebble.disconnect().await;
+        }
+
+        Ok(())
+    }
+
     // ---- Signals ----
 
     #[zbus(signal)]
@@ -369,7 +429,7 @@ pub async fn run_signal_emitter(
     conn: Connection,
     _daemon: PebbleDaemon,
     mut event_rx: mpsc::UnboundedReceiver<DaemonEvent>,
-    health_db: Option<HealthDb>,
+    health_db: Option<Arc<Mutex<HealthDb>>>,
 ) {
     while let Some(event) = event_rx.recv().await {
         let iface_result = conn
@@ -401,8 +461,16 @@ pub async fn run_signal_emitter(
             }
             DaemonEvent::HealthData(batch) => {
                 if let Some(db) = &health_db {
-                    if let Err(e) = db.insert_batch(&batch) {
-                        warn!("health DB insert failed: {e}");
+                    let db = db.clone();
+                    let batch_for_db = batch.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        db.lock().unwrap().insert_batch(&batch_for_db)
+                    })
+                    .await
+                    {
+                        Ok(Err(e)) => warn!("health DB insert failed: {e}"),
+                        Err(e) => warn!("health DB task panicked: {e}"),
+                        Ok(Ok(())) => {}
                     }
                 }
                 let _ = PebbleDaemon::health_data_received(
