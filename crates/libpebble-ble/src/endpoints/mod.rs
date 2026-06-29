@@ -13,6 +13,7 @@ pub mod health;
 pub mod phone_version;
 pub mod ping;
 pub mod reset;
+pub mod screenshot;
 pub mod system;
 pub mod time;
 pub mod watch_pref;
@@ -44,6 +45,7 @@ pub enum Endpoint {
     /// Watch-initiated logging sessions (health, analytics). Sessions are opened,
     /// data is streamed, then closed. We ACK each message.
     DataLog = 6778, // 0x1A7A — not 0x6778 (26488)
+    Screenshot = 8000,
 }
 
 impl Endpoint {
@@ -63,6 +65,7 @@ impl Endpoint {
             5001 => Some(Self::FactoryRegistry),
             6001 => Some(Self::AppFetch),
             6778 => Some(Self::DataLog),
+            8000 => Some(Self::Screenshot),
             _ => None,
         }
     }

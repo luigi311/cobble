@@ -59,6 +59,8 @@ crates/libpebble-ble/src/
                        registry / watch color (5001): firmware version, board,
                        serial, platform, capabilities, color.
     reset.rs           Reboot / recovery / factory reset / core dump (2003).
+    screenshot.rs      Capture + decode the watch framebuffer (8000): 1-bit B/W
+                       or 8-bit Pebble color -> RGBA.
     time.rs            UTC clock sync (endpoint 11).
 
   error.rs             PebbleError.
@@ -210,6 +212,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `GetWatchSettings` | `() → a{sv}` | general watch settings (backlight, clock, vibration, quiet time, …) |
 | Method | `GetWatchVersion` | `() → a{sv}` | firmware version, board, serial, BT address, language, capabilities, platform |
 | Method | `GetWatchColor` | `() → a{sv}` | watch color/variant (protocol\_number, js\_name, description, watch\_type, supports\_hrm) |
+| Method | `Screenshot` | `() → ay` | capture the watch screen as PNG bytes |
 | Method | `RebootWatch` | `()` | reboot the watch |
 | Method | `ResetIntoRecovery` | `()` | reboot into recovery (PRF) firmware |
 | Method | `CreateCoreDump` | `()` | trigger a watch core dump |
@@ -259,6 +262,7 @@ consume raw records without reading the database directly.
   - [x] General settings read (backlight, clock, vibration, quiet time, …)
 - [x] Watch info (firmware version, board, serial, BT address, capabilities, platform, color)
 - [x] Battery level (read + change notifications)
+- [x] Screenshot (capture watch screen as PNG)
 - [x] Device management (reboot, recovery, factory reset, core dump, forget/unpair)
 - [ ] Music
   - [ ] Playing status
@@ -276,7 +280,7 @@ consume raw records without reading the database directly.
 - [x] AppMessages
   - [x] External applications
 - [x] Health (data sync + profile/settings read)
-- [x] Watch info + device management (version, color, battery, reboot/reset/forget)
+- [x] Watch info + device management (version, color, battery, screenshot, reboot/reset/forget)
 - [ ] Music
 - [x] Weather
 

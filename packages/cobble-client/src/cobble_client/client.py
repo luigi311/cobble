@@ -346,6 +346,15 @@ class CobbleClient:
             raise self._translate(e) from e
         return {k: _unwrap(v) for k, v in raw.items()}
 
+    async def screenshot(self) -> bytes:
+        """Capture the watch screen and return it as PNG bytes."""
+        self._require_iface()
+        try:
+            data = await self._iface.call_screenshot()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return bytes(data)
+
     async def reboot_watch(self) -> None:
         """Reboot the watch. It drops the link and the daemon reconnects."""
         self._require_iface()

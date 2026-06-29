@@ -49,6 +49,10 @@ use crate::{
         phone_version::build_phone_version_response,
         ping::{build_pong, parse_ping},
         reset::{build_reset, ResetCommand},
+        screenshot::{
+            build_screenshot_request, decode_to_rgba, parse_screenshot_header,
+            ScreenshotResponseCode, ScreenshotVersion,
+        },
         system::{
             build_watch_color_request, build_watch_version_request, parse_factory_data_response,
             parse_watch_color, parse_watch_version_response, system_message_type, WatchColorInfo,
@@ -82,6 +86,32 @@ pub type BatteryHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
 /// Handler called when an app opens/closes on the watch: `(app_uuid, running)`.
 pub type AppRunStateHandler = Arc<dyn Fn(String, bool) + Send + Sync + 'static>;
 
+/// A decoded watch screenshot: RGBA8888 pixels, row-major (`width*height*4` bytes).
+#[derive(Debug, Clone)]
+pub struct Screenshot {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// Raw framebuffer handed from the dispatch to the awaiting `take_screenshot`.
+struct RawScreenshot {
+    version: ScreenshotVersion,
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+/// In-flight screenshot reassembly state (header, then accumulating data).
+struct ScreenshotAccumulator {
+    version: Option<ScreenshotVersion>,
+    width: u32,
+    height: u32,
+    expected: usize,
+    buffer: Vec<u8>,
+    done: oneshot::Sender<Result<RawScreenshot, String>>,
+}
+
 struct PebbleInner {
     app_message_handlers: Vec<AppMessageHandler>,
     ack_handlers: Vec<AckHandler>,
@@ -92,6 +122,8 @@ struct PebbleInner {
     /// Latest watch battery percentage (0–100); `None` until first read.
     battery_level: Option<u8>,
     app_run_state_handlers: Vec<AppRunStateHandler>,
+    /// In-flight screenshot reassembly, if a `take_screenshot` is awaiting.
+    screenshot: Option<ScreenshotAccumulator>,
     /// transaction_id → future resolved when watch ACK/NACKs it
     pending: HashMap<u8, oneshot::Sender<bool>>,
     /// BlobDB2 token → future resolved when watch sends the matching response
@@ -122,6 +154,7 @@ impl PebbleInner {
             battery_handlers: Vec::new(),
             battery_level: None,
             app_run_state_handlers: Vec::new(),
+            screenshot: None,
             pending: HashMap::new(),
             blobdb2_pending: HashMap::new(),
             watch_version_pending: Vec::new(),
@@ -715,6 +748,46 @@ impl Pebble {
         result
     }
 
+    /// Capture the watch screen (endpoint 8000). Returns a decoded RGBA image.
+    /// Times out after 30s; errors if a capture is already in progress or the
+    /// watch reports a non-OK response code.
+    pub async fn take_screenshot(&self) -> Result<Screenshot, PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let (tx, rx) = oneshot::channel::<Result<RawScreenshot, String>>();
+        {
+            let mut guard = self.inner.lock().unwrap();
+            if guard.screenshot.is_some() {
+                return Err(PebbleError::Other("a screenshot is already in progress".into()));
+            }
+            guard.screenshot = Some(ScreenshotAccumulator {
+                version: None,
+                width: 0,
+                height: 0,
+                expected: 0,
+                buffer: Vec::new(),
+                done: tx,
+            });
+        }
+        if let Err(e) = self.send_pebble(Endpoint::Screenshot, &build_screenshot_request()) {
+            self.inner.lock().unwrap().screenshot = None;
+            return Err(e);
+        }
+        let result = timeout(Duration::from_secs(30), rx).await;
+        // Drop the accumulator if it's still pending (timeout/error).
+        self.inner.lock().unwrap().screenshot = None;
+        match result {
+            Ok(Ok(Ok(raw))) => Ok(Screenshot {
+                width: raw.width,
+                height: raw.height,
+                pixels: decode_to_rgba(raw.version, raw.width, raw.height, &raw.data),
+            }),
+            Ok(Ok(Err(e))) => Err(PebbleError::Other(e)),
+            _ => Err(PebbleError::Other("screenshot timed out".into())),
+        }
+    }
+
     /// Reboot the watch (endpoint 2003). The watch drops the BLE link; the
     /// supervisor will reconnect. Fire-and-forget (no reply).
     pub fn reboot_watch(&self) -> Result<(), PebbleError> {
@@ -1072,6 +1145,9 @@ fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
         Some(Endpoint::DataLog) => {
             on_datalog_message(payload.to_vec(), inner);
         }
+        Some(Endpoint::Screenshot) => {
+            on_screenshot_message(payload, inner);
+        }
         Some(Endpoint::HealthSync) => {
             debug!("health sync ACK from watch");
         }
@@ -1231,6 +1307,72 @@ fn resolve_pending(txn: u8, acked: bool, inner: &Arc<Mutex<PebbleInner>>) {
             debug!("ACK txn={txn} had no match; resolving oldest pending txn={oldest}");
             if let Some(sender) = guard.pending.remove(&oldest) {
                 let _ = sender.send(acked);
+            }
+        }
+    }
+}
+
+/// Accumulate one inbound screenshot message: the first carries the header,
+/// the rest are raw framebuffer bytes. Resolves the awaiting `take_screenshot`
+/// once the full buffer arrives or on an error response.
+fn on_screenshot_message(payload: &[u8], inner: &Arc<Mutex<PebbleInner>>) {
+    enum Step {
+        Continue,
+        Error(String),
+        Done,
+    }
+    let mut guard = inner.lock().unwrap();
+    let Some(acc) = guard.screenshot.as_mut() else {
+        return; // no screenshot in progress; ignore
+    };
+    let step = if acc.version.is_none() && acc.expected == 0 && acc.buffer.is_empty() {
+        // First message: parse the header.
+        match parse_screenshot_header(payload) {
+            Some((header, data)) => {
+                if header.response_code != ScreenshotResponseCode::Ok {
+                    Step::Error(format!("watch returned {:?}", header.response_code))
+                } else if let Some(version) = header.version {
+                    acc.version = Some(version);
+                    acc.width = header.width;
+                    acc.height = header.height;
+                    acc.expected =
+                        crate::endpoints::screenshot::expected_size(version, header.width, header.height);
+                    acc.buffer.extend_from_slice(data);
+                    if acc.expected > 0 && acc.buffer.len() >= acc.expected {
+                        Step::Done
+                    } else {
+                        Step::Continue
+                    }
+                } else {
+                    Step::Error("unknown screenshot version".into())
+                }
+            }
+            None => Step::Error("malformed screenshot header".into()),
+        }
+    } else {
+        acc.buffer.extend_from_slice(payload);
+        if acc.expected > 0 && acc.buffer.len() >= acc.expected {
+            Step::Done
+        } else {
+            Step::Continue
+        }
+    };
+    match step {
+        Step::Continue => {}
+        Step::Error(e) => {
+            if let Some(acc) = guard.screenshot.take() {
+                let _ = acc.done.send(Err(e));
+            }
+        }
+        Step::Done => {
+            if let Some(acc) = guard.screenshot.take() {
+                let raw = RawScreenshot {
+                    version: acc.version.expect("version set when done"),
+                    width: acc.width,
+                    height: acc.height,
+                    data: acc.buffer,
+                };
+                let _ = acc.done.send(Ok(raw));
             }
         }
     }
