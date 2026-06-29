@@ -18,6 +18,7 @@ pub use endpoints::health::{
     parse_units_distance, ActivityPreferences, HeartRatePreferences, HrMonitoringInterval,
     HrmPreferences,
 };
+pub use endpoints::watch_pref::{decode_watch_pref, WatchPrefType, WatchPrefValue};
 pub use endpoints::Endpoint;
 pub use error::PebbleError;
 pub use pebble::{AckHandler, AppMessageHandler, HealthDataHandler, NackHandler, Pebble, WatchPrefHandler};

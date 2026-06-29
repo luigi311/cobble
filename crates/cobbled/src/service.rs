@@ -18,6 +18,7 @@
 //!     FetchHealthData()
 //!     FetchHealthParams()
 //!     GetHealthProfile() -> (q height_cm, q weight_kg, q age, q gender, b tracking, b activity_insights, b sleep_insights, b hrm_enabled, y hrm_interval, b hrm_activity_tracking, q resting_hr, q elevated_hr, q max_hr, q hr_zone1, q hr_zone2, q hr_zone3, b imperial_units)
+//!     GetWatchSettings() -> a{sv}  general watch settings (db 12), key -> bool/uint32/string
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
 //!     ReprocessHealthData()
 //!
@@ -28,6 +29,7 @@
 //!     ConnectionChanged(b connected)
 //!     HealthDataReceived(u tag, ay app_uuid, u session_timestamp, u items_left, u crc, y item_type, q item_size, ay data)
 //!     HealthProfileReceived((qqqqbbbbybqqqqqqb) profile)
+//!     WatchSettingReceived(s key, v value)
 //!
 //! AppMessage values cross the D-Bus hop as (tag, payload) pairs; see codec.rs.
 
@@ -39,7 +41,7 @@ use std::{
 
 use libpebble_ble::{
     ActivityPreferences, AppMessageValue, DatalogData, HeartRatePreferences, HrmPreferences,
-    Pebble, WeatherType,
+    Pebble, WatchPrefValue, WeatherType,
 };
 
 use crate::db::HealthDb;
@@ -48,6 +50,7 @@ use tracing::{debug, warn};
 use zbus::{
     interface,
     object_server::SignalEmitter,
+    zvariant::{OwnedValue, Value},
     Connection,
 };
 
@@ -86,6 +89,18 @@ pub enum DaemonEvent {
     HealthHeartRate(HeartRatePreferences),
     /// Decoded "unitsDistance" flag from the watch (true = imperial).
     HealthUnits(bool),
+    /// A decoded general watch setting (BlobDB WatchPrefs, db 12).
+    WatchSetting { key: String, value: WatchPrefValue },
+}
+
+/// Convert a decoded watch-pref value into a D-Bus variant for `a{sv}`.
+fn watch_pref_owned_value(v: &WatchPrefValue) -> OwnedValue {
+    let value = match v {
+        WatchPrefValue::Bool(b) => Value::from(*b),
+        WatchPrefValue::Number(n) => Value::from(*n),
+        WatchPrefValue::Text(s) => Value::from(s.clone()),
+    };
+    OwnedValue::try_from(value).expect("primitive value converts to OwnedValue")
 }
 
 /// The watch-side health profile, as synced back over BlobDB2 (WatchPrefs).
@@ -142,6 +157,8 @@ struct DaemonState {
     heart_rate_prefs: Option<HeartRatePreferences>,
     /// Last "unitsDistance" flag the watch synced; true = imperial (None until first sync).
     imperial_units: Option<bool>,
+    /// General watch settings (BlobDB WatchPrefs db 12) decoded so far, keyed by name.
+    watch_settings: HashMap<String, WatchPrefValue>,
 }
 
 #[derive(Clone)]
@@ -173,6 +190,7 @@ impl CobbleDaemon {
                 hrm_prefs: None,
                 heart_rate_prefs: None,
                 imperial_units: None,
+                watch_settings: HashMap::new(),
             })),
         }
     }
@@ -233,6 +251,11 @@ impl CobbleDaemon {
         let mut s = self.state.lock().unwrap();
         s.imperial_units = Some(imperial);
         Self::merged_profile(&s)
+    }
+
+    /// Cache a decoded general watch setting (db 12).
+    pub(crate) fn cache_watch_setting(&self, key: String, value: WatchPrefValue) {
+        self.state.lock().unwrap().watch_settings.insert(key, value);
     }
 
     fn merged_profile(s: &DaemonState) -> Option<HealthProfile> {
@@ -426,6 +449,19 @@ impl CobbleDaemon {
             .ok_or_else(|| DaemonError::Failed("no health profile synced yet".into()))
     }
 
+    /// Return all general watch settings (BlobDB WatchPrefs, db 12) decoded so
+    /// far, as a map of key -> variant (bool / uint32 / string). Empty until the
+    /// watch syncs settings on connect. See `WatchSettingReceived` for updates.
+    fn get_watch_settings(&self) -> HashMap<String, OwnedValue> {
+        self.state
+            .lock()
+            .unwrap()
+            .watch_settings
+            .iter()
+            .map(|(k, v)| (k.clone(), watch_pref_owned_value(v)))
+            .collect()
+    }
+
     /// Push weather data to the Pebble built-in weather app.
     ///
     /// `location_key` must be exactly 16 bytes (a UUID); re-use the same bytes to update
@@ -561,6 +597,15 @@ impl CobbleDaemon {
         signal_emitter: &SignalEmitter<'_>,
         profile: HealthProfile,
     ) -> zbus::Result<()>;
+
+    /// Emitted for each general watch setting (db 12) as the watch syncs it.
+    /// `value` is a variant: bool, uint32, or string depending on the key.
+    #[zbus(signal)]
+    pub async fn watch_setting_received(
+        signal_emitter: &SignalEmitter<'_>,
+        key: &str,
+        value: OwnedValue,
+    ) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +693,11 @@ pub async fn run_signal_emitter(
                 if let Some(profile) = daemon.cache_units(imperial) {
                     let _ = CobbleDaemon::health_profile_received(emitter, profile).await;
                 }
+            }
+            DaemonEvent::WatchSetting { key, value } => {
+                let variant = watch_pref_owned_value(&value);
+                daemon.cache_watch_setting(key.clone(), value);
+                let _ = CobbleDaemon::watch_setting_received(emitter, &key, variant).await;
             }
         }
     }

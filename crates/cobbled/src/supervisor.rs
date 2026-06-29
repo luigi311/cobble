@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use libpebble_ble::{
-    parse_activity_preferences, parse_heart_rate_preferences, parse_hrm_preferences,
-    parse_units_distance, HealthDataHandler, Pebble, WatchPrefHandler,
+    decode_watch_pref, parse_activity_preferences, parse_heart_rate_preferences,
+    parse_hrm_preferences, parse_units_distance, HealthDataHandler, Pebble, WatchPrefHandler,
 };
 use tracing::{debug, info, warn};
 
@@ -86,7 +86,20 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                             let _ = tx.send(DaemonEvent::HealthUnits(imperial));
                         }
                     }
-                    other => debug!("watch pref push db={db} key={other:?} ({} bytes)", value.len()),
+                    // General watch settings (backlight, clock, vibration, quiet time, …).
+                    other => match decode_watch_pref(other, &value) {
+                        Some(decoded) => {
+                            debug!("watch setting {other:?} = {decoded:?}");
+                            let _ = tx.send(DaemonEvent::WatchSetting {
+                                key: other.to_string(),
+                                value: decoded,
+                            });
+                        }
+                        None => debug!(
+                            "watch pref push db={db} key={other:?} ({} bytes) — no decoder",
+                            value.len()
+                        ),
+                    },
                 }
             }) as WatchPrefHandler);
         }
