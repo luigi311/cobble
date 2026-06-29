@@ -410,6 +410,8 @@ class CobbleClient:
 
     async def set_music_volume(self, volume_percent: int) -> None:
         """Push the current volume (0-100) to the watch."""
+        if not 0 <= volume_percent <= 100:
+            raise ValueError(f"volume_percent must be 0-100, got {volume_percent}")
         self._require_iface()
         try:
             await self._iface.call_set_music_volume(volume_percent)

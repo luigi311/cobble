@@ -289,7 +289,7 @@ consume raw records without reading the database directly.
   - [x] External applications
 - [x] Health (data sync + profile/settings read)
 - [x] Watch info + device management (version, color, battery, screenshot, reboot/reset/forget)
-- [ ] Music (push now-playing to watch; surfaces watch control actions — not acted on yet)
+- [x] Music push (SetMusicPlayerInfo / SetMusicTrack / SetMusicPlaybackState / SetMusicVolume; replays now-playing on the watch's GetCurrentTrack; surfaces watch control actions — not acted on yet)
 - [x] Weather
 
 Every libpebble-ble capability is exposed over D-Bus and supported by the

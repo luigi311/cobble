@@ -105,8 +105,12 @@ impl MusicAction {
 
 /// Parse an inbound music-control message into the action the watch requested.
 /// Returns `None` for the phone→watch `Update*` commands or unknown bytes.
+/// Inbound commands are exactly one byte; anything longer is rejected.
 pub fn parse_music_command(payload: &[u8]) -> Option<MusicAction> {
-    Some(match *payload.first()? {
+    if payload.len() != 1 {
+        return None;
+    }
+    Some(match payload[0] {
         0x01 => MusicAction::PlayPause,
         0x02 => MusicAction::Pause,
         0x03 => MusicAction::Play,
@@ -237,6 +241,7 @@ mod tests {
         assert_eq!(parse_music_command(&[0x08]), Some(MusicAction::GetCurrentTrack));
         assert_eq!(parse_music_command(&[0x10]), None); // an Update* command
         assert_eq!(parse_music_command(&[]), None);
+        assert_eq!(parse_music_command(&[0x03, 0x00]), None); // trailing bytes rejected
         assert_eq!(MusicAction::PreviousTrack.as_str(), "previous_track");
     }
 

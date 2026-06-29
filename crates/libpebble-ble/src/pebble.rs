@@ -864,7 +864,7 @@ impl Pebble {
 
     /// Tell the watch which media app is playing.
     pub async fn update_music_player_info(&self, pkg: &str, name: &str) -> Result<(), PebbleError> {
-        debug!("music: player info pkg={pkg:?} name={name:?}");
+        debug!("music: updating player info");
         self.send_pebble(Endpoint::MusicControl, &build_update_player_info(pkg, name))
     }
 
@@ -879,7 +879,7 @@ impl Pebble {
         track_count: Option<u32>,
         current_track: Option<u32>,
     ) -> Result<(), PebbleError> {
-        debug!("music: track artist={artist:?} album={album:?} title={title:?}");
+        debug!("music: updating current track");
         self.send_pebble(
             Endpoint::MusicControl,
             &build_update_current_track(
@@ -911,6 +911,11 @@ impl Pebble {
 
     /// Push the current volume (0–100).
     pub async fn update_music_volume(&self, volume_percent: u8) -> Result<(), PebbleError> {
+        if volume_percent > 100 {
+            return Err(PebbleError::Other(format!(
+                "music volume {volume_percent} out of range (0-100)"
+            )));
+        }
         debug!("music: volume={volume_percent}");
         self.send_pebble(Endpoint::MusicControl, &build_update_volume(volume_percent))
     }

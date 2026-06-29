@@ -401,10 +401,6 @@ impl CobbleDaemon {
         self.state.lock().unwrap().watch_settings.insert(key, value);
     }
 
-    /// Cache a battery level, but only while connected and only if it changed.
-    /// Returns true when the cache was updated (caller should emit a signal).
-    /// Dropping events while disconnected preserves the "-1 = unknown" contract
-    /// against late notifications from a torn-down session.
     /// Re-send the last pushed music state to the watch — used to answer the
     /// watch's GetCurrentTrack request (e.g. when its music app opens).
     pub(crate) async fn replay_music_state(&self) {
@@ -443,6 +439,10 @@ impl CobbleDaemon {
         }
     }
 
+    /// Cache a battery level, but only while connected and only if it changed.
+    /// Returns true when the cache was updated (caller should emit a signal).
+    /// Dropping events while disconnected preserves the "-1 = unknown" contract
+    /// against late notifications from a torn-down session.
     pub(crate) fn set_battery_level(&self, level: u8) -> bool {
         let mut state = self.state.lock().unwrap();
         if !state.connected || state.battery_level == Some(level) {
@@ -782,6 +782,11 @@ impl CobbleDaemon {
 
     /// Push the current volume (0–100).
     async fn set_music_volume(&self, volume_percent: u8) -> Result<(), DaemonError> {
+        if volume_percent > 100 {
+            return Err(DaemonError::Failed(format!(
+                "volume {volume_percent} out of range (0-100)"
+            )));
+        }
         let pebble = self.require_pebble()?;
         pebble
             .update_music_volume(volume_percent)
@@ -992,7 +997,9 @@ impl CobbleDaemon {
 
     /// Emitted when the watch sends a media-control action. `action` is one of
     /// play, pause, play_pause, next_track, previous_track, volume_up,
-    /// volume_down, get_current_track. The daemon does not act on these yet.
+    /// volume_down, get_current_track. The transport actions (play/pause/next/…)
+    /// are surfaced but not acted on yet; `get_current_track` is handled by
+    /// replaying the cached music state to the watch.
     #[zbus(signal)]
     pub async fn music_action_received(
         signal_emitter: &SignalEmitter<'_>,
