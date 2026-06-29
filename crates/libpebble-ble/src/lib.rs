@@ -19,6 +19,7 @@ pub use endpoints::health::{
     HrmPreferences,
 };
 pub use endpoints::reset::ResetCommand;
+pub use endpoints::screenshot::ScreenshotVersion;
 pub use endpoints::system::{
     hardware_platform, watch_color, FirmwareVersion, WatchColorInfo, WatchFirmwareVersion,
     WatchType, WatchVersionInfo,
@@ -28,5 +29,5 @@ pub use endpoints::Endpoint;
 pub use error::PebbleError;
 pub use pebble::{
     AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
-    NackHandler, Pebble, WatchPrefHandler,
+    NackHandler, Pebble, Screenshot, WatchPrefHandler,
 };

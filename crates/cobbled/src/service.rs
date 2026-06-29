@@ -22,6 +22,7 @@
 //!     GetWatchSettings() -> a{sv}  general watch settings (db 12), key -> bool/uint32/string
 //!     GetWatchVersion() -> a{sv}  firmware/board/serial/BT/language/capabilities/platform
 //!     GetWatchColor() -> a{sv}  watch color/variant (protocol_number, js_name, description, watch_type, supports_hrm)
+//!     Screenshot() -> ay  capture the watch screen as PNG bytes
 //!     RebootWatch()
 //!     ResetIntoRecovery()
 //!     CreateCoreDump()
@@ -158,6 +159,23 @@ fn watch_version_to_map(info: &WatchVersionInfo) -> HashMap<String, OwnedValue> 
         m.insert("javascript_version".into(), dbus_val(v));
     }
     m
+}
+
+/// Encode RGBA8888 pixels as a PNG.
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, DaemonError> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| DaemonError::Failed(format!("png header: {e}")))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| DaemonError::Failed(format!("png data: {e}")))?;
+    }
+    Ok(out)
 }
 
 /// Render watch color info as a self-describing `a{sv}` map.
@@ -621,6 +639,16 @@ impl CobbleDaemon {
             Some(color) => Ok(watch_color_to_map(color)),
             None => Err(DaemonError::Failed("watch reported an unknown color".into())),
         }
+    }
+
+    /// Capture the watch screen and return it as PNG bytes.
+    async fn screenshot(&self) -> Result<Vec<u8>, DaemonError> {
+        let pebble = self.require_pebble()?;
+        let shot = pebble
+            .take_screenshot()
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))?;
+        encode_png(shot.width, shot.height, &shot.pixels)
     }
 
     /// Reboot the watch. It drops the link and the daemon reconnects.
