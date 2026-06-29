@@ -577,6 +577,10 @@ impl Pebble {
         let _ = self.connected_tx.send(false);
         let mut inner = self.inner.lock().unwrap();
         inner.gatt_server = None;
+        // Fail any in-flight watch-info requests immediately instead of leaving
+        // their callers pending until the per-request timeout fires.
+        inner.watch_version_pending.clear();
+        inner.watch_color_pending.clear();
     }
 
     pub async fn forget(&self) -> Result<(), PebbleError> {
@@ -600,14 +604,20 @@ impl Pebble {
         }
         let (tx, rx) = oneshot::channel::<WatchVersionInfo>();
         self.inner.lock().unwrap().watch_version_pending.push(tx);
-        if let Err(e) = self.send_pebble(Endpoint::WatchVersion, &build_watch_version_request()) {
-            self.inner.lock().unwrap().watch_version_pending.clear();
-            return Err(e);
-        }
-        match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(info)) => Ok(info),
-            _ => Err(PebbleError::Other("watch version request timed out".into())),
-        }
+        let result = match self.send_pebble(Endpoint::WatchVersion, &build_watch_version_request()) {
+            Err(e) => {
+                drop(rx); // cancel our waiter
+                Err(e)
+            }
+            Ok(()) => match timeout(Duration::from_secs(10), rx).await {
+                Ok(Ok(info)) => Ok(info),
+                _ => Err(PebbleError::Other("watch version request timed out".into())),
+            },
+        };
+        // Drop our now-cancelled waiter (and any other dead ones); live waiters
+        // from concurrent requests are kept.
+        self.inner.lock().unwrap().watch_version_pending.retain(|s| !s.is_closed());
+        result
     }
 
     /// Query the watch's manufacturing color/variant (factory registry, endpoint
@@ -620,14 +630,18 @@ impl Pebble {
         }
         let (tx, rx) = oneshot::channel::<Option<&'static WatchColorInfo>>();
         self.inner.lock().unwrap().watch_color_pending.push(tx);
-        if let Err(e) = self.send_pebble(Endpoint::FactoryRegistry, &build_watch_color_request()) {
-            self.inner.lock().unwrap().watch_color_pending.clear();
-            return Err(e);
-        }
-        match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(color)) => Ok(color),
-            _ => Err(PebbleError::Other("watch color request timed out".into())),
-        }
+        let result = match self.send_pebble(Endpoint::FactoryRegistry, &build_watch_color_request()) {
+            Err(e) => {
+                drop(rx); // cancel our waiter
+                Err(e)
+            }
+            Ok(()) => match timeout(Duration::from_secs(10), rx).await {
+                Ok(Ok(color)) => Ok(color),
+                _ => Err(PebbleError::Other("watch color request timed out".into())),
+            },
+        };
+        self.inner.lock().unwrap().watch_color_pending.retain(|s| !s.is_closed());
+        result
     }
 
     /// Reboot the watch (endpoint 2003). The watch drops the BLE link; the
@@ -931,7 +945,12 @@ fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
                             let _ = w.send(info.clone());
                         }
                     }
-                    None => warn!("WatchVersion: failed to parse response ({} bytes)", payload.len()),
+                    None => {
+                        warn!("WatchVersion: failed to parse response ({} bytes)", payload.len());
+                        // Fail waiters now rather than letting them time out on a
+                        // response we already know is malformed.
+                        inner.lock().unwrap().watch_version_pending.clear();
+                    }
                 }
             }
         }

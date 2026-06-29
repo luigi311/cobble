@@ -420,9 +420,13 @@ pub fn system_message_type(payload: &[u8]) -> Option<u8> {
     payload.get(1).copied()
 }
 
-/// Parse a `FirmwareUpdateStartResponse` (`[0x00][0x0a][status]`).
+/// Parse a `FirmwareUpdateStartResponse` (`[0x00][0x0a][status]`). The leading
+/// SystemMessage command byte is always 0x00.
 pub fn parse_firmware_update_start_response(payload: &[u8]) -> Option<FirmwareUpdateStartStatus> {
-    if payload.len() < 3 || payload[1] != system_message::FIRMWARE_UPDATE_START_RESPONSE {
+    if payload.len() < 3
+        || payload[0] != 0x00
+        || payload[1] != system_message::FIRMWARE_UPDATE_START_RESPONSE
+    {
         return None;
     }
     Some(FirmwareUpdateStartStatus::from_u8(payload[2]))
@@ -439,18 +443,20 @@ pub const FACTORY_DATA_ERROR: u8 = 0xff;
 
 /// Build a factory-registry read request for `key` (endpoint 5001).
 /// Wire: `[0x00][keyLen u8][key bytes]` (the key is an `SString`).
-pub fn build_factory_data_request(key: &str) -> Vec<u8> {
+/// Returns `None` if `key` is longer than 255 bytes (won't fit the length byte).
+pub fn build_factory_data_request(key: &str) -> Option<Vec<u8>> {
     let key_bytes = key.as_bytes();
+    let key_len = u8::try_from(key_bytes.len()).ok()?;
     let mut out = Vec::with_capacity(2 + key_bytes.len());
     out.push(FACTORY_DATA_REQUEST);
-    out.push(key_bytes.len() as u8);
+    out.push(key_len);
     out.extend_from_slice(key_bytes);
-    out
+    Some(out)
 }
 
 /// Build a request for the watch's manufacturing color ("mfg_color").
 pub fn build_watch_color_request() -> Vec<u8> {
-    build_factory_data_request("mfg_color")
+    build_factory_data_request("mfg_color").expect("mfg_color fits the length byte")
 }
 
 /// Parse a `WatchFactoryDataResponse` (`[0x01][len u8][value...]`) into the raw
@@ -506,7 +512,7 @@ const WATCH_COLORS: &[WatchColorInfo] = watch_colors![
     (5, "pebble_pink", "Pebble Classic - Pink", WatchType::Aplite, false),
     (6, "pebble_steel_silver", "Pebble Steel - Silver", WatchType::Aplite, false),
     (7, "pebble_steel_gunmetal", "Pebble Steel - Gunmetal", WatchType::Aplite, false),
-    (8, "pebble_fly_blue", "Pebble Classic - Fly BLue", WatchType::Aplite, false),
+    (8, "pebble_fly_blue", "Pebble Classic - Fly Blue", WatchType::Aplite, false),
     (9, "pebble_fresh_green", "Pebble Classic - Fresh Green", WatchType::Aplite, false),
     (10, "pebble_hot_pink", "Pebble Classic - Hot Pink", WatchType::Aplite, false),
     (11, "pebble_time_white", "Pebble Time - White", WatchType::Basalt, false),
@@ -766,6 +772,8 @@ mod tests {
             Some(FirmwareUpdateStartStatus::Started),
         );
         assert_eq!(system_message_type(&payload), Some(0x0a));
+        // Wrong message type, and wrong leading command byte, are both rejected.
         assert!(parse_firmware_update_start_response(&[0x00, 0x02, 0x01]).is_none());
+        assert!(parse_firmware_update_start_response(&[0x05, 0x0a, 0x01]).is_none());
     }
 }

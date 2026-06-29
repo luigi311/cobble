@@ -24,7 +24,7 @@
 //!     RebootWatch()
 //!     ResetIntoRecovery()
 //!     CreateCoreDump()
-//!     FactoryReset()  (DESTRUCTIVE)
+//!     FactoryReset(b confirm)  (DESTRUCTIVE; requires confirm=true)
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
 //!     ReprocessHealthData()
 //!
@@ -605,7 +605,15 @@ impl CobbleDaemon {
     }
 
     /// Factory-reset the watch. DESTRUCTIVE: wipes all watch data and unpairs.
-    async fn factory_reset(&self) -> Result<(), DaemonError> {
+    /// Requires `confirm = true` so an accidental/no-arg call can't wipe the watch.
+    async fn factory_reset(&self, confirm: bool) -> Result<(), DaemonError> {
+        if !confirm {
+            return Err(DaemonError::Failed(
+                "factory_reset is destructive (wipes the watch and unpairs it); \
+                 call with confirm=true to proceed"
+                    .into(),
+            ));
+        }
         let pebble = self.require_pebble()?;
         pebble.factory_reset().map_err(|e| DaemonError::Failed(e.to_string()))
     }

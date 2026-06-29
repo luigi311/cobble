@@ -351,11 +351,18 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
-    async def factory_reset(self) -> None:
-        """Factory-reset the watch. DESTRUCTIVE: wipes all data and unpairs."""
+    async def factory_reset(self, *, confirm: bool = False) -> None:
+        """Factory-reset the watch. DESTRUCTIVE: wipes all data and unpairs.
+
+        Pass ``confirm=True`` to proceed; otherwise raises (the daemon enforces
+        the same guard).
+        """
+        if not confirm:
+            msg = "factory_reset is destructive; pass confirm=True to proceed"
+            raise ValueError(msg)
         self._require_iface()
         try:
-            await self._iface.call_factory_reset()
+            await self._iface.call_factory_reset(confirm)
         except DBusError as e:
             raise self._translate(e) from e
 
