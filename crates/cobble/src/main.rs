@@ -64,10 +64,12 @@ fn main() -> anyhow::Result<()> {
     reload_sleep_strip(&window, &effective_db_path, 1, 0);
 
     // ── Background tokio runtime ─────────────────────────────────────────────
-    // No enter() guard: every task is spawned via rt.spawn / Handle::spawn, and
-    // holding the guard would put the main thread "in" the runtime when rt is
-    // dropped at the end of main.
+    // Enter the runtime context on the main thread. zbus (via cobble-client)
+    // needs an ambient Tokio runtime when it creates its connection/executor
+    // tasks; without this guard those code paths panic with "there is no reactor
+    // running". Load-bearing — do not remove.
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let _rt_guard = rt.enter();
 
     {
         let weak = window.as_weak();
