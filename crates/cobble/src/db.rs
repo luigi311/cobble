@@ -18,22 +18,33 @@ fn watch_offset() -> i64 {
     WATCH_OFFSET_SECS.load(Ordering::Relaxed)
 }
 
-/// Read the watch's current UTC offset from the most recent health record,
-/// falling back to UTC (0) when there's no data yet.
+/// Read the watch's current UTC offset from the most recent health record across
+/// both tables (whichever has the newer `start_ts`), falling back to UTC (0)
+/// when there's no data yet.
 pub fn watch_tz_offset(conn: &Connection) -> i64 {
-    conn.query_row(
-        "SELECT utc_offset FROM health_activity_minutes ORDER BY start_ts DESC LIMIT 1",
-        [],
-        |r| r.get::<_, i64>(0),
-    )
-    .or_else(|_| {
+    let latest = |table: &str| -> Option<(i64, i64)> {
         conn.query_row(
-            "SELECT utc_offset FROM health_activity_sessions ORDER BY start_ts DESC LIMIT 1",
+            &format!("SELECT start_ts, utc_offset FROM {table} ORDER BY start_ts DESC LIMIT 1"),
             [],
-            |r| r.get::<_, i64>(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-    })
-    .unwrap_or(0)
+        .ok()
+    };
+    match (
+        latest("health_activity_minutes"),
+        latest("health_activity_sessions"),
+    ) {
+        (Some((mt, mo)), Some((st, so))) => {
+            if mt >= st {
+                mo
+            } else {
+                so
+            }
+        }
+        (Some((_, mo)), None) => mo,
+        (None, Some((_, so))) => so,
+        (None, None) => 0,
+    }
 }
 
 /// Current date in the watch's timezone.
@@ -244,28 +255,44 @@ fn load_steps_by_date(
          WHERE start_ts >= ?1 AND start_ts <= ?2
          GROUP BY day ORDER BY day ASC",
     )?;
-    let rows: Vec<(String, i64)> = stmt
-        .query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let totals: std::collections::HashMap<String, i64> = stmt
+        .query_map(params![start, end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
 
-    let max_steps = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1);
+    // Backfill every day in the range so inactive days show as zero bars and
+    // the avg/day in compute_steps_summary divides by the full period length.
+    let start_date = DateTime::from_timestamp(start + watch_offset(), 0).map(|dt| dt.date_naive());
+    let end_date = DateTime::from_timestamp(end + watch_offset(), 0).map(|dt| dt.date_naive());
+    let mut days: Vec<(NaiveDate, i64)> = Vec::new();
+    if let (Some(start_date), Some(end_date)) = (start_date, end_date) {
+        let mut d = start_date;
+        loop {
+            let key = d.format("%Y-%m-%d").to_string();
+            days.push((d, totals.get(&key).copied().unwrap_or(0)));
+            if d >= end_date {
+                break;
+            }
+            match d.succ_opt() {
+                Some(next) => d = next,
+                None => break,
+            }
+        }
+    }
 
-    Ok(rows.into_iter().map(|(day_str, total)| {
-        let nd = day_str.parse::<NaiveDate>().ok();
-        let label = nd.map(|d| {
-            if month_fmt { d.format("%-d").to_string() } else { d.format("%a").to_string() }
-        }).unwrap_or_else(|| day_str.clone());
-        let (bar_start, bar_end) = nd
-            .map(|d| (local_ts(d, 0, 0, 0), local_ts(d, 23, 59, 59)))
-            .unwrap_or((0, 0));
+    let max_steps = days.iter().map(|(_, t)| *t).max().unwrap_or(1).max(1);
+
+    Ok(days.into_iter().map(|(d, total)| {
+        let label = if month_fmt { d.format("%-d").to_string() } else { d.format("%a").to_string() };
         DayStepsData {
             label,
             steps_label: format_number(total),
             steps_raw: total,
             fraction: total as f32 / max_steps as f32,
-            bar_start,
-            bar_end,
+            bar_start: local_ts(d, 0, 0, 0),
+            bar_end: local_ts(d, 23, 59, 59),
         }
     }).collect())
 }
@@ -304,7 +331,10 @@ pub fn load_sleep_bars(
                 SUM(CASE WHEN session_type IN (1, 3) THEN duration_secs ELSE 0 END) AS total_secs,
                 SUM(CASE WHEN session_type IN (2, 4) THEN duration_secs ELSE 0 END) AS deep_secs
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 AND start_ts <= ?2
+         -- Bucketing shifts by -12h (date(start_ts+utc_offset-43200)); shift the
+         -- UTC window by +12h to match, so a night's post-midnight sessions at a
+         -- range boundary aren't dropped.
+         WHERE start_ts >= ?1 + 43200 AND start_ts <= ?2 + 43200
            AND session_type <= 4
          GROUP BY night
          ORDER BY night ASC",
@@ -453,7 +483,10 @@ pub fn load_sleep_nights(
         "SELECT date(start_ts + utc_offset - 43200, 'unixepoch') AS night,
                 start_ts, utc_offset, duration_secs, session_type
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 AND start_ts <= ?2
+         -- Bucketing shifts by -12h (date(start_ts+utc_offset-43200)); shift the
+         -- UTC window by +12h to match, so a night's post-midnight sessions at a
+         -- range boundary aren't dropped.
+         WHERE start_ts >= ?1 + 43200 AND start_ts <= ?2 + 43200
            AND session_type <= 4
          ORDER BY night ASC, start_ts ASC",
     )?;

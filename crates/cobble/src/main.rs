@@ -64,8 +64,10 @@ fn main() -> anyhow::Result<()> {
     reload_sleep_strip(&window, &effective_db_path, 1, 0);
 
     // ── Background tokio runtime ─────────────────────────────────────────────
+    // No enter() guard: every task is spawned via rt.spawn / Handle::spawn, and
+    // holding the guard would put the main thread "in" the runtime when rt is
+    // dropped at the end of main.
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let _rt_guard = rt.enter();
 
     {
         let weak = window.as_weak();
@@ -332,7 +334,7 @@ fn main() -> anyhow::Result<()> {
 fn spawn_action<F, Fut>(rt: &tokio::runtime::Handle, weak: slint::Weak<AppWindow>, f: F)
 where
     F: FnOnce(CobbleClient) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = cobble_client::Result<()>> + Send,
+    Fut: std::future::Future<Output = cobble_client::Result<()>> + Send + 'static,
 {
     rt.spawn(async move {
         if let Err(e) = async { f(CobbleClient::new().await?).await }.await {

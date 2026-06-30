@@ -113,7 +113,8 @@ export component AppWindow inherits Window {
 
             // ── Device tab ───────────────────────────────────────────────────
             if active-tab == 0: Flickable {
-                VerticalLayout {
+                viewport-height: device-page.preferred-height;
+                device-page := VerticalLayout {
                     padding: 20px; spacing: 16px; alignment: start;
 
                     // Connection status
@@ -269,7 +270,8 @@ export component AppWindow inherits Window {
             // ── Settings tab ─────────────────────────────────────────────────
             // settings-page 0 = category menu, 1 = Config detail.
             if active-tab == 3 && root.settings-page == 0: Flickable {
-                VerticalLayout {
+                viewport-height: settings-menu.preferred-height;
+                settings-menu := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
 
                     // Daemon status
@@ -308,7 +310,8 @@ export component AppWindow inherits Window {
 
             // ── Settings ▸ Config ─────────────────────────────────────────────
             if active-tab == 3 && root.settings-page == 1: Flickable {
-                VerticalLayout {
+                viewport-height: config-page.preferred-height;
+                config-page := VerticalLayout {
                     padding: 20px; spacing: 16px; alignment: start;
 
                     // Back header
@@ -349,7 +352,8 @@ export component AppWindow inherits Window {
 
             // ── Settings ▸ Device Actions ─────────────────────────────────────
             if active-tab == 3 && root.settings-page == 2: Flickable {
-                VerticalLayout {
+                viewport-height: actions-page.preferred-height;
+                actions-page := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
 
                     // Back header

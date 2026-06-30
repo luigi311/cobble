@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub address: String,
@@ -12,6 +12,18 @@ pub struct Config {
     #[serde(default)]
     pub verbose: bool,
     pub db: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        // Match the serde defaults so Config::default() == deserializing "{}".
+        Self {
+            address: String::new(),
+            adapter: default_adapter(),
+            verbose: false,
+            db: None,
+        }
+    }
 }
 
 fn default_adapter() -> String {
