@@ -337,16 +337,26 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding: 8px; spacing: 10px;
                             Rectangle {
-                                width: 80px; border-radius: 6px; background: Palette.accent;
-                                Text { text: "Scan"; color: white; font-size: 14px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                                TouchArea { clicked => { root.scan-watches(); } }
+                                width: 80px; border-radius: 6px;
+                                background: root.daemon-running ? Palette.accent : Palette.muted;
+                                opacity: root.daemon-running ? 1.0 : 0.5;
+                                Text {
+                                    text: "Scan";
+                                    color: white;
+                                    font-size: 14px; font-weight: 600;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                if root.daemon-running: TouchArea { clicked => { root.scan-watches(); } }
                             }
                             Text {
-                                text: root.scan-in-progress ? "Scanning…"
+                                text: !root.daemon-running ? "Daemon offline"
+                                    : root.scan-in-progress ? "Scanning…"
                                     : (root.scan-results.length == 0 && root.cfg-address != "" ? root.cfg-address
                                     : root.scan-results.length == 0 ? "Tap Scan to find watches"
                                     : root.scan-results.length + " device(s) found");
-                                color: root.scan-in-progress ? Palette.orange : (root.cfg-address != "" && root.scan-results.length == 0 ? Palette.green : Palette.muted);
+                                color: !root.daemon-running ? Palette.red
+                                    : root.scan-in-progress ? Palette.orange
+                                    : (root.cfg-address != "" && root.scan-results.length == 0 ? Palette.green : Palette.muted);
                                 font-size: 13px; vertical-alignment: center;
                             }
                         }

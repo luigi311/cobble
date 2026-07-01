@@ -285,8 +285,17 @@ fn main() -> anyhow::Result<()> {
             }).ok();
             rt.spawn(async move {
                 let results = match CobbleClient::new().await {
-                    Ok(client) => client.scan(5.0).await.unwrap_or_default(),
-                    Err(_) => Vec::new(),
+                    Err(e) => {
+                        warn!("Scan: {e}");
+                        Vec::new()
+                    }
+                    Ok(client) => match client.scan(5.0).await {
+                        Err(e) => {
+                            warn!("Scan: {e}");
+                            Vec::new()
+                        }
+                        Ok(results) => results,
+                    },
                 };
                 slint::invoke_from_event_loop(move || {
                     if let Some(w) = weak_for_scan.upgrade() {
