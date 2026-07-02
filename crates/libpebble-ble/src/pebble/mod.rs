@@ -42,23 +42,23 @@ use crate::{
             BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
         },
         datalog::{
-            self, build_reply, build_report_sessions, DatalogData, DatalogSession,
+            self, build_reply, build_report_sessions, DatalogData,
             DATALOG_CLOSE, DATALOG_OPENSESSION, DATALOG_SENDDATA, DATALOG_TIMEOUT,
         },
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
         music::{
             build_update_current_track, build_update_play_state, build_update_player_info,
-            build_update_volume, parse_music_command, MusicAction, MusicPlaybackState,
+            build_update_volume, parse_music_command, MusicPlaybackState,
             MusicRepeat, MusicShuffle,
         },
         phone_version::build_phone_version_response,
-        phone_control::{parse_phone_action, PhoneAction,
+        phone_control::{parse_phone_action,
             build_incoming_call, build_missed_call, build_call_start, build_call_end},
         ping::{build_pong, parse_ping},
         reset::{build_reset, ResetCommand},
         screenshot::{
             build_screenshot_request, decode_to_rgba, parse_screenshot_header,
-            ScreenshotResponseCode, ScreenshotVersion,
+            ScreenshotResponseCode,
         },
         system::{
             build_watch_color_request, build_watch_version_request, parse_factory_data_response,
@@ -71,7 +71,7 @@ use crate::{
     error::PebbleError,
     transport::{
         agent::build_pairing_agent,
-        gatt_server::{start_gatt_server, PebbleGattServerHandle},
+        gatt_server::start_gatt_server,
     },
     uuids::{
         BATTERY_LEVEL_CHARACTERISTIC, CONNECTION_PARAMS_CHARACTERISTIC,
@@ -79,114 +79,15 @@ use crate::{
     },
 };
 
-pub type AppMessageHandler =
-    Arc<dyn Fn(String, HashMap<u32, AppMessageValue>) + Send + Sync + 'static>;
-pub type AckHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
-pub type NackHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
-pub type HealthDataHandler = Arc<dyn Fn(DatalogData) + Send + Sync + 'static>;
-/// Handler for records the watch pushes back over BlobDB2 (Write/WriteBack).
-/// Arguments: `(db_id, key, value)` — `db_id` matches `BlobDBId` (e.g. 7 =
-/// HealthParams, 12 = WatchPrefs) so a single handler can route by database.
-pub type WatchPrefHandler = Arc<dyn Fn(u8, String, Vec<u8>) + Send + Sync + 'static>;
-/// Handler called with the watch battery percentage (0–100) when it changes.
-pub type BatteryHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
-/// Handler called when an app opens/closes on the watch: `(app_uuid, running)`.
-pub type AppRunStateHandler = Arc<dyn Fn(String, bool) + Send + Sync + 'static>;
-/// Handler called with a media-control action the watch sent (play/pause/next/…).
-pub type MusicActionHandler = Arc<dyn Fn(MusicAction) + Send + Sync + 'static>;
-/// Handler called when the watch sends a phone control action (answer/hangup).
-pub type PhoneActionHandler = Arc<dyn Fn(PhoneAction) + Send + Sync + 'static>;
-
-/// A decoded watch screenshot: RGBA8888 pixels, row-major (`width*height*4` bytes).
-#[derive(Debug, Clone)]
-pub struct Screenshot {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
-}
-
-/// Raw framebuffer handed from the dispatch to the awaiting `take_screenshot`.
-struct RawScreenshot {
-    version: ScreenshotVersion,
-    width: u32,
-    height: u32,
-    data: Vec<u8>,
-}
-
-/// In-flight screenshot reassembly state (header, then accumulating data).
-struct ScreenshotAccumulator {
-    /// Identifies the originating `take_screenshot` so its cleanup can't clobber
-    /// a different request that started after this one finished.
-    request_id: u64,
-    version: Option<ScreenshotVersion>,
-    width: u32,
-    height: u32,
-    expected: usize,
-    buffer: Vec<u8>,
-    done: oneshot::Sender<Result<RawScreenshot, String>>,
-}
-
-struct PebbleInner {
-    app_message_handlers: Vec<AppMessageHandler>,
-    ack_handlers: Vec<AckHandler>,
-    nack_handlers: Vec<NackHandler>,
-    health_handlers: Vec<HealthDataHandler>,
-    watch_pref_handlers: Vec<WatchPrefHandler>,
-    battery_handlers: Vec<BatteryHandler>,
-    /// Latest watch battery percentage (0–100); `None` until first read.
-    battery_level: Option<u8>,
-    app_run_state_handlers: Vec<AppRunStateHandler>,
-    music_action_handlers: Vec<MusicActionHandler>,
-    phone_action_handlers: Vec<PhoneActionHandler>,
-    /// In-flight screenshot reassembly, if a `take_screenshot` is awaiting.
-    screenshot: Option<ScreenshotAccumulator>,
-    /// Monotonic id assigned to each screenshot request.
-    screenshot_seq: u64,
-    /// transaction_id → future resolved when watch ACK/NACKs it
-    pending: HashMap<u8, oneshot::Sender<bool>>,
-    /// BlobDB2 token → future resolved when watch sends the matching response
-    blobdb2_pending: HashMap<u16, oneshot::Sender<BlobDB2Incoming>>,
-    /// Futures awaiting a WatchVersionResponse (endpoint 16). All are resolved
-    /// when the next response arrives.
-    watch_version_pending: Vec<oneshot::Sender<WatchVersionInfo>>,
-    /// Futures awaiting a factory-registry watch-color response (endpoint 5001).
-    /// `None` is sent on an error reply or unknown color.
-    watch_color_pending: Vec<oneshot::Sender<Option<&'static WatchColorInfo>>>,
-    txn: u8,
-    /// Handle to the GATT server send channel (set once server is started).
-    gatt_server: Option<PebbleGattServerHandle>,
-    /// Open DataLog sessions keyed by the 1-byte handle from the watch.
-    datalog_sessions: HashMap<u8, DatalogSession>,
-    /// BlobDB2 protocol version negotiated at connect time (0 = v0/unknown, 1+ = InsertWithTimestamp capable).
-    blob_db_version: u8,
-}
-
-impl PebbleInner {
-    fn new() -> Self {
-        Self {
-            app_message_handlers: Vec::new(),
-            ack_handlers: Vec::new(),
-            nack_handlers: Vec::new(),
-            health_handlers: Vec::new(),
-            watch_pref_handlers: Vec::new(),
-            battery_handlers: Vec::new(),
-            battery_level: None,
-            app_run_state_handlers: Vec::new(),
-            music_action_handlers: Vec::new(),
-            phone_action_handlers: Vec::new(),
-            screenshot: None,
-            screenshot_seq: 0,
-            pending: HashMap::new(),
-            blobdb2_pending: HashMap::new(),
-            watch_version_pending: Vec::new(),
-            watch_color_pending: Vec::new(),
-            txn: 0,
-            gatt_server: None,
-            datalog_sessions: HashMap::new(),
-            blob_db_version: 0,
-        }
-    }
-}
+mod inner;
+pub(crate) use inner::{
+    PebbleInner, RawScreenshot, ScreenshotAccumulator,
+};
+pub use inner::{
+    AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler,
+    HealthDataHandler, MusicActionHandler, NackHandler, PhoneActionHandler,
+    Screenshot, WatchPrefHandler,
+};
 
 pub struct Pebble {
     pub address: String,
