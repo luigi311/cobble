@@ -470,7 +470,11 @@ impl Pebble {
 
         let rx = if wait_ack {
             let (tx, rx) = oneshot::channel::<bool>();
-            self.inner.lock().unwrap().pending.insert(txn, tx);
+            {
+                let mut inner = self.inner.lock().unwrap();
+                inner.pending.insert(txn, tx);
+                inner.pending_order.push_back(txn);
+            }
             Some(rx)
         } else {
             None
@@ -483,7 +487,9 @@ impl Pebble {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => return Err(PebbleError::Nack(txn)),
                 Ok(Err(_)) | Err(_) => {
-                    self.inner.lock().unwrap().pending.remove(&txn);
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.pending.remove(&txn);
+                    inner.pending_order.retain(|&k| k != txn);
                     warn!(
                         "no ACK for transaction {txn} within {ack_timeout_secs}s \
                          (message may still have arrived)"

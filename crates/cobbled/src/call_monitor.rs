@@ -318,13 +318,12 @@ async fn list_mm_objects(conn: &Connection, bus: &str, base_path: &str) -> zbus:
     let reply = conn.call_method(Some(bus), base_path, Some("org.freedesktop.DBus.Introspectable"), "Introspect", &()).await?;
     let xml: String = reply.body().deserialize()?;
     let mut paths = Vec::new();
-    #[allow(clippy::collapsible_if)]
     for line in xml.lines() {
-        if let Some(name) = line.trim().strip_prefix("<node name=\"") {
-            if let Some(end) = name.find('"') {
-                let child = &name[..end];
-                if child != "Voice" { paths.push(format!("{base_path}/{child}")); }
-            }
+        if let Some(name) = line.trim().strip_prefix("<node name=\"")
+            && let Some(end) = name.find('"')
+        {
+            let child = &name[..end];
+            if child != "Voice" { paths.push(format!("{base_path}/{child}")); }
         }
     }
     Ok(paths)

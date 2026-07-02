@@ -293,12 +293,14 @@ fn on_datalog_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
 fn resolve_pending(txn: u8, acked: bool, inner: &Arc<Mutex<PebbleInner>>) {
     let mut guard = inner.lock().unwrap();
     if let Some(sender) = guard.pending.remove(&txn) {
+        guard.pending_order.retain(|&k| k != txn);
         let _ = sender.send(acked);
     } else if !guard.pending.is_empty()
-        && let Some(oldest) = guard.pending.keys().copied().next()
+        && let Some(oldest) = guard.pending_order.pop_front()
     {
-        debug!("ACK txn={txn} had no match; resolving oldest pending txn={oldest}");
+        // Also remove from the map itself (it may have been removed already).
         if let Some(sender) = guard.pending.remove(&oldest) {
+            debug!("ACK txn={txn} had no match; resolving oldest pending txn={oldest}");
             let _ = sender.send(acked);
         }
     }
@@ -461,8 +463,8 @@ mod helpers {
     }
 
     pub(crate) fn rand_u16() -> u16 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        (t.subsec_nanos() & 0xFFFF) as u16
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static COUNTER: AtomicU16 = AtomicU16::new(1);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 }

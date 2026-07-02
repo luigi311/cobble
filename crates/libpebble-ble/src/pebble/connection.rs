@@ -106,6 +106,7 @@ impl Pebble {
                     let mut inner = inner_for_disc.lock().unwrap();
                     let pending: Vec<(u8, tokio::sync::oneshot::Sender<bool>)> =
                         inner.pending.drain().collect();
+                    inner.pending_order.clear();
                     let nack_handlers = inner.nack_handlers.clone();
                     inner.datalog_sessions.clear();
                     inner.blobdb2_pending.clear();

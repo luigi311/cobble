@@ -167,7 +167,7 @@ fn location_name(city: &str) -> String {
 
 /// Quick validation: the response should look like an IP address, not an HTML page.
 fn looks_like_ip(s: &str) -> bool {
-    !s.is_empty() && !s.contains('<') && s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+    !s.is_empty() && !s.contains('<') && s.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':')
 }
 
 // ── Nominatim reverse geocoding ─────────────────────────────────────────

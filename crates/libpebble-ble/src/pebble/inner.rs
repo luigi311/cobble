@@ -5,6 +5,7 @@
 //! lives inside the `Arc<Mutex<…>>` of a `Pebble`.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
@@ -89,6 +90,9 @@ pub(crate) struct PebbleInner {
     pub(crate) screenshot_seq: u64,
     /// transaction_id → future resolved when watch ACK/NACKs it
     pub(crate) pending: HashMap<u8, oneshot::Sender<bool>>,
+    /// Insertion-order queue for pending txns so resolve_pending can pick
+    /// the true oldest when the watch ACKs a non-matching txn.
+    pub(crate) pending_order: VecDeque<u8>,
     /// BlobDB2 token → future resolved when watch sends the matching response
     pub(crate) blobdb2_pending: HashMap<u16, oneshot::Sender<BlobDB2Incoming>>,
     /// Futures awaiting a WatchVersionResponse (endpoint 16). All are resolved
@@ -122,6 +126,7 @@ impl PebbleInner {
             screenshot: None,
             screenshot_seq: 0,
             pending: HashMap::new(),
+            pending_order: VecDeque::new(),
             blobdb2_pending: HashMap::new(),
             watch_version_pending: Vec::new(),
             watch_color_pending: Vec::new(),
