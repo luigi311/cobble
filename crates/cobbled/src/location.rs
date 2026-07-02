@@ -97,9 +97,14 @@ async fn get_prop_f64(
 // ── IP geolocation (with DB cache) ──────────────────────────────────────
 
 async fn try_ip_geolocation(db: Option<Arc<Mutex<AppDb>>>) -> anyhow::Result<(f64, f64, String)> {
-    // 1. Get current public IP.
-    let ip = match http::http_get_text("https://ifconfig.me").await {
-        Ok(ip) => ip,
+    // 1. Get current public IP.  ifconfig.me/ip returns bare-IP plaintext;
+    // the root path now returns an HTML page since mid-2026.
+    let ip = match http::http_get_text("https://ifconfig.me/ip").await {
+        Ok(ip) if looks_like_ip(&ip) => ip,
+        Ok(raw) => {
+            debug!("ifconfig.me returned non-IP response ({raw:?}); using ipapi directly");
+            return fetch_ipapi_and_build().await;
+        }
         Err(_) => {
             // Can't get IP — fall back to uncached ipapi if DB is available,
             // or just call ipapi directly.
@@ -156,6 +161,11 @@ async fn fetch_ipapi_and_build() -> anyhow::Result<(f64, f64, String)> {
 
 fn location_name(city: &str) -> String {
     if city.is_empty() { "Current Location".into() } else { city.to_string() }
+}
+
+/// Quick validation: the response should look like an IP address, not an HTML page.
+fn looks_like_ip(s: &str) -> bool {
+    !s.is_empty() && !s.contains('<') && s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
 }
 
 // ── Nominatim reverse geocoding ─────────────────────────────────────────
