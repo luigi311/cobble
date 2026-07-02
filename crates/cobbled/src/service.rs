@@ -107,6 +107,8 @@ pub enum DaemonEvent {
     AppRunState { uuid: String, running: bool },
     /// A media-control action the watch sent (play/pause/next/…).
     MusicAction(String),
+    /// A phone control action the watch sent (answer/hangup).
+    PhoneAction(libpebble_ble::PhoneAction),
     /// Decoded "activityPreferences" record (height/weight/age/gender) from the watch.
     HealthProfile(ActivityPreferences),
     /// Decoded "hrmPreferences" record from the watch.
@@ -919,6 +921,55 @@ impl CobbleDaemon {
             .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
+    // ── Phone calls ───────────────────────────────────────────────────
+
+    /// Push an incoming call to the watch (shows caller screen).
+    /// `cookie` is an arbitrary u32 echoed back in answer/hangup actions.
+    async fn push_incoming_call(
+        &self,
+        cookie: u32,
+        caller_number: String,
+        caller_name: String,
+    ) -> Result<(), DaemonError> {
+        let pebble = self.require_pebble()?;
+        pebble
+            .push_incoming_call(cookie, &caller_number, &caller_name)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Push a missed call notification to the watch.
+    async fn push_missed_call(
+        &self,
+        cookie: u32,
+        caller_number: String,
+        caller_name: String,
+    ) -> Result<(), DaemonError> {
+        let pebble = self.require_pebble()?;
+        pebble
+            .push_missed_call(cookie, &caller_number, &caller_name)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Notify the watch that the call is now active (answered).
+    async fn push_call_start(&self, cookie: u32) -> Result<(), DaemonError> {
+        let pebble = self.require_pebble()?;
+        pebble
+            .push_call_start(cookie)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Notify the watch that the call has ended.
+    async fn push_call_end(&self, cookie: u32) -> Result<(), DaemonError> {
+        let pebble = self.require_pebble()?;
+        pebble
+            .push_call_end(cookie)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
     /// Rebuild health_activity_minutes and health_activity_sessions from the raw
     /// blobs in health_records. Call this after a schema change or to backfill
     /// utc_offset for rows that were stored before the column existed.
@@ -1045,6 +1096,16 @@ impl CobbleDaemon {
         signal_emitter: &SignalEmitter<'_>,
         action: &str,
     ) -> zbus::Result<()>;
+
+    /// Emitted when the watch sends a phone control action.
+    /// `action` is "answer" or "hangup". `cookie` is the u32 that was sent
+    /// with the original incoming/missed call so the client can match it.
+    #[zbus(signal)]
+    pub async fn phone_action_received(
+        signal_emitter: &SignalEmitter<'_>,
+        action: &str,
+        cookie: u32,
+    ) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,6 +1179,18 @@ pub async fn run_signal_emitter(
                 // Forward the action to the MPRIS monitor so it can control
                 // the desktop media player (play/pause/next/volume/…).
                 let _ = daemon.music_action_tx().send(action);
+            }
+            DaemonEvent::PhoneAction(action) => {
+                let (name, cookie) = match action {
+                    libpebble_ble::PhoneAction::Answer { cookie } => ("answer", cookie),
+                    libpebble_ble::PhoneAction::Hangup { cookie } => ("hangup", cookie),
+                };
+                let _ = CobbleDaemon::phone_action_received(emitter, name, cookie).await;
+                // Auto-transition the watch UI: Answer → in-call screen
+                // (End Call button), Hangup → idle.
+                if name == "answer" {
+                    let _ = daemon.push_call_start(cookie).await;
+                }
             }
             DaemonEvent::AppMessageReceived { uuid, data } => {
                 let wire = encode_wire_dict(&data);
