@@ -16,7 +16,7 @@ pub fn load_daily_steps(
     let (range_start, range_end) = period_range_offset(period, offset);
     match period {
         0 => load_steps_day(conn, range_start, range_end),
-        2 => load_steps_by_date(conn, range_start, range_end, true),
+        2 => load_steps_weekly(conn, range_start, range_end),
         _ => load_steps_by_date(conn, range_start, range_end, false),
     }
 }
@@ -115,6 +115,49 @@ fn load_steps_by_date(
         .collect())
 }
 
+/// Month view: group by ISO week, showing weekly averages.
+fn load_steps_weekly(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Vec<DayStepsData>> {
+    let mut stmt = conn.prepare(
+        "SELECT strftime('%W', start_ts + utc_offset, 'unixepoch') AS week,
+                SUM(steps) AS total
+         FROM health_activity_minutes
+         WHERE start_ts >= ?1 AND start_ts <= ?2
+         GROUP BY week ORDER BY week ASC",
+    )?;
+    let rows: Vec<(String, i64)> = stmt
+        .query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Compute weekly averages (total / 7) for bar heights, then
+    // fraction = avg / max_avg across all weeks.
+    let avgs: Vec<f32> = rows.iter().map(|(_, t)| *t as f32 / 7.0).collect();
+    let max_avg = avgs.iter().cloned().fold(0.0f32, f32::max).max(1.0);
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, total))| {
+            DayStepsData {
+                label: format!("W{}", i + 1),
+                steps_label: format_number(total / 7),
+                steps_raw: total,
+                fraction: avgs[i] / max_avg,
+                bar_start: 0,
+                bar_end: 0,
+            }
+        })
+        .collect())
+}
+
 /// Summary label for the steps chart header.
 /// Day: total steps. Week/Month: average steps per day.
 pub fn compute_steps_summary(bars: &[DayStepsData], period: i32) -> String {
@@ -124,6 +167,16 @@ pub fn compute_steps_summary(bars: &[DayStepsData], period: i32) -> String {
     let total: i64 = bars.iter().map(|b| b.steps_raw).sum();
     if period == 0 {
         format!("{} steps", format_number(total))
+    } else if period == 2 {
+        // Month: bars are weeks, steps_raw is weekly total.
+        // Avg per day = total / (num_weeks * 7). Approximate.
+        let n_days = bars.len() as i64 * 7;
+        if n_days > 0 {
+            let avg = total / n_days;
+            format!("avg {} / day", format_number(avg))
+        } else {
+            "0 steps".to_string()
+        }
     } else {
         let avg = total / bars.len() as i64;
         format!("avg {} / day", format_number(avg))
@@ -139,9 +192,17 @@ pub fn compute_steps_avg_label(bars: &[DayStepsData], period: i32) -> String {
     let total: i64 = bars.iter().map(|b| b.steps_raw).sum();
     if period == 0 {
         format!("{} steps", format_number(total))
+    } else if period == 2 {
+        let n_days = bars.len() as i64 * 7;
+        if n_days > 0 {
+            let avg = total / n_days;
+            format!("avg {} / day", format_number(avg))
+        } else {
+            "—".to_string()
+        }
     } else {
         let avg = total / bars.len() as i64;
-        format!("AVG {} / day", format_number(avg))
+        format!("avg {} / day", format_number(avg))
     }
 }
 
@@ -198,7 +259,10 @@ pub fn load_sleep_bars(
     offset: i32,
 ) -> anyhow::Result<Vec<SleepBarData>> {
     let (range_start, range_end) = period_range_offset(period, offset);
-    let label_fmt = period == 2;
+
+    if period == 2 {
+        return load_sleep_bars_weekly(conn, range_start, range_end);
+    }
 
     let sql = format!(
         "SELECT {SLEEP_NIGHT_KEY} AS night,
@@ -234,13 +298,7 @@ pub fn load_sleep_bars(
         .map(|r| {
             let nd = r.night.parse::<NaiveDate>().ok();
             let label = nd
-                .map(|d| {
-                    if label_fmt {
-                        d.format("%-d").to_string()
-                    } else {
-                        d.format("%a").to_string()
-                    }
-                })
+                .map(|d| d.format("%a").to_string())
                 .unwrap_or_else(|| r.night.clone());
             let (bar_start, bar_end) = nd
                 .map(|d| (time::local_ts(d, 0, 0, 0), time::local_ts(d, 23, 59, 59)))
@@ -251,6 +309,70 @@ pub fn load_sleep_bars(
                 label,
                 bar_start,
                 bar_end,
+                light_fraction: light as f32 / max_total as f32,
+                deep_fraction: deep as f32 / max_total as f32,
+                light_secs: light,
+                deep_secs: deep,
+                total_label: format_duration(r.total),
+                deep_label: if deep > 0 {
+                    format!("{} deep", format_duration(deep))
+                } else {
+                    String::new()
+                },
+            }
+        })
+        .collect())
+}
+
+/// Month view: group sleep nights by ISO week.
+fn load_sleep_bars_weekly(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Vec<SleepBarData>> {
+    let sql = format!(
+        "SELECT strftime('%W', start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch') AS week,
+                SUM(CASE WHEN session_type IN (1, 3) THEN duration_secs ELSE 0 END) AS total_secs,
+                SUM(CASE WHEN session_type IN (2, 4) THEN duration_secs ELSE 0 END) AS deep_secs
+         FROM health_activity_sessions
+         WHERE {SLEEP_WHERE}
+         GROUP BY week
+         ORDER BY week ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+
+    struct Row {
+        _week: String,
+        total: i64,
+        deep: i64,
+    }
+    let rows: Vec<Row> = stmt
+        .query_map(params![start, end], |r| {
+            Ok(Row {
+                _week: r.get(0)?,
+                total: r.get(1)?,
+                deep: r.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_total = rows.iter().map(|r| r.total).max().unwrap_or(1).max(1);
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let deep = r.deep.min(r.total);
+            let light = (r.total - deep).max(0);
+            SleepBarData {
+                label: format!("W{}", i + 1),
+                bar_start: 0,
+                bar_end: 0,
                 light_fraction: light as f32 / max_total as f32,
                 deep_fraction: deep as f32 / max_total as f32,
                 light_secs: light,
@@ -287,6 +409,24 @@ pub fn compute_sleep_summary(bars: &[SleepBarData], period: i32) -> String {
             )
         } else {
             format_duration(sleep)
+        }
+    } else if period == 2 {
+        // Month: bars are weeks; divide by n*7 for per-night avg.
+        let n_days = n * 7;
+        if n_days > 0 {
+            let avg_sleep = (total_light + total_deep) / n_days;
+            let avg_deep = total_deep / n_days;
+            if avg_deep > 0 {
+                format!(
+                    "avg {} · {} deep",
+                    format_duration(avg_sleep),
+                    format_duration(avg_deep)
+                )
+            } else {
+                format!("avg {}", format_duration(avg_sleep))
+            }
+        } else {
+            "No sleep data".to_string()
         }
     } else {
         let avg_sleep = (total_light + total_deep) / n;
