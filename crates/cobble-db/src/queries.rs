@@ -94,20 +94,20 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
 
     // Primary sessions (sleep=1, nap=3) define the nights.
     let mut nights: BTreeMap<NaiveDate, Night> = BTreeMap::new();
-    for &(local_start, dur, _) in rows.iter().filter(|r| matches!(r.2, 1 | 3)) {
+    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 1 | 3)) {
         let local_end = local_start + dur;
         let Some(date) = wake_date(local_end) else { continue };
         nights
             .entry(date)
             .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
             .phases
-            .push(NightPhase { local_start, local_end, is_deep: false });
+            .push(NightPhase { local_start, local_end, is_deep: false, is_nap: ty == 3 });
     }
 
     // Deep segments (2/4) attach to the night they overlap; a segment ending
     // before midnight belongs with the following morning's wake-up, not its
     // own end date. Orphans (no overlapping primary) fall back to wake date.
-    for &(local_start, dur, _) in rows.iter().filter(|r| matches!(r.2, 2 | 4)) {
+    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 2 | 4)) {
         let local_end = local_start + dur;
         let date = nights
             .values()
@@ -123,7 +123,7 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
             .entry(date)
             .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
             .phases
-            .push(NightPhase { local_start, local_end, is_deep: true });
+            .push(NightPhase { local_start, local_end, is_deep: true, is_nap: ty == 4 });
     }
 
     let mut nights: Vec<Night> = nights
@@ -460,56 +460,6 @@ fn sleep_labels(nights: &[Night], period: i32) -> (String, String) {
     }
 }
 
-// ─── Sleep timing strip ──────────────────────────────────────────────────────
-
-pub fn load_sleep_nights(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<Vec<SleepNightData>> {
-    let range = range_for(period, offset);
-    let nights = fetch_sleep_nights(conn, range)?;
-    let month_fmt = period == 2;
-
-    Ok(nights
-        .iter()
-        .map(|n| {
-            let group_start = n.sleep_start();
-            let span = (n.sleep_end() - group_start).max(1) as f32;
-
-            let day_str = if month_fmt {
-                n.wake_date.format("%-d").to_string()
-            } else {
-                n.wake_date.format("%a").to_string()
-            };
-            let time_str = DateTime::from_timestamp(group_start, 0)
-                .map(|dt| dt.format("%-I:%M%P").to_string())
-                .unwrap_or_else(|| "?".to_string());
-
-            let segments = n
-                .phases
-                .iter()
-                .map(|p| {
-                    let start_frac = ((p.local_start - group_start) as f32 / span).clamp(0.0, 1.0);
-                    let end_frac = ((p.local_end - group_start) as f32 / span).clamp(0.0, 1.0);
-                    SleepSegmentData {
-                        start_frac,
-                        width_frac: (end_frac - start_frac).max(0.0),
-                        is_deep: p.is_deep,
-                    }
-                })
-                .collect();
-
-            SleepNightData {
-                label: format!("{} {}", day_str, time_str),
-                duration_label: format_duration(n.total_secs()),
-                bar_start: time::local_ts(n.wake_date, 0, 0, 0),
-                segments,
-            }
-        })
-        .collect())
-}
-
 // ─── Activity sessions ───────────────────────────────────────────────────────
 
 pub fn load_sessions_filtered(
@@ -577,6 +527,120 @@ pub fn load_sessions_filtered(
         .collect();
 
     Ok(sessions)
+}
+
+// ─── Sleep stats ─────────────────────────────────────────────────────────────
+
+/// Compute key statistics from sleep data for the current period.
+pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepStats> {
+    let range = range_for(period, offset);
+    let nights = fetch_sleep_nights(conn, range)?;
+
+    if nights.is_empty() {
+        return Ok(SleepStats {
+            deep_avg_label: "—".into(),
+            light_pct: 0.0,
+            deep_pct: 0.0,
+            awake_pct: 0.0,
+            avg_bedtime: "—".into(),
+            avg_wakeup: "—".into(),
+            highest_dur: "—".into(),
+            lowest_dur: "—".into(),
+        });
+    }
+
+    // Stage mix: light/deep as a share of all slept time (naps included,
+    // matching the chart's totals).
+    let total_slept: i64 = nights.iter().map(|n| n.total_secs()).sum();
+    let total_deep: i64 = nights.iter().map(|n| n.deep_secs()).sum();
+
+    // Bedtime, wake-up, and awake gaps come from the overnight block only,
+    // so an afternoon nap doesn't count the whole day as "in bed" or shift
+    // the average wake-up time to the nap's end.
+    let mut bedtimes: Vec<i64> = Vec::new();
+    let mut wakeups: Vec<i64> = Vec::new();
+    let mut in_bed: i64 = 0;
+    let mut slept_in_bed: i64 = 0;
+    for night in &nights {
+        let block = night.overnight_phases();
+        let (Some(start), Some(end)) = (
+            block.iter().map(|p| p.local_start).min(),
+            block.iter().map(|p| p.local_end).max(),
+        ) else {
+            continue; // deep-only orphan night
+        };
+        bedtimes.push(start);
+        wakeups.push(end);
+        in_bed += end - start;
+        slept_in_bed += block.iter().map(|p| p.local_end - p.local_start).sum::<i64>();
+    }
+
+    // One denominator for the whole stage mix — slept time plus the awake
+    // gaps between sleep sections — so light + deep + awake = 100%.
+    let awake = (in_bed - slept_in_bed).max(0);
+    let (light_pct, deep_pct, awake_pct) =
+        stage_percentages(total_slept - total_deep, total_deep, awake);
+
+    let durations = nights.iter().map(|n| n.total_secs());
+
+    Ok(SleepStats {
+        deep_avg_label: format_duration(total_deep / nights.len() as i64),
+        light_pct,
+        deep_pct,
+        awake_pct,
+        avg_bedtime: avg_time_of_day(&bedtimes),
+        avg_wakeup: avg_time_of_day(&wakeups),
+        highest_dur: format_duration(durations.clone().max().unwrap_or(0)),
+        lowest_dur: format_duration(durations.min().unwrap_or(0)),
+    })
+}
+
+/// Integer percentages of (light, deep, awake) that total exactly 100.
+/// Largest-remainder rounding, so independent rounding can't add up to 101.
+fn stage_percentages(light: i64, deep: i64, awake: i64) -> (f32, f32, f32) {
+    let parts = [light.max(0), deep.max(0), awake.max(0)];
+    let total: i64 = parts.iter().sum();
+    if total == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let exact = parts.map(|p| p as f64 / total as f64 * 100.0);
+    let mut floors = exact.map(|e| e.floor() as i64);
+    let mut by_remainder: Vec<usize> = (0..exact.len()).collect();
+    by_remainder.sort_by(|&a, &b| {
+        (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor()))
+    });
+    let deficit = 100 - floors.iter().sum::<i64>();
+    for &i in by_remainder.iter().take(deficit as usize) {
+        floors[i] += 1;
+    }
+    (floors[0] as f32, floors[1] as f32, floors[2] as f32)
+}
+
+/// Average wall-clock time of a set of watch-local epochs, as a 12-hour
+/// label. Uses a circular mean on the 24h clock so bedtimes straddling
+/// midnight (11pm, 1am) average to midnight instead of noon.
+fn avg_time_of_day(epochs: &[i64]) -> String {
+    use chrono::Timelike;
+    use std::f64::consts::TAU;
+
+    let angles = epochs.iter().filter_map(|&e| {
+        DateTime::from_timestamp(e, 0)
+            .map(|dt| (dt.hour() * 60 + dt.minute()) as f64 / 1440.0 * TAU)
+    });
+    let (sum_sin, sum_cos, n) = angles.fold((0.0f64, 0.0f64, 0u32), |(s, c, n), a| {
+        (s + a.sin(), c + a.cos(), n + 1)
+    });
+    if n == 0 {
+        return "—".to_string();
+    }
+    let mean_mins = (sum_sin.atan2(sum_cos) / TAU * 1440.0 + 1440.0) % 1440.0;
+    let (h, m) = (mean_mins as u32 / 60, mean_mins as u32 % 60);
+    let ampm = if h < 12 { "AM" } else { "PM" };
+    let h12 = match h % 12 {
+        0 => 12,
+        x => x,
+    };
+    format!("{}:{:02} {}", h12, m, ampm)
 }
 
 // ═══ Tests ════════════════════════════════════════════════════════════════════
@@ -813,11 +877,6 @@ mod tests {
         assert_eq!(chart.avg_label, "8h 0m");
         assert_eq!(chart.delta_label, "+100%"); // 8h vs the 4h night before
         assert!(chart.delta_positive);
-
-        let strip = load_sleep_nights(&conn, 0, offset).unwrap();
-        assert_eq!(strip.len(), 1);
-        assert_eq!(strip[0].duration_label, "8h 0m");
-        assert_eq!(strip[0].segments.len(), 2);
     }
 
     #[test]
@@ -879,6 +938,74 @@ mod tests {
     }
 
     #[test]
+    fn sleep_stats_stage_and_awake_percentages() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+        // In bed 23:00–07:00 (8h) with a 1h awake gap: slept 7h, 2h deep.
+        insert_session(&conn, 1, local(jul3, 23, 0), 3 * 3600); // 23:00–02:00
+        insert_session(&conn, 1, local(jul4, 3, 0), 4 * 3600); // 03:00–07:00
+        insert_session(&conn, 2, local(jul4, 0, 0), 2 * 3600); // deep 00:00–02:00
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_sleep_stats(&conn, 0, offset).unwrap();
+        assert_eq!(stats.deep_avg_label, "2h 0m");
+        // Shares of the 8h in bed: 5h light, 2h deep, 1h awake — the tied
+        // .5 remainders resolve to light, and the three total exactly 100.
+        assert_eq!(stats.light_pct, 63.0);
+        assert_eq!(stats.deep_pct, 25.0);
+        assert_eq!(stats.awake_pct, 12.0);
+        assert_eq!(stats.avg_bedtime, "11:00 PM");
+        assert_eq!(stats.avg_wakeup, "7:00 AM");
+        assert_eq!(stats.highest_dur, "7h 0m");
+        assert_eq!(stats.lowest_dur, "7h 0m");
+    }
+
+    #[test]
+    fn stage_percentages_always_total_100() {
+        assert_eq!(stage_percentages(0, 0, 0), (0.0, 0.0, 0.0));
+        assert_eq!(stage_percentages(9, 0, 0), (100.0, 0.0, 0.0));
+        assert_eq!(stage_percentages(1, 1, 1), (34.0, 33.0, 33.0));
+        // 62.5 / 25 / 12.5 would independently round to 63 + 25 + 13 = 101.
+        assert_eq!(stage_percentages(5, 2, 1), (63.0, 25.0, 12.0));
+        for (l, d, a) in [(7, 2, 1), (12345, 6789, 42), (1, 1, 998)] {
+            let (lp, dp, ap) = stage_percentages(l, d, a);
+            assert_eq!(lp + dp + ap, 100.0);
+        }
+    }
+
+    /// A nap counts toward the night's totals but must not stretch the
+    /// in-bed span or shift the wake-up time to the nap's end.
+    #[test]
+    fn nap_does_not_skew_wakeup_or_awake_stats() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600); // wake 7am
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600); // 2pm–3pm nap
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_sleep_stats(&conn, 0, offset).unwrap();
+        assert_eq!(stats.avg_wakeup, "7:00 AM"); // not 3:00 PM
+        assert_eq!(stats.awake_pct, 0.0); // the 7h before the nap isn't "in bed"
+        assert_eq!(stats.highest_dur, "9h 0m"); // totals still include the nap
+    }
+
+    /// Bedtimes straddling midnight must average on the clock circle:
+    /// 11pm and 1am → midnight, not noon.
+    #[test]
+    fn average_bedtime_wraps_midnight() {
+        let conn = setup();
+        let today = watch_today();
+        let yesterday = today - chrono::Duration::days(1);
+        insert_session(&conn, 1, local(yesterday, 23, 0), 8 * 3600); // bed 11pm, wake 7am today
+        insert_session(&conn, 1, local(yesterday, 1, 0), 6 * 3600); // bed 1am, wake 7am yesterday
+
+        let stats = load_sleep_stats(&conn, 1, 0).unwrap();
+        assert_eq!(stats.avg_bedtime, "12:00 AM");
+        assert_eq!(stats.avg_wakeup, "7:00 AM");
+    }
+
+    #[test]
     fn sleep_labels_average_per_night_with_data() {
         let nights = vec![
             Night {
@@ -887,13 +1014,14 @@ mod tests {
                     local_start: 0,
                     local_end: 6 * 3600,
                     is_deep: false,
+                    is_nap: false,
                 }],
             },
             Night {
                 wake_date: d(2026, 7, 4),
                 phases: vec![
-                    NightPhase { local_start: 0, local_end: 8 * 3600, is_deep: false },
-                    NightPhase { local_start: 0, local_end: 2 * 3600, is_deep: true },
+                    NightPhase { local_start: 0, local_end: 8 * 3600, is_deep: false, is_nap: false },
+                    NightPhase { local_start: 0, local_end: 2 * 3600, is_deep: true, is_nap: false },
                 ],
             },
         ];

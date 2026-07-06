@@ -5,9 +5,9 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, SleepNight, WatchDevice } from "types.slint";
+import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats } from "types.slint";
 import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl } from "widgets.slint";
-import { StepsChart, SleepChart, SessionList, SleepTimingStrip } from "charts.slint";
+import { StepsChart, SleepChart, SessionList, SleepStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
     title: "Pebble";
@@ -43,7 +43,7 @@ export component AppWindow inherits Window {
     in property <string> sleep-avg-label;
     in property <string> sleep-delta-label;
     in property <bool> sleep-delta-positive: true;
-    in property <[SleepNight]> sleep-nights;
+    in property <SleepStats> sleep-stats;
 
     // ── Config ──
     in-out property <string> cfg-address;
@@ -277,11 +277,8 @@ export component AppWindow inherits Window {
                     selected-bar-start <=> root.sel-sleep-bar-start;
                 }
 
-                SleepTimingStrip {
-                    model: root.sleep-nights;
-                    period: root.sleep-period-val;
-                    selected-bar-start <=> root.sel-sleep-bar-start;
-                    refresh => { root.sel-sleep-bar-start = -1; root.refresh-data(); }
+                SleepStatsPanel {
+                    stats: root.sleep-stats;
                 }
             }
 
