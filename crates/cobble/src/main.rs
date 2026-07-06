@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     reload_workout_chart(&window, &effective_db_path, 1, 0);
     reload_workout_sessions(&window, &effective_db_path, 1, 0, (-1, -1));
     reload_sleep_chart(&window, &effective_db_path, 1, 0);
-    reload_sleep_strip(&window, &effective_db_path, 1, 0);
+    reload_sleep_stats(&window, &effective_db_path, 1, 0);
 
     // ── Background tokio runtime ─────────────────────────────────────────────
     // Enter the runtime context on the main thread. zbus (via cobble-client)
@@ -109,7 +109,7 @@ fn main() -> anyhow::Result<()> {
                 reload_workout_chart(&w, &db2, pw.get(), ow.get());
                 reload_workout_sessions(&w, &db2, pw.get(), ow.get(), brw.get());
                 reload_sleep_chart(&w, &db2, ps.get(), os.get());
-                reload_sleep_strip(&w, &db2, ps.get(), os.get());
+                reload_sleep_stats(&w, &db2, ps.get(), os.get());
             }
         });
     }
@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(w) = weak.upgrade() {
                 update_sleep_nav(&w, p, 0);
                 reload_sleep_chart(&w, &db2, p, 0);
-                reload_sleep_strip(&w, &db2, p, 0);
+                reload_sleep_stats(&w, &db2, p, 0);
             }
         });
     }
@@ -204,7 +204,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(w) = weak.upgrade() {
                 update_sleep_nav(&w, p, new_off);
                 reload_sleep_chart(&w, &db2, p, new_off);
-                reload_sleep_strip(&w, &db2, p, new_off);
+                reload_sleep_stats(&w, &db2, p, new_off);
             }
         });
     }
@@ -221,7 +221,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(w) = weak.upgrade() {
                 update_sleep_nav(&w, p, new_off);
                 reload_sleep_chart(&w, &db2, p, new_off);
-                reload_sleep_strip(&w, &db2, p, new_off);
+                reload_sleep_stats(&w, &db2, p, new_off);
             }
         });
     }
@@ -447,11 +447,14 @@ fn update_sleep_nav(w: &AppWindow, period: i32, offset: i32) {
 fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_daily_steps(&conn, period, offset) {
-            Err(e) => warn!("load daily steps failed: {e}"),
-            Ok(steps) => {
-                window.set_today_steps_label(cobble_db::compute_steps_summary(&steps, period).into());
-                let slint_steps: Vec<DaySteps> = steps.into_iter().map(|s| DaySteps {
+        Ok(conn) => match cobble_db::load_steps_chart(&conn, period, offset) {
+            Err(e) => warn!("load steps chart failed: {e}"),
+            Ok(chart) => {
+                window.set_today_steps_label(chart.summary.into());
+                window.set_steps_avg_label(chart.avg_label.into());
+                window.set_steps_delta_positive(chart.delta_positive);
+                window.set_steps_delta_label(chart.delta_label.into());
+                let slint_steps: Vec<DaySteps> = chart.bars.into_iter().map(|s| DaySteps {
                     label: s.label.into(),
                     steps_label: s.steps_label.into(),
                     fraction: s.fraction,
@@ -492,11 +495,14 @@ fn reload_workout_sessions(
 fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_sleep_bars(&conn, period, offset) {
-            Err(e) => warn!("load sleep bars failed: {e}"),
-            Ok(bars) => {
-                window.set_sleep_label(cobble_db::compute_sleep_summary(&bars, period).into());
-                let slint_bars: Vec<SleepBar> = bars.into_iter().map(|b| SleepBar {
+        Ok(conn) => match cobble_db::load_sleep_chart(&conn, period, offset) {
+            Err(e) => warn!("load sleep chart failed: {e}"),
+            Ok(chart) => {
+                window.set_sleep_label(chart.summary.into());
+                window.set_sleep_avg_label(chart.avg_label.into());
+                window.set_sleep_delta_positive(chart.delta_positive);
+                window.set_sleep_delta_label(chart.delta_label.into());
+                let slint_bars: Vec<SleepBar> = chart.bars.into_iter().map(|b| SleepBar {
                     label: b.label.into(),
                     bar_start: b.bar_start as i32,
                     bar_end: b.bar_end as i32,
@@ -511,13 +517,22 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
     }
 }
 
-fn reload_sleep_strip(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_sleep_nights(&conn, period, offset) {
-            Err(e) => warn!("load sleep nights failed: {e}"),
-            Ok(nights) => {
-                window.set_sleep_nights(ModelRc::new(VecModel::from(to_slint_nights(nights))));
+        Ok(conn) => match cobble_db::load_sleep_stats(&conn, period, offset) {
+            Err(e) => warn!("load sleep stats failed: {e}"),
+            Ok(stats) => {
+                window.set_sleep_stats(SleepStats {
+                    deep_avg_label: stats.deep_avg_label.into(),
+                    light_pct: stats.light_pct,
+                    deep_pct: stats.deep_pct,
+                    awake_pct: stats.awake_pct,
+                    avg_bedtime: stats.avg_bedtime.into(),
+                    avg_wakeup: stats.avg_wakeup.into(),
+                    highest_dur: stats.highest_dur.into(),
+                    lowest_dur: stats.lowest_dur.into(),
+                });
             }
         },
     }
@@ -532,21 +547,5 @@ fn to_slint_sessions(sessions: Vec<cobble_db::HealthSessionData>) -> Vec<HealthS
         duration_label: s.duration_label.into(),
         has_metrics: s.has_metrics,
         metrics_label: s.metrics_label.into(),
-    }).collect()
-}
-
-fn to_slint_nights(nights: Vec<cobble_db::SleepNightData>) -> Vec<SleepNight> {
-    nights.into_iter().map(|n| {
-        let segs: Vec<SleepSegment> = n.segments.into_iter().map(|s| SleepSegment {
-            start_frac: s.start_frac,
-            width_frac: s.width_frac,
-            is_deep: s.is_deep,
-        }).collect();
-        SleepNight {
-            label: n.label.into(),
-            duration_label: n.duration_label.into(),
-            bar_start: n.bar_start as i32,
-            segments: ModelRc::new(VecModel::from(segs)),
-        }
     }).collect()
 }

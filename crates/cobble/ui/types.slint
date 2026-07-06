@@ -26,20 +26,18 @@ export struct HealthSession {
     metrics-label: string,
 }
 
-export struct SleepSegment {
-    start-frac: float,
-    width-frac: float,
-    is-deep: bool,
-}
-
-export struct SleepNight {
-    label: string,
-    duration-label: string,
-    bar-start: int,
-    segments: [SleepSegment],
-}
-
 export struct WatchDevice {
     address: string,
     name: string,
+}
+
+export struct SleepStats {
+    deep-avg-label: string,
+    light-pct: float,
+    deep-pct: float,
+    awake-pct: float,
+    avg-bedtime: string,
+    avg-wakeup: string,
+    highest-dur: string,
+    lowest-dur: string,
 }

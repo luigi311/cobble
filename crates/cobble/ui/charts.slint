@@ -1,22 +1,33 @@
 // Health-data chart and list components.
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, SleepNight, SleepSegment } from "types.slint";
+import { DaySteps, SleepBar, HealthSession, SleepStats } from "types.slint";
 
 // ─── Step bar chart ──────────────────────────────────────────────────────────
 
 export component StepsChart inherits VerticalLayout {
     in property <[DaySteps]> model;
     in property <string> today-label;
+    in property <string> avg-label;
+    in property <string> delta-label;
+    in property <bool> delta-positive: true;
     in-out property <int> selected-bar-start: -1;
     callback bar-tapped(int, int);
 
     padding: 16px; spacing: 10px;
 
+    // Header: avg left, delta right (title is in the app header bar)
     HorizontalLayout {
-        Text { text: "Steps"; color: Palette.text; font-size: 16px; font-weight: 700; vertical-alignment: center; }
+        if root.avg-label != "": Text {
+            text: root.avg-label;
+            color: Palette.muted; font-size: 13px; vertical-alignment: center;
+        }
         Rectangle { horizontal-stretch: 1; }
-        Text { text: today-label; color: Palette.muted; font-size: 13px; vertical-alignment: center; }
+        if root.delta-label != "": Text {
+            text: root.delta-label;
+            color: root.delta-positive ? Palette.green : Palette.red;
+            font-size: 13px; font-weight: 600; vertical-alignment: center;
+        }
     }
 
     Rectangle {
@@ -61,29 +72,25 @@ export component StepsChart inherits VerticalLayout {
 export component SleepChart inherits VerticalLayout {
     in property <[SleepBar]> model;
     in property <string> sleep-label;
+    in property <string> avg-label;
+    in property <string> delta-label;
+    in property <bool> delta-positive: true;
     in-out property <int> selected-bar-start: -1;
     callback bar-tapped(int, int);
 
     padding: 16px; spacing: 10px;
 
+    // Header: avg left, delta right (title is in the app header bar)
     HorizontalLayout {
-        Text { text: "Sleep"; color: Palette.text; font-size: 16px; font-weight: 700; vertical-alignment: center; }
-        Rectangle { horizontal-stretch: 1; }
-        Text { text: sleep-label; color: Palette.muted; font-size: 13px; vertical-alignment: center; }
-    }
-
-    // Legend
-    HorizontalLayout {
-        spacing: 16px;
-        HorizontalLayout {
-            spacing: 5px;
-            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.accent; y: 2px; }
-            Text { text: "Light"; color: Palette.muted; font-size: 11px; }
+        if root.avg-label != "": Text {
+            text: root.avg-label;
+            color: Palette.muted; font-size: 13px; vertical-alignment: center;
         }
-        HorizontalLayout {
-            spacing: 5px;
-            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.deep-sleep; y: 2px; }
-            Text { text: "Deep"; color: Palette.muted; font-size: 11px; }
+        Rectangle { horizontal-stretch: 1; }
+        if root.delta-label != "": Text {
+            text: root.delta-label;
+            color: root.delta-positive ? Palette.green : Palette.red;
+            font-size: 13px; font-weight: 600; vertical-alignment: center;
         }
     }
 
@@ -130,6 +137,21 @@ export component SleepChart inherits VerticalLayout {
             }
         }
     }
+
+    // Legend — at the bottom
+    HorizontalLayout {
+        spacing: 16px;
+        HorizontalLayout {
+            spacing: 5px;
+            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.accent; y: 2px; }
+            Text { text: "Light"; color: Palette.muted; font-size: 11px; }
+        }
+        HorizontalLayout {
+            spacing: 5px;
+            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.deep-sleep; y: 2px; }
+            Text { text: "Deep"; color: Palette.muted; font-size: 11px; }
+        }
+    }
 }
 
 // ─── Session list ─────────────────────────────────────────────────────────────
@@ -160,106 +182,115 @@ export component SessionList inherits Flickable {
     }
 }
 
-// ─── Sleep timing strip ───────────────────────────────────────────────────────
+// ─── Sleep stats panel ───────────────────────────────────────────────────────
 
-export component SleepTimingStrip inherits VerticalLayout {
-    in property <[SleepNight]> model;
-    in property <int> period;
-    in-out property <int> selected-bar-start: -1;
-    callback refresh();
+export component SleepStatsPanel inherits VerticalLayout {
+    in property <SleepStats> stats;
 
     vertical-stretch: 1;
     padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 16px;
     spacing: 10px;
 
+    // Header: title
     HorizontalLayout {
-        Text { text: "Sleep Sessions"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+        Text { text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
-        HorizontalLayout {
-            spacing: 12px;
-            y: (parent.height - self.height) / 2;
-            HorizontalLayout {
-                spacing: 5px;
-                Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.accent; y: 2px; }
-                Text { text: "Light"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
-            }
-            HorizontalLayout {
-                spacing: 5px;
-                Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.deep-sleep; y: 2px; }
-                Text { text: "Deep"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
-            }
-        }
-        Rectangle { width: 8px; }
-        Rectangle {
-            width: 70px; height: 30px; border-radius: 6px; background: Palette.surface;
-            y: (parent.height - self.height) / 2;
-            Text { text: "Refresh"; color: Palette.accent; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-            TouchArea { clicked => { root.refresh(); } }
-        }
     }
 
+    // Stats grid
     Rectangle {
-        background: Palette.surface; border-radius: 12px; clip: true;
-        vertical-stretch: 1;
-
+        background: Palette.surface; border-radius: 12px;
         VerticalLayout {
-            padding: 12px; spacing: 4px;
+            padding: 14px; spacing: 10px;
 
-            Flickable {
-                vertical-stretch: 1;
-                viewport-height: nights.preferred-height;
-                nights := VerticalLayout {
-                    alignment: start;
-                    for night in root.model: Rectangle {
-                        height: root.period == 2 ? 32px : 44px;
-                        opacity: root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start ? 1.0 : 0.35;
-                        animate opacity { duration: 150ms; }
-
+            // Row 1: Deep Sleep Avg | Stage Mix
+            HorizontalLayout {
+                spacing: 10px;
+                // Deep sleep average
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Avg Deep Sleep"; color: Palette.muted; font-size: 11px; }
+                        Text {
+                            text: root.stats.deep-avg-label;
+                            color: Palette.deep-sleep;
+                            font-size: 18px; font-weight: 700;
+                        }
+                    }
+                }
+                // Stage mix
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Stage Mix"; color: Palette.muted; font-size: 11px; }
                         HorizontalLayout {
-                            height: parent.height;
                             spacing: 8px;
-                            padding-top: 6px; padding-bottom: 6px;
-
-                            // "Mon 10:47pm" label
-                            Text {
-                                width: 88px;
-                                text: night.label;
-                                color: Palette.muted; font-size: 10px;
-                                horizontal-alignment: left; vertical-alignment: center;
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Text { text: "" + round(root.stats.light-pct) + "%"; color: Palette.accent; font-size: 14px; font-weight: 700; }
+                                Text { text: "light"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
                             }
-
-                            // Duration-proportional stage bar
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: #1e1e40;
-                                border-radius: 3px;
-                                clip: true;
-                                for seg in night.segments: Rectangle {
-                                    x: seg.start-frac * parent.width;
-                                    width: max(2px, seg.width-frac * parent.width);
-                                    height: parent.height;
-                                    background: seg.is-deep ? Palette.deep-sleep : Palette.accent;
-                                }
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Text { text: "" + round(root.stats.deep-pct) + "%"; color: Palette.deep-sleep; font-size: 14px; font-weight: 700; }
+                                Text { text: "deep"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
                             }
-
-                            // Total duration
-                            Text {
-                                width: 52px;
-                                text: night.duration-label;
-                                color: Palette.muted; font-size: 10px;
-                                horizontal-alignment: right; vertical-alignment: center;
+                            if root.stats.awake-pct > 0: HorizontalLayout {
+                                spacing: 3px;
+                                Text { text: "" + round(root.stats.awake-pct) + "%"; color: Palette.muted; font-size: 14px; font-weight: 700; }
+                                Text { text: "awake"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
                             }
                         }
+                    }
+                }
+            }
 
-                        TouchArea {
-                            clicked => {
-                                if root.selected-bar-start == night.bar-start {
-                                    root.selected-bar-start = -1;
-                                } else {
-                                    root.selected-bar-start = night.bar-start;
-                                }
-                            }
-                        }
+            // Row 2: Avg Bedtime | Avg Wakeup
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Avg Bedtime"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.avg-bedtime; color: Palette.text; font-size: 16px; font-weight: 600; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Avg Wake-up"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.avg-wakeup; color: Palette.text; font-size: 16px; font-weight: 600; }
+                    }
+                }
+            }
+
+            // Row 3: Highest | Lowest duration
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Longest Night"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.highest-dur; color: Palette.green; font-size: 16px; font-weight: 600; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Shortest Night"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.lowest-dur; color: Palette.orange; font-size: 16px; font-weight: 600; }
                     }
                 }
             }

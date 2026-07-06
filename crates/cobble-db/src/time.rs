@@ -46,7 +46,7 @@ pub fn watch_tz_offset(conn: &Connection) -> i64 {
 }
 
 /// Current date in the watch's timezone.
-pub(crate) fn watch_today() -> NaiveDate {
+pub fn watch_today() -> NaiveDate {
     DateTime::from_timestamp(Utc::now().timestamp() + watch_offset(), 0)
         .map(|dt| dt.date_naive())
         .unwrap_or_default()
@@ -59,6 +59,44 @@ pub(crate) fn local_ts(date: NaiveDate, h: u32, m: u32, s: u32) -> i64 {
         .unwrap_or(0)
 }
 
+// ─── Date ranges ──────────────────────────────────────────────────────────────
+
+/// Inclusive range of watch-local calendar dates. All health queries take one
+/// of these, so "data for Jul 4 2026" is `DateRange::day(2026-07-04)` — no
+/// epoch arithmetic at call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateRange {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+}
+
+impl DateRange {
+    pub fn day(date: NaiveDate) -> Self {
+        Self { start: date, end: date }
+    }
+
+    pub fn contains(&self, date: NaiveDate) -> bool {
+        date >= self.start && date <= self.end
+    }
+
+    pub fn days(&self) -> impl Iterator<Item = NaiveDate> + '_ {
+        self.start.iter_days().take_while(move |d| *d <= self.end)
+    }
+
+    /// UTC bounds `[start-of-first-day, end-of-last-day]` using the watch offset.
+    pub fn utc_bounds(&self) -> (i64, i64) {
+        (local_ts(self.start, 0, 0, 0), local_ts(self.end, 23, 59, 59))
+    }
+
+    /// Days from `start` through `min(end, today)` — the denominator for
+    /// per-day averages, so future days of the current week/month don't
+    /// dilute the average.
+    pub fn days_elapsed(&self) -> i64 {
+        let end = self.end.min(watch_today());
+        ((end - self.start).num_days() + 1).max(0)
+    }
+}
+
 /// Convert (year, month) + a backward month offset into the target (year, month).
 fn offset_ym(base_year: i32, base_month: u32, offset: i32) -> (i32, u32) {
     let total = base_year * 12 + base_month as i32 - 1 - offset;
@@ -67,15 +105,12 @@ fn offset_ym(base_year: i32, base_month: u32, offset: i32) -> (i32, u32) {
 
 // ─── Period range + label ─────────────────────────────────────────────────────
 
-/// Compute [start, end] Unix timestamps for `period` shifted back by `offset` units.
+/// Date range for `period` shifted back by `offset` units.
 /// period 0=Day (offset in days), 1=Week (offset in weeks), 2=Month (offset in months).
-pub fn period_range_offset(period: i32, offset: i32) -> (i64, i64) {
+pub fn range_for(period: i32, offset: i32) -> DateRange {
     let today = watch_today();
     match period {
-        0 => {
-            let date = today - chrono::Duration::days(offset as i64);
-            (local_ts(date, 0, 0, 0), local_ts(date, 23, 59, 59))
-        }
+        0 => DateRange::day(today - chrono::Duration::days(offset as i64)),
         2 => {
             let (year, month) = offset_ym(today.year(), today.month(), offset);
             let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
@@ -84,14 +119,18 @@ pub fn period_range_offset(period: i32, offset: i32) -> (i64, i64) {
             } else {
                 NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
             } - chrono::Duration::days(1);
-            (local_ts(first, 0, 0, 0), local_ts(last, 23, 59, 59))
+            DateRange { start: first, end: last }
         }
         _ => {
             let end = today - chrono::Duration::days(offset as i64 * 7);
-            let start = end - chrono::Duration::days(6);
-            (local_ts(start, 0, 0, 0), local_ts(end, 23, 59, 59))
+            DateRange { start: end - chrono::Duration::days(6), end }
         }
     }
+}
+
+/// Compute [start, end] Unix timestamps for `period` shifted back by `offset` units.
+pub fn period_range_offset(period: i32, offset: i32) -> (i64, i64) {
+    range_for(period, offset).utc_bounds()
 }
 
 /// Human-readable label for the navigated period (shown between the arrows).

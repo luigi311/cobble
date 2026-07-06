@@ -1,259 +1,462 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, Datelike, NaiveDate};
 use rusqlite::{params, Connection};
 
 use crate::time::{self, *};
 use crate::types::*;
 
-// ─── Step chart data ─────────────────────────────────────────────────────────
+// ═══ Data layer ═══════════════════════════════════════════════════════════════
+//
+// Two invariants shared by every query and label in this file:
+//
+//  • A step minute belongs to the watch-local date (and hour) its start falls on.
+//  • A sleep session belongs to the night of the watch-local date the sleeper
+//    WOKE UP on (the session's end). So "sleep for Jul 4" includes a session
+//    that started 11pm Jul 3 and ended 7am Jul 4. Deep-sleep segments attach
+//    to the night they overlap, so a deep span ending just before midnight
+//    still lands with the following morning's wake-up.
+//
+// Local time always comes from each row's own utc_offset. UTC `start_ts`
+// filters in SQL are deliberately generous (they only bound the scan); exact
+// membership is decided on watch-local dates in Rust.
 
-pub fn load_daily_steps(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<Vec<DayStepsData>> {
-    let (range_start, range_end) = period_range_offset(period, offset);
-    match period {
-        0 => load_steps_day(conn, range_start, range_end),
-        2 => load_steps_by_date(conn, range_start, range_end, true),
-        _ => load_steps_by_date(conn, range_start, range_end, false),
-    }
-}
-
-fn load_steps_day(conn: &Connection, start: i64, end: i64) -> anyhow::Result<Vec<DayStepsData>> {
+/// Step totals per hour (0–23) of one watch-local day. Hours without data are absent.
+pub fn fetch_steps_by_hour(conn: &Connection, day: NaiveDate) -> anyhow::Result<Vec<(u32, i64)>> {
+    let (utc_start, utc_end) = DateRange::day(day).utc_bounds();
+    // Same membership rule as fetch_steps_by_day — the row's own local date
+    // must equal `day` — so the hourly bars always sum to the daily total.
+    // The UTC bounds (±12h slack) only bound the index scan.
     let mut stmt = conn.prepare(
-        "SELECT strftime('%H', start_ts + utc_offset, 'unixepoch') AS hour, SUM(steps) AS total
+        "SELECT CAST(strftime('%H', start_ts + utc_offset, 'unixepoch') AS INTEGER) AS hour,
+                SUM(steps)
          FROM health_activity_minutes
-         WHERE start_ts >= ?1 AND start_ts <= ?2
+         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
+           AND date(start_ts + utc_offset, 'unixepoch') = ?3
          GROUP BY hour ORDER BY hour ASC",
     )?;
-    let rows: Vec<(String, i64)> = stmt
-        .query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let day_key = day.format("%Y-%m-%d").to_string();
+    let rows = stmt
+        .query_map(params![utc_start, utc_end, day_key], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
-
-    let max_steps = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1);
-    let day_date = DateTime::from_timestamp(start + time::watch_offset(), 0)
-        .map(|dt| dt.date_naive())
-        .unwrap_or_else(time::watch_today);
-
-    Ok(rows
-        .into_iter()
-        .map(|(hour_str, total)| {
-            let h: u32 = hour_str.parse().unwrap_or(0);
-            DayStepsData {
-                label: format!("{}", h),
-                steps_label: format_number(total),
-                steps_raw: total,
-                fraction: total as f32 / max_steps as f32,
-                bar_start: time::local_ts(day_date, h, 0, 0),
-                bar_end: time::local_ts(day_date, h, 59, 59),
-            }
-        })
-        .collect())
+    Ok(rows)
 }
 
-fn load_steps_by_date(
+/// Step totals per watch-local date. Dates without data are absent.
+pub fn fetch_steps_by_day(
     conn: &Connection,
-    start: i64,
-    end: i64,
-    month_fmt: bool,
-) -> anyhow::Result<Vec<DayStepsData>> {
+    range: DateRange,
+) -> anyhow::Result<BTreeMap<NaiveDate, i64>> {
+    let (utc_start, utc_end) = range.utc_bounds();
+    // ±12h slack tolerates rows whose own utc_offset differs from the watch's
+    // current offset; the exact date filter below decides membership.
     let mut stmt = conn.prepare(
-        "SELECT date(start_ts + utc_offset, 'unixepoch') AS day, SUM(steps) AS total
+        "SELECT date(start_ts + utc_offset, 'unixepoch') AS day, SUM(steps)
          FROM health_activity_minutes
-         WHERE start_ts >= ?1 AND start_ts <= ?2
-         GROUP BY day ORDER BY day ASC",
+         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
+         GROUP BY day",
     )?;
-    let totals: HashMap<String, i64> = stmt
-        .query_map(params![start, end], |r| {
+    let totals = stmt
+        .query_map(params![utc_start, utc_end], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .filter_map(|r| r.ok())
+        .filter_map(|(day, total)| Some((day.parse::<NaiveDate>().ok()?, total)))
+        .filter(|(day, _)| range.contains(*day))
         .collect();
-
-    let start_date =
-        DateTime::from_timestamp(start + time::watch_offset(), 0).map(|dt| dt.date_naive());
-    let end_date =
-        DateTime::from_timestamp(end + time::watch_offset(), 0).map(|dt| dt.date_naive());
-    let mut days: Vec<(NaiveDate, i64)> = Vec::new();
-    if let (Some(start_date), Some(end_date)) = (start_date, end_date) {
-        let mut d = start_date;
-        loop {
-            let key = d.format("%Y-%m-%d").to_string();
-            days.push((d, totals.get(&key).copied().unwrap_or(0)));
-            if d >= end_date {
-                break;
-            }
-            match d.succ_opt() {
-                Some(next) => d = next,
-                None => break,
-            }
-        }
-    }
-
-    let max_steps = days.iter().map(|(_, t)| *t).max().unwrap_or(1).max(1);
-
-    Ok(days
-        .into_iter()
-        .map(|(d, total)| {
-            let label = if month_fmt {
-                d.format("%-d").to_string()
-            } else {
-                d.format("%a").to_string()
-            };
-            DayStepsData {
-                label,
-                steps_label: format_number(total),
-                steps_raw: total,
-                fraction: total as f32 / max_steps as f32,
-                bar_start: time::local_ts(d, 0, 0, 0),
-                bar_end: time::local_ts(d, 23, 59, 59),
-            }
-        })
-        .collect())
+    Ok(totals)
 }
 
-/// Summary label for the steps chart header.
-/// Day: total steps. Week/Month: average steps per day.
-pub fn compute_steps_summary(bars: &[DayStepsData], period: i32) -> String {
-    if bars.is_empty() {
-        return "0 steps".to_string();
-    }
-    let total: i64 = bars.iter().map(|b| b.steps_raw).sum();
-    if period == 0 {
-        format!("{} steps", format_number(total))
-    } else {
-        let avg = total / bars.len() as i64;
-        format!("avg {} / day", format_number(avg))
-    }
-}
-
-// ─── Shared sleep query fragments ──────────────────────────────────────────────
-
-/// Night-bucketing expression: shifts overnight sleep sessions (types 1/2)
-/// forward 12h so they're labeled by wake-up day; naps (3/4) stay on their
-/// natural calendar day.
-const SLEEP_NIGHT_KEY: &str =
-    "date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch')";
-
-/// WHERE clause shared by sleep queries: widens the UTC range by ±12h so
-/// boundary sessions whose night key falls inside the target range aren't
-/// dropped by a strict UTC filter.
-const SLEEP_WHERE: &str =
-    "start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200 AND session_type <= 4";
-
-// ─── Sleep chart data ─────────────────────────────────────────────────────────
-
-pub fn load_sleep_bars(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<Vec<SleepBarData>> {
-    let (range_start, range_end) = period_range_offset(period, offset);
-    let label_fmt = period == 2;
-
-    let sql = format!(
-        "SELECT {SLEEP_NIGHT_KEY} AS night,
-                SUM(CASE WHEN session_type IN (1, 3) THEN duration_secs ELSE 0 END) AS total_secs,
-                SUM(CASE WHEN session_type IN (2, 4) THEN duration_secs ELSE 0 END) AS deep_secs
+/// Sleep nights whose wake-up date falls inside `range`, sorted by date.
+pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result<Vec<Night>> {
+    let (utc_start, utc_end) = range.utc_bounds();
+    // A session waking inside the range must start within ~48h before it; the
+    // slack also absorbs per-row utc_offset differences. Exact bucketing
+    // happens below on wake dates.
+    let mut stmt = conn.prepare(
+        "SELECT start_ts + utc_offset, duration_secs, session_type
          FROM health_activity_sessions
-         WHERE {SLEEP_WHERE}
-         GROUP BY night
-         ORDER BY night ASC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-
-    struct Row {
-        night: String,
-        total: i64,
-        deep: i64,
-    }
-    let rows: Vec<Row> = stmt
-        .query_map(params![range_start, range_end], |r| {
-            Ok(Row {
-                night: r.get(0)?,
-                total: r.get(1)?,
-                deep: r.get(2)?,
-            })
+         WHERE session_type <= 4 AND start_ts >= ?1 AND start_ts <= ?2
+         ORDER BY start_ts ASC",
+    )?;
+    let rows: Vec<(i64, i64, i32)> = stmt
+        .query_map(params![utc_start - 48 * 3600, utc_end + 12 * 3600], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .filter_map(|r| r.ok())
         .collect();
 
-    let max_total = rows.iter().map(|r| r.total).max().unwrap_or(1).max(1);
+    let wake_date =
+        |local_end: i64| DateTime::from_timestamp(local_end, 0).map(|dt| dt.date_naive());
 
+    // Primary sessions (sleep=1, nap=3) define the nights.
+    let mut nights: BTreeMap<NaiveDate, Night> = BTreeMap::new();
+    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 1 | 3)) {
+        let local_end = local_start + dur;
+        let Some(date) = wake_date(local_end) else { continue };
+        nights
+            .entry(date)
+            .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
+            .phases
+            .push(NightPhase { local_start, local_end, is_deep: false, is_nap: ty == 3 });
+    }
+
+    // Deep segments (2/4) attach to the night they overlap; a segment ending
+    // before midnight belongs with the following morning's wake-up, not its
+    // own end date. Orphans (no overlapping primary) fall back to wake date.
+    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 2 | 4)) {
+        let local_end = local_start + dur;
+        let date = nights
+            .values()
+            .find(|n| {
+                n.phases
+                    .iter()
+                    .any(|p| !p.is_deep && p.local_start < local_end && local_start < p.local_end)
+            })
+            .map(|n| n.wake_date)
+            .or_else(|| wake_date(local_end));
+        let Some(date) = date else { continue };
+        nights
+            .entry(date)
+            .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
+            .phases
+            .push(NightPhase { local_start, local_end, is_deep: true, is_nap: ty == 4 });
+    }
+
+    let mut nights: Vec<Night> = nights
+        .into_values()
+        .filter(|n| range.contains(n.wake_date))
+        .collect();
+    for n in &mut nights {
+        n.phases.sort_by_key(|p| p.local_start);
+    }
+    Ok(nights)
+}
+
+// ═══ Presentation layer ═══════════════════════════════════════════════════════
+//
+// Pure functions over the fetchers above. Bars, header labels, and
+// previous-period deltas are all derived from the same fetched data, so they
+// can't disagree about bucketing.
+
+/// Consecutive ISO-week buckets covering `range`, in order.
+fn week_buckets(range: DateRange) -> Vec<DateRange> {
+    let mut weeks: Vec<DateRange> = Vec::new();
+    for day in range.days() {
+        match weeks.last_mut() {
+            Some(w) if day.iso_week() == w.start.iso_week() => w.end = day,
+            _ => weeks.push(DateRange::day(day)),
+        }
+    }
+    weeks
+}
+
+fn delta_pct(current: i64, previous: i64) -> String {
+    if previous == 0 {
+        return "—".to_string();
+    }
+    let pct = (current - previous) as f64 / previous.abs() as f64 * 100.0;
+    if !pct.is_finite() {
+        return "—".to_string();
+    }
+    // Round first so a -0.4% change reads "+0%", not "-0%".
+    let pct = pct.round() as i64;
+    if pct >= 0 {
+        format!("+{pct}%")
+    } else {
+        format!("{pct}%")
+    }
+}
+
+// ─── Steps chart ─────────────────────────────────────────────────────────────
+
+pub fn load_steps_chart(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<StepsChart> {
+    let range = range_for(period, offset);
+    let by_day = fetch_steps_by_day(conn, range)?;
+
+    let bars = match period {
+        0 => hourly_step_bars(conn, range.start)?,
+        2 => weekly_step_bars(&by_day, range),
+        _ => daily_step_bars(&by_day, range),
+    };
+
+    let (summary, avg_label) = steps_labels(&by_day, range, period);
+
+    // The delta compares the same metric the header shows: the day's total in
+    // day view, average steps per elapsed day otherwise — so a partial
+    // current month isn't measured against a full previous month's total.
+    let prev_range = range_for(period, offset + 1);
+    let prev_by_day = fetch_steps_by_day(conn, prev_range)?;
+    let delta_label = delta_pct(
+        steps_metric(&by_day, range, period),
+        steps_metric(&prev_by_day, prev_range, period),
+    );
+
+    Ok(StepsChart {
+        bars,
+        summary,
+        avg_label,
+        delta_positive: delta_label.starts_with('+'),
+        delta_label,
+    })
+}
+
+fn hourly_step_bars(conn: &Connection, day: NaiveDate) -> anyhow::Result<Vec<DayStepsData>> {
+    let rows = fetch_steps_by_hour(conn, day)?;
+    let max_steps = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1);
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let nd = r.night.parse::<NaiveDate>().ok();
-            let label = nd
-                .map(|d| {
-                    if label_fmt {
-                        d.format("%-d").to_string()
-                    } else {
-                        d.format("%a").to_string()
-                    }
-                })
-                .unwrap_or_else(|| r.night.clone());
-            let (bar_start, bar_end) = nd
-                .map(|d| (time::local_ts(d, 0, 0, 0), time::local_ts(d, 23, 59, 59)))
-                .unwrap_or((0, 0));
-            let deep = r.deep.min(r.total);
-            let light = (r.total - deep).max(0);
-            SleepBarData {
-                label,
+        .map(|(h, total)| DayStepsData {
+            label: format!("{}", h),
+            steps_label: format_number(total),
+            steps_raw: total,
+            fraction: total as f32 / max_steps as f32,
+            bar_start: time::local_ts(day, h, 0, 0),
+            bar_end: time::local_ts(day, h, 59, 59),
+        })
+        .collect())
+}
+
+fn daily_step_bars(by_day: &BTreeMap<NaiveDate, i64>, range: DateRange) -> Vec<DayStepsData> {
+    let days: Vec<(NaiveDate, i64)> = range
+        .days()
+        .map(|d| (d, by_day.get(&d).copied().unwrap_or(0)))
+        .collect();
+    let max_steps = days.iter().map(|(_, t)| *t).max().unwrap_or(1).max(1);
+    days.into_iter()
+        .map(|(d, total)| DayStepsData {
+            label: d.format("%a").to_string(),
+            steps_label: format_number(total),
+            steps_raw: total,
+            fraction: total as f32 / max_steps as f32,
+            bar_start: time::local_ts(d, 0, 0, 0),
+            bar_end: time::local_ts(d, 23, 59, 59),
+        })
+        .collect()
+}
+
+/// Month view: one bar per ISO week, height and label are the week's average
+/// steps per elapsed day. Weeks entirely in the future are skipped, but the
+/// W1/W2/… labels stay anchored to the week's position in the month.
+fn weekly_step_bars(by_day: &BTreeMap<NaiveDate, i64>, range: DateRange) -> Vec<DayStepsData> {
+    let today = watch_today();
+    struct Week {
+        idx: usize,
+        span: DateRange,
+        total: i64,
+        avg: i64,
+    }
+    let weeks: Vec<Week> = week_buckets(range)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, span)| {
+            let elapsed = span.days().filter(|d| *d <= today).count() as i64;
+            if elapsed == 0 {
+                return None;
+            }
+            let total: i64 = span.days().filter_map(|d| by_day.get(&d)).sum();
+            Some(Week { idx, span, total, avg: total / elapsed })
+        })
+        .collect();
+
+    let max_avg = weeks.iter().map(|w| w.avg).max().unwrap_or(1).max(1);
+    weeks
+        .into_iter()
+        .map(|w| {
+            let (bar_start, bar_end) = w.span.utc_bounds();
+            DayStepsData {
+                label: format!("W{}", w.idx + 1),
+                steps_label: format_number(w.avg),
+                steps_raw: w.total,
+                fraction: w.avg as f32 / max_avg as f32,
                 bar_start,
                 bar_end,
+            }
+        })
+        .collect()
+}
+
+/// The headline steps metric: the total in day view, average per elapsed day
+/// otherwise. Must stay in sync with `steps_labels`.
+fn steps_metric(by_day: &BTreeMap<NaiveDate, i64>, range: DateRange, period: i32) -> i64 {
+    let total: i64 = by_day.values().sum();
+    if period == 0 {
+        total
+    } else {
+        total / range.days_elapsed().max(1)
+    }
+}
+
+/// (summary, avg_label) for the steps chart header.
+/// Day: total steps. Week/Month: average per elapsed day.
+fn steps_labels(
+    by_day: &BTreeMap<NaiveDate, i64>,
+    range: DateRange,
+    period: i32,
+) -> (String, String) {
+    if by_day.is_empty() {
+        return ("0 steps".to_string(), "—".to_string());
+    }
+    let metric = steps_metric(by_day, range, period);
+    let label = if period == 0 {
+        format!("{} steps", format_number(metric))
+    } else {
+        format!("avg {} / day", format_number(metric))
+    };
+    (label.clone(), label)
+}
+
+// ─── Sleep chart ─────────────────────────────────────────────────────────────
+
+pub fn load_sleep_chart(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepChart> {
+    let range = range_for(period, offset);
+    let nights = fetch_sleep_nights(conn, range)?;
+
+    let bars = if period == 2 {
+        weekly_sleep_bars(&nights, range)
+    } else {
+        nightly_sleep_bars(&nights)
+    };
+
+    let (summary, avg_label) = sleep_labels(&nights, period);
+
+    // The delta compares the same metric the header shows: the night's total
+    // in day view, average per night with data otherwise — so a week that's
+    // missing a synced night isn't measured against full-week totals.
+    let prev_nights = fetch_sleep_nights(conn, range_for(period, offset + 1))?;
+    let delta_label = delta_pct(
+        sleep_metric(&nights, period),
+        sleep_metric(&prev_nights, period),
+    );
+
+    Ok(SleepChart {
+        bars,
+        summary,
+        avg_label,
+        delta_positive: delta_label.starts_with('+'),
+        delta_label,
+    })
+}
+
+fn total_sleep(nights: &[Night]) -> i64 {
+    nights.iter().map(|n| n.total_secs()).sum()
+}
+
+/// The headline sleep metric: the total in day view, average per night with
+/// data otherwise. Must stay in sync with `sleep_labels`.
+fn sleep_metric(nights: &[Night], period: i32) -> i64 {
+    if period == 0 || nights.is_empty() {
+        total_sleep(nights)
+    } else {
+        total_sleep(nights) / nights.len() as i64
+    }
+}
+
+fn deep_label(deep: i64) -> String {
+    if deep > 0 {
+        format!("{} deep", format_duration(deep))
+    } else {
+        String::new()
+    }
+}
+
+fn nightly_sleep_bars(nights: &[Night]) -> Vec<SleepBarData> {
+    let max_total = nights.iter().map(|n| n.total_secs()).max().unwrap_or(1).max(1);
+    nights
+        .iter()
+        .map(|n| {
+            let total = n.total_secs();
+            let deep = n.deep_secs();
+            let light = (total - deep).max(0);
+            SleepBarData {
+                label: n.wake_date.format("%a").to_string(),
+                bar_start: time::local_ts(n.wake_date, 0, 0, 0),
+                bar_end: time::local_ts(n.wake_date, 23, 59, 59),
                 light_fraction: light as f32 / max_total as f32,
                 deep_fraction: deep as f32 / max_total as f32,
                 light_secs: light,
                 deep_secs: deep,
-                total_label: format_duration(r.total),
-                deep_label: if deep > 0 {
-                    format!("{} deep", format_duration(deep))
-                } else {
-                    String::new()
-                },
+                total_label: format_duration(total),
+                deep_label: deep_label(deep),
             }
         })
-        .collect())
+        .collect()
 }
 
-/// Summary label for the sleep chart header.
-/// Day: total sleep + deep sleep for that night.
-/// Week/Month: average per night.
-pub fn compute_sleep_summary(bars: &[SleepBarData], period: i32) -> String {
-    if bars.is_empty() {
-        return "No sleep data".to_string();
+/// Month view: one bar per ISO week, sized by the week's average per night
+/// with data. Weeks without any sleep data are skipped, but W1/W2/… labels
+/// stay anchored to the week's position in the month.
+fn weekly_sleep_bars(nights: &[Night], range: DateRange) -> Vec<SleepBarData> {
+    struct Week {
+        idx: usize,
+        span: DateRange,
+        avg_total: i64,
+        avg_deep: i64,
     }
-    let n = bars.len() as i64;
-    let total_light: i64 = bars.iter().map(|b| b.light_secs).sum();
-    let total_deep: i64 = bars.iter().map(|b| b.deep_secs).sum();
+    let weeks: Vec<Week> = week_buckets(range)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, span)| {
+            let wn: Vec<&Night> = nights.iter().filter(|n| span.contains(n.wake_date)).collect();
+            if wn.is_empty() {
+                return None;
+            }
+            let n = wn.len() as i64;
+            let total: i64 = wn.iter().map(|night| night.total_secs()).sum();
+            let deep: i64 = wn.iter().map(|night| night.deep_secs()).sum();
+            Some(Week { idx, span, avg_total: total / n, avg_deep: deep / n })
+        })
+        .collect();
+
+    let max_total = weeks.iter().map(|w| w.avg_total).max().unwrap_or(1).max(1);
+    weeks
+        .into_iter()
+        .map(|w| {
+            let light = (w.avg_total - w.avg_deep).max(0);
+            let (bar_start, bar_end) = w.span.utc_bounds();
+            SleepBarData {
+                label: format!("W{}", w.idx + 1),
+                bar_start,
+                bar_end,
+                light_fraction: light as f32 / max_total as f32,
+                deep_fraction: w.avg_deep as f32 / max_total as f32,
+                light_secs: light,
+                deep_secs: w.avg_deep,
+                total_label: format_duration(w.avg_total),
+                deep_label: deep_label(w.avg_deep),
+            }
+        })
+        .collect()
+}
+
+/// (summary, avg_label) for the sleep chart header.
+/// Day: that night's totals. Week/Month: average per night with data.
+fn sleep_labels(nights: &[Night], period: i32) -> (String, String) {
+    if nights.is_empty() {
+        return ("No sleep data".to_string(), "—".to_string());
+    }
+    let total = total_sleep(nights);
+    let deep: i64 = nights.iter().map(|n| n.deep_secs()).sum();
 
     if period == 0 {
-        let sleep = total_light + total_deep;
-        if total_deep > 0 {
-            format!(
-                "{} · {} deep",
-                format_duration(sleep),
-                format_duration(total_deep)
-            )
+        let summary = if deep > 0 {
+            format!("{} · {} deep", format_duration(total), format_duration(deep))
         } else {
-            format_duration(sleep)
-        }
+            format_duration(total)
+        };
+        (summary, format_duration(total))
     } else {
-        let avg_sleep = (total_light + total_deep) / n;
-        let avg_deep = total_deep / n;
-        if avg_deep > 0 {
-            format!(
-                "avg {} · {} deep",
-                format_duration(avg_sleep),
-                format_duration(avg_deep)
-            )
+        let n = nights.len() as i64;
+        let (avg, avg_deep) = (total / n, deep / n);
+        let summary = if avg_deep > 0 {
+            format!("avg {} · {} deep", format_duration(avg), format_duration(avg_deep))
         } else {
-            format!("avg {}", format_duration(avg_sleep))
-        }
+            format!("avg {}", format_duration(avg))
+        };
+        (summary, format!("AVG {} / night", format_duration(avg)))
     }
 }
 
@@ -326,143 +529,522 @@ pub fn load_sessions_filtered(
     Ok(sessions)
 }
 
-// ─── Sleep timing strip data ──────────────────────────────────────────────────
+// ─── Sleep stats ─────────────────────────────────────────────────────────────
 
-pub fn load_sleep_nights(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<Vec<SleepNightData>> {
-    let (range_start, range_end) = period_range_offset(period, offset);
-    let label_fmt = period == 2;
+/// Compute key statistics from sleep data for the current period.
+pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepStats> {
+    let range = range_for(period, offset);
+    let nights = fetch_sleep_nights(conn, range)?;
 
-    let sql = format!(
-        "SELECT {SLEEP_NIGHT_KEY} AS night,
-                start_ts, utc_offset, duration_secs, session_type
-         FROM health_activity_sessions
-         WHERE {SLEEP_WHERE}
-         ORDER BY night ASC, start_ts ASC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-
-    struct Row {
-        night: String,
-        start_ts: i64,
-        utc_offset: i64,
-        duration_secs: i64,
-        session_type: i32,
+    if nights.is_empty() {
+        return Ok(SleepStats {
+            deep_avg_label: "—".into(),
+            light_pct: 0.0,
+            deep_pct: 0.0,
+            awake_pct: 0.0,
+            avg_bedtime: "—".into(),
+            avg_wakeup: "—".into(),
+            highest_dur: "—".into(),
+            lowest_dur: "—".into(),
+        });
     }
-    let rows: Vec<Row> = stmt
-        .query_map(params![range_start, range_end], |r| {
-            Ok(Row {
-                night: r.get(0)?,
-                start_ts: r.get(1)?,
-                utc_offset: r.get(2)?,
-                duration_secs: r.get(3)?,
-                session_type: r.get(4)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
+
+    // Stage mix: light/deep as a share of all slept time (naps included,
+    // matching the chart's totals).
+    let total_slept: i64 = nights.iter().map(|n| n.total_secs()).sum();
+    let total_deep: i64 = nights.iter().map(|n| n.deep_secs()).sum();
+
+    // Bedtime, wake-up, and awake gaps come from the overnight block only,
+    // so an afternoon nap doesn't count the whole day as "in bed" or shift
+    // the average wake-up time to the nap's end.
+    let mut bedtimes: Vec<i64> = Vec::new();
+    let mut wakeups: Vec<i64> = Vec::new();
+    let mut in_bed: i64 = 0;
+    let mut slept_in_bed: i64 = 0;
+    for night in &nights {
+        let block = night.overnight_phases();
+        let (Some(start), Some(end)) = (
+            block.iter().map(|p| p.local_start).min(),
+            block.iter().map(|p| p.local_end).max(),
+        ) else {
+            continue; // deep-only orphan night
+        };
+        bedtimes.push(start);
+        wakeups.push(end);
+        in_bed += end - start;
+        slept_in_bed += block.iter().map(|p| p.local_end - p.local_start).sum::<i64>();
+    }
+
+    // One denominator for the whole stage mix — slept time plus the awake
+    // gaps between sleep sections — so light + deep + awake = 100%.
+    let awake = (in_bed - slept_in_bed).max(0);
+    let (light_pct, deep_pct, awake_pct) =
+        stage_percentages(total_slept - total_deep, total_deep, awake);
+
+    // Duration stats: exclude nights with zero primary sleep (orphan deep-only
+    // nights) so they don't drag down the average or claim shortest night.
+    let with_sleep: Vec<i64> = nights
+        .iter()
+        .filter_map(|n| {
+            let s = n.total_secs();
+            if s > 0 { Some(s) } else { None }
+        })
         .collect();
+    let slept_nights = with_sleep.len().max(1) as i64;
+    let slept_deep: i64 = nights
+        .iter()
+        .filter(|n| n.total_secs() > 0)
+        .map(|n| n.deep_secs())
+        .sum();
 
-    // Pass 1: collect raw phase data grouped by night key.
-    struct RawPhase {
-        true_start: i64,
-        true_end: i64,
-        is_deep: bool,
+    Ok(SleepStats {
+        deep_avg_label: format_duration(slept_deep / slept_nights),
+        light_pct,
+        deep_pct,
+        awake_pct,
+        avg_bedtime: avg_time_of_day(&bedtimes),
+        avg_wakeup: avg_time_of_day(&wakeups),
+        highest_dur: format_duration(with_sleep.iter().copied().max().unwrap_or(0)),
+        lowest_dur: format_duration(with_sleep.iter().copied().min().unwrap_or(0)),
+    })
+}
+
+/// Integer percentages of (light, deep, awake) that total exactly 100.
+/// Largest-remainder rounding, so independent rounding can't add up to 101.
+fn stage_percentages(light: i64, deep: i64, awake: i64) -> (f32, f32, f32) {
+    let parts = [light.max(0), deep.max(0), awake.max(0)];
+    let total: i64 = parts.iter().sum();
+    if total == 0 {
+        return (0.0, 0.0, 0.0);
     }
-    struct RawNight {
-        night_key: String,
-        nd: Option<NaiveDate>,
-        first_true_start: i64,
-        bar_start: i64,
-        phases: Vec<RawPhase>,
+    let exact = parts.map(|p| p as f64 / total as f64 * 100.0);
+    let mut floors = exact.map(|e| e.floor() as i64);
+    let mut by_remainder: Vec<usize> = (0..exact.len()).collect();
+    by_remainder.sort_by(|&a, &b| {
+        (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor()))
+    });
+    let deficit = 100 - floors.iter().sum::<i64>();
+    for &i in by_remainder.iter().take(deficit as usize) {
+        floors[i] += 1;
+    }
+    (floors[0] as f32, floors[1] as f32, floors[2] as f32)
+}
+
+/// Average wall-clock time of a set of watch-local epochs, as a 12-hour
+/// label. Uses a circular mean on the 24h clock so bedtimes straddling
+/// midnight (11pm, 1am) average to midnight instead of noon.
+fn avg_time_of_day(epochs: &[i64]) -> String {
+    use chrono::Timelike;
+    use std::f64::consts::TAU;
+
+    let angles = epochs.iter().filter_map(|&e| {
+        DateTime::from_timestamp(e, 0)
+            .map(|dt| (dt.hour() * 60 + dt.minute()) as f64 / 1440.0 * TAU)
+    });
+    let (sum_sin, sum_cos, n) = angles.fold((0.0f64, 0.0f64, 0u32), |(s, c, n), a| {
+        (s + a.sin(), c + a.cos(), n + 1)
+    });
+    if n == 0 {
+        return "—".to_string();
+    }
+    let mean_mins = (sum_sin.atan2(sum_cos) / TAU * 1440.0 + 1440.0) % 1440.0;
+    let (h, m) = (mean_mins as u32 / 60, mean_mins as u32 % 60);
+    let ampm = if h < 12 { "AM" } else { "PM" };
+    let h12 = match h % 12 {
+        0 => 12,
+        x => x,
+    };
+    format!("{}:{:02} {}", h12, m, ampm)
+}
+
+// ═══ Tests ════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema;
+
+    /// Watch-local = UTC-4. Every test uses the same value because the watch
+    /// offset is process-global.
+    const TZ: i64 = -4 * 3600;
+
+    fn setup() -> Connection {
+        time::set_watch_offset(TZ);
+        let conn = Connection::open_in_memory().unwrap();
+        schema::initialize_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO health_records (id, tag, app_uuid, session_ts, item_type, item_size, crc, data, received_at)
+             VALUES (1, 83, x'00', 0, 0, 0, 0, x'00', 0)",
+            [],
+        )
+        .unwrap();
+        conn
     }
 
-    let mut raw: Vec<RawNight> = Vec::new();
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
 
-    for row in rows {
-        let true_start = row.start_ts + row.utc_offset;
-        let true_end = true_start + row.duration_secs;
-        let is_deep = matches!(row.session_type, 2 | 4);
+    /// Watch-local epoch seconds for a wall-clock time.
+    fn local(date: NaiveDate, h: u32, min: u32) -> i64 {
+        date.and_hms_opt(h, min, 0).unwrap().and_utc().timestamp()
+    }
 
-        if raw
-            .last()
-            .map(|n: &RawNight| n.night_key.as_str())
-            != Some(&row.night)
-        {
-            let nd = row.night.parse::<NaiveDate>().ok();
-            let bar_start = nd.map(|d| time::local_ts(d, 0, 0, 0)).unwrap_or(0);
-            raw.push(RawNight {
-                night_key: row.night.clone(),
-                nd,
-                first_true_start: true_start,
-                bar_start,
-                phases: Vec::new(),
-            });
+    fn insert_session(conn: &Connection, ty: i32, local_start: i64, dur: i64) {
+        conn.execute(
+            "INSERT INTO health_activity_sessions
+             (health_record_id, record_version, session_type, utc_offset, start_ts, duration_secs, raw)
+             VALUES (1, 3, ?1, ?2, ?3, ?4, x'00')",
+            params![ty, TZ, local_start - TZ, dur],
+        )
+        .unwrap();
+    }
+
+    fn insert_minute(conn: &Connection, local_start: i64, steps: i64) {
+        conn.execute(
+            "INSERT INTO health_activity_minutes
+             (health_record_id, record_version, start_ts, utc_offset, steps, orientation, vmc, light, raw)
+             VALUES (1, 7, ?1, ?2, ?3, 0, 0, 0, x'00')",
+            params![local_start - TZ, TZ, steps],
+        )
+        .unwrap();
+    }
+
+    /// The whole point of the redesign: sleep starting the night of Jul 3 and
+    /// ending the morning of Jul 4 belongs to Jul 4, including a deep segment
+    /// that ends before midnight.
+    #[test]
+    fn overnight_sleep_lands_on_wake_date() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+
+        // 11pm Jul 3 → 7am Jul 4 (8h), with deep spans on both sides of midnight.
+        insert_session(&conn, 1, local(jul3, 23, 0), 8 * 3600);
+        insert_session(&conn, 2, local(jul3, 23, 10), 40 * 60); // ends 23:50 Jul 3
+        insert_session(&conn, 2, local(jul4, 2, 0), 50 * 60);
+
+        let nights = fetch_sleep_nights(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(nights.len(), 1);
+        let night = &nights[0];
+        assert_eq!(night.wake_date, jul4);
+        assert_eq!(night.phases.len(), 3);
+        assert_eq!(night.total_secs(), 8 * 3600);
+        assert_eq!(night.deep_secs(), 90 * 60);
+        assert_eq!(night.sleep_start(), local(jul3, 23, 0));
+
+        // Nothing woke up on Jul 3, so its day view is empty.
+        let jul3_nights = fetch_sleep_nights(&conn, DateRange::day(jul3)).unwrap();
+        assert!(jul3_nights.is_empty());
+    }
+
+    #[test]
+    fn nap_counts_on_its_own_day() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600); // afternoon nap
+
+        let nights = fetch_sleep_nights(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(nights.len(), 1);
+        assert_eq!(nights[0].total_secs(), 9 * 3600);
+    }
+
+    #[test]
+    fn week_range_buckets_each_night_by_wake_date() {
+        let conn = setup();
+        // Nights waking Jul 2, 3, 4.
+        for day in 1..=3 {
+            insert_session(&conn, 1, local(d(2026, 7, day), 23, 0), 7 * 3600);
         }
-        raw.last_mut().unwrap().phases.push(RawPhase {
-            true_start,
-            true_end,
-            is_deep,
-        });
+
+        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 5) };
+        let nights = fetch_sleep_nights(&conn, range).unwrap();
+        let dates: Vec<NaiveDate> = nights.iter().map(|n| n.wake_date).collect();
+        assert_eq!(dates, vec![d(2026, 7, 2), d(2026, 7, 3), d(2026, 7, 4)]);
+
+        // A range ending Jul 3 must exclude the night that woke on Jul 4.
+        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 3) };
+        assert_eq!(fetch_sleep_nights(&conn, range).unwrap().len(), 2);
     }
 
-    // Pass 2: compute duration-proportional fractions and labels.
-    let mut nights: Vec<SleepNightData> = Vec::new();
-    for n in raw {
-        let group_start = n.phases.iter().map(|p| p.true_start).min().unwrap_or(0);
-        let group_end = n
-            .phases
-            .iter()
-            .map(|p| p.true_end)
-            .max()
-            .unwrap_or(group_start);
-        let span = (group_end - group_start).max(1) as f32;
-        let total_dur: i64 = n
-            .phases
-            .iter()
-            .filter(|p| !p.is_deep)
-            .map(|p| p.true_end - p.true_start)
-            .sum();
+    #[test]
+    fn deep_segment_uses_row_utc_offset() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        // Session stored with a different utc_offset than the watch's current
+        // one (e.g. recorded before a DST change): local times still come from
+        // the row itself.
+        let local_start = local(d(2026, 7, 3), 23, 0);
+        let row_tz = TZ + 3600;
+        conn.execute(
+            "INSERT INTO health_activity_sessions
+             (health_record_id, record_version, session_type, utc_offset, start_ts, duration_secs, raw)
+             VALUES (1, 3, 1, ?1, ?2, ?3, x'00')",
+            params![row_tz, local_start - row_tz, 8 * 3600],
+        )
+        .unwrap();
 
-        let day_str = n
-            .nd
-            .map(|d| {
-                if label_fmt {
-                    d.format("%-d").to_string()
-                } else {
-                    d.format("%a").to_string()
-                }
-            })
-            .unwrap_or_else(|| n.night_key.clone());
-        let time_str = DateTime::from_timestamp(n.first_true_start, 0)
-            .map(|dt| dt.format("%-I:%M%P").to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let label = format!("{} {}", day_str, time_str);
-
-        let segments = n
-            .phases
-            .iter()
-            .map(|p| {
-                let start_frac =
-                    ((p.true_start - group_start) as f32 / span).clamp(0.0, 1.0);
-                let end_frac = ((p.true_end - group_start) as f32 / span).clamp(0.0, 1.0);
-                SleepSegmentData {
-                    start_frac,
-                    width_frac: (end_frac - start_frac).max(0.0),
-                    is_deep: p.is_deep,
-                }
-            })
-            .collect();
-
-        nights.push(SleepNightData {
-            label,
-            duration_label: format_duration(total_dur),
-            bar_start: n.bar_start,
-            segments,
-        });
+        let nights = fetch_sleep_nights(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(nights.len(), 1);
+        assert_eq!(nights[0].wake_date, jul4);
     }
 
-    Ok(nights)
+    #[test]
+    fn steps_bucket_by_local_date_and_fill_missing_days() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_minute(&conn, local(jul4, 0, 5), 20); // just after local midnight
+        insert_minute(&conn, local(jul4, 12, 0), 100);
+        insert_minute(&conn, local(jul4, 23, 59), 30);
+
+        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 5) };
+        let by_day = fetch_steps_by_day(&conn, range).unwrap();
+        assert_eq!(by_day.len(), 1);
+        assert_eq!(by_day[&jul4], 150);
+
+        let bars = daily_step_bars(&by_day, range);
+        assert_eq!(bars.len(), 7);
+        assert_eq!(bars.iter().map(|b| b.steps_raw).sum::<i64>(), 150);
+
+        let hours = fetch_steps_by_hour(&conn, jul4).unwrap();
+        assert_eq!(hours, vec![(0, 20), (12, 100), (23, 30)]);
+    }
+
+    #[test]
+    fn weekly_buckets_follow_iso_weeks() {
+        // July 2026: Wed Jul 1 … Fri Jul 31 spans 5 ISO weeks.
+        let range = DateRange { start: d(2026, 7, 1), end: d(2026, 7, 31) };
+        let weeks = week_buckets(range);
+        assert_eq!(weeks.len(), 5);
+        assert_eq!(weeks[0], DateRange { start: d(2026, 7, 1), end: d(2026, 7, 5) });
+        assert_eq!(weeks[1], DateRange { start: d(2026, 7, 6), end: d(2026, 7, 12) });
+        assert_eq!(weeks[4], DateRange { start: d(2026, 7, 27), end: d(2026, 7, 31) });
+    }
+
+    #[test]
+    fn delta_uses_same_wake_date_bucketing() {
+        let conn = setup();
+        // Night waking Jul 4: 8h. Night waking Jul 3: 4h.
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+        insert_session(&conn, 1, local(d(2026, 7, 2), 23, 0), 4 * 3600);
+
+        let cur = fetch_sleep_nights(&conn, DateRange::day(d(2026, 7, 4))).unwrap();
+        let prev = fetch_sleep_nights(&conn, DateRange::day(d(2026, 7, 3))).unwrap();
+        assert_eq!(delta_pct(total_sleep(&cur), total_sleep(&prev)), "+100%");
+    }
+
+    /// Hourly bars and the daily total must use the same membership rule
+    /// (the row's own local date), even when a row's stored utc_offset
+    /// differs from the watch's current offset.
+    #[test]
+    fn hourly_and_daily_step_bucketing_agree_across_offsets() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+
+        // Row-local 00:30 on Jul 4, stored with utc_offset one hour east of
+        // the watch's current offset — its UTC instant falls before the
+        // watch-offset start of Jul 4.
+        let row_tz = TZ + 3600;
+        let local_start = local(jul4, 0, 30);
+        conn.execute(
+            "INSERT INTO health_activity_minutes
+             (health_record_id, record_version, start_ts, utc_offset, steps, orientation, vmc, light, raw)
+             VALUES (1, 7, ?1, ?2, 42, 0, 0, 0, x'00')",
+            params![local_start - row_tz, row_tz],
+        )
+        .unwrap();
+
+        let by_day = fetch_steps_by_day(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(by_day[&jul4], 42);
+        assert_eq!(fetch_steps_by_hour(&conn, jul4).unwrap(), vec![(0, 42)]);
+
+        // And Jul 3 must not double-count it under either rule.
+        assert!(fetch_steps_by_day(&conn, DateRange::day(jul3)).unwrap().is_empty());
+        assert!(fetch_steps_by_hour(&conn, jul3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delta_pct_rounds_sanely() {
+        assert_eq!(delta_pct(100, 0), "—");
+        assert_eq!(delta_pct(150, 75), "+100%");
+        assert_eq!(delta_pct(50, 100), "-50%");
+        assert_eq!(delta_pct(100, 100), "+0%");
+        assert_eq!(delta_pct(999, 1000), "+0%"); // -0.1% must not read "-0%"
+        assert_eq!(delta_pct(199, 200), "-1%");  // -0.5% rounds away from zero
+    }
+
+    #[test]
+    fn sleep_chart_day_view_end_to_end() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+        insert_session(&conn, 2, local(d(2026, 7, 3), 23, 30), 90 * 60);
+        insert_session(&conn, 1, local(d(2026, 7, 2), 23, 0), 4 * 3600); // wakes Jul 3
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let chart = load_sleep_chart(&conn, 0, offset).unwrap();
+        assert_eq!(chart.bars.len(), 1);
+        assert_eq!(chart.summary, "8h 0m · 1h 30m deep");
+        assert_eq!(chart.avg_label, "8h 0m");
+        assert_eq!(chart.delta_label, "+100%"); // 8h vs the 4h night before
+        assert!(chart.delta_positive);
+    }
+
+    #[test]
+    fn steps_chart_day_view_end_to_end() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_minute(&conn, local(jul4, 9, 0), 100);
+        insert_minute(&conn, local(jul4, 12, 0), 50);
+        insert_minute(&conn, local(d(2026, 7, 3), 9, 0), 75);
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let chart = load_steps_chart(&conn, 0, offset).unwrap();
+        assert_eq!(chart.summary, "150 steps");
+        assert_eq!(chart.bars.len(), 2);
+        assert_eq!(chart.bars.iter().map(|b| b.steps_raw).sum::<i64>(), 150);
+        assert_eq!(chart.delta_label, "+100%"); // 150 vs 75 the day before
+    }
+
+    /// Regression: the weekly delta must compare the per-night averages the
+    /// header shows, not week totals — otherwise a week with a missing synced
+    /// night reads as a big change even when the averages are identical.
+    #[test]
+    fn weekly_sleep_delta_compares_per_night_averages() {
+        let conn = setup();
+        // This week: a 7h night waking on every day of the range.
+        // Last week: the same 7h nights, but one night missing.
+        let this_week = range_for(1, 0);
+        let last_week = range_for(1, 1);
+        for wake in this_week.days() {
+            insert_session(&conn, 1, local(wake, 6, 0) - 7 * 3600, 7 * 3600);
+        }
+        for wake in last_week.days().skip(1) {
+            insert_session(&conn, 1, local(wake, 6, 0) - 7 * 3600, 7 * 3600);
+        }
+
+        let chart = load_sleep_chart(&conn, 1, 0).unwrap();
+        assert_eq!(chart.avg_label, "AVG 7h 0m / night");
+        assert_eq!(chart.delta_label, "+0%");
+    }
+
+    /// Regression: the month delta must compare average steps per elapsed
+    /// day, not a partial month's total against a full previous month.
+    #[test]
+    fn monthly_steps_delta_compares_daily_averages() {
+        let conn = setup();
+        let today = watch_today();
+        let this_month = range_for(2, 0);
+        let last_month = range_for(2, 1);
+        for day in this_month.days().filter(|d| *d <= today) {
+            insert_minute(&conn, local(day, 12, 0), 1000);
+        }
+        for day in last_month.days() {
+            insert_minute(&conn, local(day, 12, 0), 1000);
+        }
+
+        let chart = load_steps_chart(&conn, 2, 0).unwrap();
+        assert_eq!(chart.summary, "avg 1,000 / day");
+        assert_eq!(chart.delta_label, "+0%");
+    }
+
+    #[test]
+    fn sleep_stats_stage_and_awake_percentages() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+        // In bed 23:00–07:00 (8h) with a 1h awake gap: slept 7h, 2h deep.
+        insert_session(&conn, 1, local(jul3, 23, 0), 3 * 3600); // 23:00–02:00
+        insert_session(&conn, 1, local(jul4, 3, 0), 4 * 3600); // 03:00–07:00
+        insert_session(&conn, 2, local(jul4, 0, 0), 2 * 3600); // deep 00:00–02:00
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_sleep_stats(&conn, 0, offset).unwrap();
+        assert_eq!(stats.deep_avg_label, "2h 0m");
+        // Shares of the 8h in bed: 5h light, 2h deep, 1h awake — the tied
+        // .5 remainders resolve to light, and the three total exactly 100.
+        assert_eq!(stats.light_pct, 63.0);
+        assert_eq!(stats.deep_pct, 25.0);
+        assert_eq!(stats.awake_pct, 12.0);
+        assert_eq!(stats.avg_bedtime, "11:00 PM");
+        assert_eq!(stats.avg_wakeup, "7:00 AM");
+        assert_eq!(stats.highest_dur, "7h 0m");
+        assert_eq!(stats.lowest_dur, "7h 0m");
+    }
+
+    #[test]
+    fn stage_percentages_always_total_100() {
+        assert_eq!(stage_percentages(0, 0, 0), (0.0, 0.0, 0.0));
+        assert_eq!(stage_percentages(9, 0, 0), (100.0, 0.0, 0.0));
+        assert_eq!(stage_percentages(1, 1, 1), (34.0, 33.0, 33.0));
+        // 62.5 / 25 / 12.5 would independently round to 63 + 25 + 13 = 101.
+        assert_eq!(stage_percentages(5, 2, 1), (63.0, 25.0, 12.0));
+        for (l, d, a) in [(7, 2, 1), (12345, 6789, 42), (1, 1, 998)] {
+            let (lp, dp, ap) = stage_percentages(l, d, a);
+            assert_eq!(lp + dp + ap, 100.0);
+        }
+    }
+
+    /// A nap counts toward the night's totals but must not stretch the
+    /// in-bed span or shift the wake-up time to the nap's end.
+    #[test]
+    fn nap_does_not_skew_wakeup_or_awake_stats() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600); // wake 7am
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600); // 2pm–3pm nap
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_sleep_stats(&conn, 0, offset).unwrap();
+        assert_eq!(stats.avg_wakeup, "7:00 AM"); // not 3:00 PM
+        assert_eq!(stats.awake_pct, 0.0); // the 7h before the nap isn't "in bed"
+        assert_eq!(stats.highest_dur, "9h 0m"); // totals still include the nap
+    }
+
+    /// Bedtimes straddling midnight must average on the clock circle:
+    /// 11pm and 1am → midnight, not noon.
+    #[test]
+    fn average_bedtime_wraps_midnight() {
+        let conn = setup();
+        let today = watch_today();
+        let yesterday = today - chrono::Duration::days(1);
+        insert_session(&conn, 1, local(yesterday, 23, 0), 8 * 3600); // bed 11pm, wake 7am today
+        insert_session(&conn, 1, local(yesterday, 1, 0), 6 * 3600); // bed 1am, wake 7am yesterday
+
+        let stats = load_sleep_stats(&conn, 1, 0).unwrap();
+        assert_eq!(stats.avg_bedtime, "12:00 AM");
+        assert_eq!(stats.avg_wakeup, "7:00 AM");
+    }
+
+    #[test]
+    fn sleep_labels_average_per_night_with_data() {
+        let nights = vec![
+            Night {
+                wake_date: d(2026, 7, 3),
+                phases: vec![NightPhase {
+                    local_start: 0,
+                    local_end: 6 * 3600,
+                    is_deep: false,
+                    is_nap: false,
+                }],
+            },
+            Night {
+                wake_date: d(2026, 7, 4),
+                phases: vec![
+                    NightPhase { local_start: 0, local_end: 8 * 3600, is_deep: false, is_nap: false },
+                    NightPhase { local_start: 0, local_end: 2 * 3600, is_deep: true, is_nap: false },
+                ],
+            },
+        ];
+        let (summary, avg) = sleep_labels(&nights, 1);
+        assert_eq!(summary, "avg 7h 0m · 1h 0m deep");
+        assert_eq!(avg, "AVG 7h 0m / night");
+
+        let (summary, avg) = sleep_labels(&nights[1..], 0);
+        assert_eq!(summary, "8h 0m · 2h 0m deep");
+        assert_eq!(avg, "8h 0m");
+    }
 }

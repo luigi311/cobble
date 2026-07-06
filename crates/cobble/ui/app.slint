@@ -5,9 +5,9 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, SleepNight, WatchDevice } from "types.slint";
+import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats } from "types.slint";
 import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl } from "widgets.slint";
-import { StepsChart, SleepChart, SessionList, SleepTimingStrip } from "charts.slint";
+import { StepsChart, SleepChart, SessionList, SleepStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
     title: "Pebble";
@@ -32,12 +32,18 @@ export component AppWindow inherits Window {
     // ── Workout tab data ──
     in property <[DaySteps]> daily-steps;
     in property <string> today-steps-label: "0 steps today";
+    in property <string> steps-avg-label;
+    in property <string> steps-delta-label;
+    in property <bool> steps-delta-positive: true;
     in property <[HealthSession]> sessions;
 
     // ── Sleep tab data ──
     in property <[SleepBar]> sleep-bars;
     in property <string> sleep-label: "No sleep data";
-    in property <[SleepNight]> sleep-nights;
+    in property <string> sleep-avg-label;
+    in property <string> sleep-delta-label;
+    in property <bool> sleep-delta-positive: true;
+    in property <SleepStats> sleep-stats;
 
     // ── Config ──
     in-out property <string> cfg-address;
@@ -92,7 +98,10 @@ export component AppWindow inherits Window {
             height: 56px; background: Palette.header;
             HorizontalLayout {
                 padding-left: 20px; padding-right: 20px;
-                Text { text: "Pebble"; color: Palette.text; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+                Text {
+                    text: root.active-tab == 0 ? "Pebble" : root.active-tab == 1 ? "Steps" : root.active-tab == 2 ? "Sleep" : "Settings";
+                    color: Palette.text; font-size: 20px; font-weight: 700; vertical-alignment: center;
+                }
                 Rectangle { horizontal-stretch: 1; }
                 Rectangle {
                     width: 8px; height: 8px; border-radius: 4px;
@@ -217,6 +226,9 @@ export component AppWindow inherits Window {
                 StepsChart {
                     model: root.daily-steps;
                     today-label: root.today-steps-label;
+                    avg-label: root.steps-avg-label;
+                    delta-label: root.steps-delta-label;
+                    delta-positive: root.steps-delta-positive;
                     selected-bar-start <=> root.sel-bar-start;
                     bar-tapped(s, e) => { root.bar-tapped(s, e); }
                 }
@@ -259,14 +271,14 @@ export component AppWindow inherits Window {
                 SleepChart {
                     model: root.sleep-bars;
                     sleep-label: root.sleep-label;
+                    avg-label: root.sleep-avg-label;
+                    delta-label: root.sleep-delta-label;
+                    delta-positive: root.sleep-delta-positive;
                     selected-bar-start <=> root.sel-sleep-bar-start;
                 }
 
-                SleepTimingStrip {
-                    model: root.sleep-nights;
-                    period: root.sleep-period-val;
-                    selected-bar-start <=> root.sel-sleep-bar-start;
-                    refresh => { root.sel-sleep-bar-start = -1; root.refresh-data(); }
+                SleepStatsPanel {
+                    stats: root.sleep-stats;
                 }
             }
 
