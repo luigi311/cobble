@@ -451,6 +451,10 @@ fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offs
             Err(e) => warn!("load daily steps failed: {e}"),
             Ok(steps) => {
                 window.set_today_steps_label(cobble_db::compute_steps_summary(&steps, period).into());
+                window.set_steps_avg_label(cobble_db::compute_steps_avg_label(&steps, period).into());
+                let steps_delta = cobble_db::compute_steps_delta(&conn, period, offset);
+                window.set_steps_delta_positive(steps_delta.starts_with('+'));
+                window.set_steps_delta_label(steps_delta.into());
                 let slint_steps: Vec<DaySteps> = steps.into_iter().map(|s| DaySteps {
                     label: s.label.into(),
                     steps_label: s.steps_label.into(),
@@ -496,6 +500,10 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
             Err(e) => warn!("load sleep bars failed: {e}"),
             Ok(bars) => {
                 window.set_sleep_label(cobble_db::compute_sleep_summary(&bars, period).into());
+                window.set_sleep_avg_label(cobble_db::compute_sleep_avg_label(&bars, period).into());
+                let sleep_delta = cobble_db::compute_sleep_delta(&conn, period, offset);
+                window.set_sleep_delta_positive(sleep_delta.starts_with('+'));
+                window.set_sleep_delta_label(sleep_delta.into());
                 let slint_bars: Vec<SleepBar> = bars.into_iter().map(|b| SleepBar {
                     label: b.label.into(),
                     bar_start: b.bar_start as i32,

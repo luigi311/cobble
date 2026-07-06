@@ -130,6 +130,52 @@ pub fn compute_steps_summary(bars: &[DayStepsData], period: i32) -> String {
     }
 }
 
+/// Avg label for the top-left of the chart header.
+/// Day: total steps. Week/Month: average per day.
+pub fn compute_steps_avg_label(bars: &[DayStepsData], period: i32) -> String {
+    if bars.is_empty() {
+        return "—".to_string();
+    }
+    let total: i64 = bars.iter().map(|b| b.steps_raw).sum();
+    if period == 0 {
+        format!("{} steps", format_number(total))
+    } else {
+        let avg = total / bars.len() as i64;
+        format!("AVG {} / day", format_number(avg))
+    }
+}
+
+/// Percentage delta vs the previous period for steps. Returns "—" when there
+/// is no previous-period data or the previous total is zero.
+pub fn compute_steps_delta(conn: &Connection, period: i32, offset: i32) -> String {
+    let (cur_start, cur_end) = period_range_offset(period, offset);
+    let (prev_start, prev_end) = period_range_offset(period, offset + 1);
+    let cur = steps_total(conn, cur_start, cur_end);
+    let prev = steps_total(conn, prev_start, prev_end);
+    delta_pct(cur, prev)
+}
+
+fn steps_total(conn: &Connection, start: i64, end: i64) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(steps), 0) FROM health_activity_minutes WHERE start_ts >= ?1 AND start_ts <= ?2",
+        params![start, end],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+fn delta_pct(current: i64, previous: i64) -> String {
+    if previous == 0 {
+        return "—".to_string();
+    }
+    let pct = (current - previous) as f64 / previous as f64 * 100.0;
+    if pct.is_nan() || pct.is_infinite() {
+        return "—".to_string();
+    }
+    let sign = if pct >= 0.0 { "+" } else { "" };
+    format!("{sign}{:.0}%", pct)
+}
+
 // ─── Shared sleep query fragments ──────────────────────────────────────────────
 
 /// Night-bucketing expression: shifts overnight sleep sessions (types 1/2)
@@ -255,6 +301,41 @@ pub fn compute_sleep_summary(bars: &[SleepBarData], period: i32) -> String {
             format!("avg {}", format_duration(avg_sleep))
         }
     }
+}
+
+/// Avg label for the top-left of the sleep chart header.
+/// Day: total sleep. Week/Month: average per night.
+pub fn compute_sleep_avg_label(bars: &[SleepBarData], period: i32) -> String {
+    if bars.is_empty() {
+        return "—".to_string();
+    }
+    let n = bars.len() as i64;
+    let total: i64 = bars.iter().map(|b| b.light_secs + b.deep_secs).sum();
+    if period == 0 {
+        format_duration(total)
+    } else {
+        let avg = total / n;
+        format!("AVG {} / night", format_duration(avg))
+    }
+}
+
+/// Percentage delta vs the previous period for sleep. Returns "—" when there
+/// is no previous-period data or the previous total is zero.
+pub fn compute_sleep_delta(conn: &Connection, period: i32, offset: i32) -> String {
+    let (cur_start, cur_end) = period_range_offset(period, offset);
+    let (prev_start, prev_end) = period_range_offset(period, offset + 1);
+    let cur = sleep_total(conn, cur_start, cur_end);
+    let prev = sleep_total(conn, prev_start, prev_end);
+    delta_pct(cur, prev)
+}
+
+fn sleep_total(conn: &Connection, start: i64, end: i64) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(duration_secs), 0) FROM health_activity_sessions WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200 AND session_type <= 4",
+        params![start, end],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
 }
 
 // ─── Activity sessions ───────────────────────────────────────────────────────
