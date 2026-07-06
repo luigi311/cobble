@@ -291,6 +291,21 @@ pub fn load_sleep_bars(
         .filter_map(|r| r.ok())
         .collect();
 
+    // For day view, the ±12h SLEEP_WHERE padding pulls in adjacent nights.
+    // Filter to only the selected date's night.
+    let rows: Vec<Row> = if period == 0 {
+        let target_night =
+            DateTime::from_timestamp(range_start + time::watch_offset(), 0)
+                .map(|dt| dt.format("%Y-%m-%d").to_string());
+        if let Some(target) = target_night {
+            rows.into_iter().filter(|r| r.night == target).collect()
+        } else {
+            rows
+        }
+    } else {
+        rows
+    };
+
     let max_total = rows.iter().map(|r| r.total).max().unwrap_or(1).max(1);
 
     Ok(rows
@@ -585,6 +600,20 @@ pub fn load_sleep_nights(
         })?
         .filter_map(|r| r.ok())
         .collect();
+
+    // For day view, filter to only the selected date's night (same as sleep bars).
+    let rows: Vec<Row> = if period == 0 {
+        let target_night =
+            DateTime::from_timestamp(range_start + time::watch_offset(), 0)
+                .map(|dt| dt.format("%Y-%m-%d").to_string());
+        if let Some(target) = target_night {
+            rows.into_iter().filter(|r| r.night == target).collect()
+        } else {
+            rows
+        }
+    } else {
+        rows
+    };
 
     // Pass 1: collect raw phase data grouped by night key.
     struct RawPhase {
