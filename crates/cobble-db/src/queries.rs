@@ -581,17 +581,31 @@ pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::
     let (light_pct, deep_pct, awake_pct) =
         stage_percentages(total_slept - total_deep, total_deep, awake);
 
-    let durations = nights.iter().map(|n| n.total_secs());
+    // Duration stats: exclude nights with zero primary sleep (orphan deep-only
+    // nights) so they don't drag down the average or claim shortest night.
+    let with_sleep: Vec<i64> = nights
+        .iter()
+        .filter_map(|n| {
+            let s = n.total_secs();
+            if s > 0 { Some(s) } else { None }
+        })
+        .collect();
+    let slept_nights = with_sleep.len().max(1) as i64;
+    let slept_deep: i64 = nights
+        .iter()
+        .filter(|n| n.total_secs() > 0)
+        .map(|n| n.deep_secs())
+        .sum();
 
     Ok(SleepStats {
-        deep_avg_label: format_duration(total_deep / nights.len() as i64),
+        deep_avg_label: format_duration(slept_deep / slept_nights),
         light_pct,
         deep_pct,
         awake_pct,
         avg_bedtime: avg_time_of_day(&bedtimes),
         avg_wakeup: avg_time_of_day(&wakeups),
-        highest_dur: format_duration(durations.clone().max().unwrap_or(0)),
-        lowest_dur: format_duration(durations.min().unwrap_or(0)),
+        highest_dur: format_duration(with_sleep.iter().copied().max().unwrap_or(0)),
+        lowest_dur: format_duration(with_sleep.iter().copied().min().unwrap_or(0)),
     })
 }
 
