@@ -1,5 +1,4 @@
 mod config;
-mod db;
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -40,8 +39,8 @@ fn main() -> anyhow::Result<()> {
 
     // Derive the watch timezone offset from synced data so all times/labels
     // render in the watch's local zone, independent of the host's system tz.
-    if let Ok(conn) = db::open(&effective_db_path) {
-        db::set_watch_offset(db::watch_tz_offset(&conn));
+    if let Ok(conn) = cobble_db::connect_readonly(&effective_db_path) {
+        cobble_db::set_watch_offset(cobble_db::watch_tz_offset(&conn));
     }
 
     // ── Shared filter state (main-thread only) ───────────────────────────────
@@ -52,9 +51,9 @@ fn main() -> anyhow::Result<()> {
     let offset_sleep    = Rc::new(Cell::new(0i32));
 
     // ── Set initial period labels ────────────────────────────────────────────
-    window.set_workout_period_label(db::period_label(1, 0).into());
+    window.set_workout_period_label(cobble_db::period_label(1, 0).into());
     window.set_workout_can_forward(false);
-    window.set_sleep_period_label(db::period_label(1, 0).into());
+    window.set_sleep_period_label(cobble_db::period_label(1, 0).into());
     window.set_sleep_can_forward(false);
 
     // ── Initial data load ────────────────────────────────────────────────────
@@ -103,8 +102,8 @@ fn main() -> anyhow::Result<()> {
         let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
         let ps = period_sleep.clone();  let os = offset_sleep.clone();
         window.on_refresh_data(move || {
-            if let Ok(conn) = db::open(&db2) {
-                db::set_watch_offset(db::watch_tz_offset(&conn));
+            if let Ok(conn) = cobble_db::connect_readonly(&db2) {
+                cobble_db::set_watch_offset(cobble_db::watch_tz_offset(&conn));
             }
             if let Some(w) = weak.upgrade() {
                 reload_workout_chart(&w, &db2, pw.get(), ow.get());
@@ -434,24 +433,24 @@ fn clear_watch_info(w: &AppWindow) {
 // ─── Navigation label helpers ─────────────────────────────────────────────────
 
 fn update_workout_nav(w: &AppWindow, period: i32, offset: i32) {
-    w.set_workout_period_label(db::period_label(period, offset).into());
+    w.set_workout_period_label(cobble_db::period_label(period, offset).into());
     w.set_workout_can_forward(offset > 0);
 }
 
 fn update_sleep_nav(w: &AppWindow, period: i32, offset: i32) {
-    w.set_sleep_period_label(db::period_label(period, offset).into());
+    w.set_sleep_period_label(cobble_db::period_label(period, offset).into());
     w.set_sleep_can_forward(offset > 0);
 }
 
 // ─── Workout helpers ──────────────────────────────────────────────────────────
 
 fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
-    match db::open(db_path) {
+    match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match db::load_daily_steps(&conn, period, offset) {
+        Ok(conn) => match cobble_db::load_daily_steps(&conn, period, offset) {
             Err(e) => warn!("load daily steps failed: {e}"),
             Ok(steps) => {
-                window.set_today_steps_label(db::compute_steps_summary(&steps, period).into());
+                window.set_today_steps_label(cobble_db::compute_steps_summary(&steps, period).into());
                 let slint_steps: Vec<DaySteps> = steps.into_iter().map(|s| DaySteps {
                     label: s.label.into(),
                     steps_label: s.steps_label.into(),
@@ -473,13 +472,13 @@ fn reload_workout_sessions(
     bar_range: (i64, i64),
 ) {
     let (start, end) = if bar_range.0 < 0 {
-        db::period_range_offset(period, offset)
+        cobble_db::period_range_offset(period, offset)
     } else {
         bar_range
     };
-    match db::open(db_path) {
+    match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match db::load_sessions_filtered(&conn, 1, start, end) {
+        Ok(conn) => match cobble_db::load_sessions_filtered(&conn, 1, start, end) {
             Err(e) => warn!("load workout sessions failed: {e}"),
             Ok(sessions) => {
                 window.set_sessions(ModelRc::new(VecModel::from(to_slint_sessions(sessions))));
@@ -491,12 +490,12 @@ fn reload_workout_sessions(
 // ─── Sleep helpers ────────────────────────────────────────────────────────────
 
 fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
-    match db::open(db_path) {
+    match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match db::load_sleep_bars(&conn, period, offset) {
+        Ok(conn) => match cobble_db::load_sleep_bars(&conn, period, offset) {
             Err(e) => warn!("load sleep bars failed: {e}"),
             Ok(bars) => {
-                window.set_sleep_label(db::compute_sleep_summary(&bars, period).into());
+                window.set_sleep_label(cobble_db::compute_sleep_summary(&bars, period).into());
                 let slint_bars: Vec<SleepBar> = bars.into_iter().map(|b| SleepBar {
                     label: b.label.into(),
                     bar_start: b.bar_start as i32,
@@ -513,9 +512,9 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
 }
 
 fn reload_sleep_strip(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
-    match db::open(db_path) {
+    match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match db::load_sleep_nights(&conn, period, offset) {
+        Ok(conn) => match cobble_db::load_sleep_nights(&conn, period, offset) {
             Err(e) => warn!("load sleep nights failed: {e}"),
             Ok(nights) => {
                 window.set_sleep_nights(ModelRc::new(VecModel::from(to_slint_nights(nights))));
@@ -526,7 +525,7 @@ fn reload_sleep_strip(window: &AppWindow, db_path: &PathBuf, period: i32, offset
 
 // ─── Conversion ───────────────────────────────────────────────────────────────
 
-fn to_slint_sessions(sessions: Vec<db::HealthSessionData>) -> Vec<HealthSession> {
+fn to_slint_sessions(sessions: Vec<cobble_db::HealthSessionData>) -> Vec<HealthSession> {
     sessions.into_iter().map(|s| HealthSession {
         type_name: s.type_name.into(),
         start_label: s.start_label.into(),
@@ -536,7 +535,7 @@ fn to_slint_sessions(sessions: Vec<db::HealthSessionData>) -> Vec<HealthSession>
     }).collect()
 }
 
-fn to_slint_nights(nights: Vec<db::SleepNightData>) -> Vec<SleepNight> {
+fn to_slint_nights(nights: Vec<cobble_db::SleepNightData>) -> Vec<SleepNight> {
     nights.into_iter().map(|n| {
         let segs: Vec<SleepSegment> = n.segments.into_iter().map(|s| SleepSegment {
             start_frac: s.start_frac,

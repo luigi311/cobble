@@ -9,7 +9,7 @@ use libpebble_ble::{
     Pebble, WatchPrefValue,
 };
 
-use crate::db::AppDb;
+use cobble_db::AppDb;
 use tokio::sync::mpsc;
 use zbus::zvariant::{OwnedValue, Value};
 

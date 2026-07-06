@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tracing::debug;
 
-use crate::db::{AppDb, IpLocation};
+use cobble_db::{AppDb, IpLocation};
 use crate::http;
 
 /// Get coordinates and a human-readable city name.

@@ -17,7 +17,6 @@ mod call_monitor;
 mod codec;
 mod config;
 mod config_watcher;
-mod db;
 mod http;
 mod location;
 mod mpris_monitor;
@@ -27,7 +26,7 @@ mod service;
 mod supervisor;
 mod weather;
 
-use db::AppDb;
+use cobble_db::AppDb;
 use notify_monitor::NotificationMonitor;
 use service::{run_signal_emitter, BUS_NAME, OBJECT_PATH, CobbleDaemon};
 use supervisor::run_supervisor;
