@@ -130,6 +130,20 @@ pub fn compute_steps_summary(bars: &[DayStepsData], period: i32) -> String {
     }
 }
 
+// ─── Shared sleep query fragments ──────────────────────────────────────────────
+
+/// Night-bucketing expression: shifts overnight sleep sessions (types 1/2)
+/// forward 12h so they're labeled by wake-up day; naps (3/4) stay on their
+/// natural calendar day.
+const SLEEP_NIGHT_KEY: &str =
+    "date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch')";
+
+/// WHERE clause shared by sleep queries: widens the UTC range by ±12h so
+/// boundary sessions whose night key falls inside the target range aren't
+/// dropped by a strict UTC filter.
+const SLEEP_WHERE: &str =
+    "start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200 AND session_type <= 4";
+
 // ─── Sleep chart data ─────────────────────────────────────────────────────────
 
 pub fn load_sleep_bars(
@@ -140,16 +154,16 @@ pub fn load_sleep_bars(
     let (range_start, range_end) = period_range_offset(period, offset);
     let label_fmt = period == 2;
 
-    let mut stmt = conn.prepare(
-        "SELECT date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch') AS night,
+    let sql = format!(
+        "SELECT {SLEEP_NIGHT_KEY} AS night,
                 SUM(CASE WHEN session_type IN (1, 3) THEN duration_secs ELSE 0 END) AS total_secs,
                 SUM(CASE WHEN session_type IN (2, 4) THEN duration_secs ELSE 0 END) AS deep_secs
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
-           AND session_type <= 4
+         WHERE {SLEEP_WHERE}
          GROUP BY night
-         ORDER BY night ASC",
-    )?;
+         ORDER BY night ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     struct Row {
         night: String,
@@ -322,14 +336,14 @@ pub fn load_sleep_nights(
     let (range_start, range_end) = period_range_offset(period, offset);
     let label_fmt = period == 2;
 
-    let mut stmt = conn.prepare(
-        "SELECT date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch') AS night,
+    let sql = format!(
+        "SELECT {SLEEP_NIGHT_KEY} AS night,
                 start_ts, utc_offset, duration_secs, session_type
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
-           AND session_type <= 4
-         ORDER BY night ASC, start_ts ASC",
-    )?;
+         WHERE {SLEEP_WHERE}
+         ORDER BY night ASC, start_ts ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     struct Row {
         night: String,

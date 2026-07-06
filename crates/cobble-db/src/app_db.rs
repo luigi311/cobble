@@ -361,38 +361,31 @@ impl AppDb {
             Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_SESSIONS as i64)?;
 
         // Rebuild both tables atomically: a failure mid-loop leaves neither table
-        // partially cleared.
-        self.conn.execute_batch("BEGIN")?;
-        let result = (|| -> anyhow::Result<()> {
-            self.conn
-                .execute("DELETE FROM health_activity_minutes", [])?;
-            for rec in &steps_records {
-                self.insert_activity_minutes(rec.id, &rec.data, rec.item_size)?;
-            }
-            self.conn
-                .execute("DELETE FROM health_activity_sessions", [])?;
-            for rec in sleep_records.iter().chain(&session_records) {
-                Self::do_insert_activity_sessions(
-                    &self.conn,
-                    rec.id,
-                    &rec.data,
-                    rec.item_size,
-                )?;
-            }
-            Ok(())
-        })();
-        if result.is_ok() {
-            self.conn.execute_batch("COMMIT")?;
-            debug!(
-                "db reprocess: {} steps records, {} sleep + {} session records",
-                steps_records.len(),
-                sleep_records.len(),
-                session_records.len(),
-            );
-        } else {
-            let _ = self.conn.execute_batch("ROLLBACK");
+        // partially cleared (unchecked_transaction auto-rolls back on drop).
+        let txn = self.conn.unchecked_transaction()?;
+        self.conn
+            .execute("DELETE FROM health_activity_minutes", [])?;
+        for rec in &steps_records {
+            self.insert_activity_minutes(rec.id, &rec.data, rec.item_size)?;
         }
-        result
+        self.conn
+            .execute("DELETE FROM health_activity_sessions", [])?;
+        for rec in sleep_records.iter().chain(&session_records) {
+            Self::do_insert_activity_sessions(
+                &self.conn,
+                rec.id,
+                &rec.data,
+                rec.item_size,
+            )?;
+        }
+        txn.commit()?;
+        debug!(
+            "db reprocess: {} steps records, {} sleep + {} session records",
+            steps_records.len(),
+            sleep_records.len(),
+            session_records.len(),
+        );
+        Ok(())
     }
 
     fn load_raw_records(conn: &Connection, tag: i64) -> anyhow::Result<Vec<RawRecord>> {
