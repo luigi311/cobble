@@ -141,11 +141,11 @@ pub fn load_sleep_bars(
     let label_fmt = period == 2;
 
     let mut stmt = conn.prepare(
-        "SELECT date(start_ts + utc_offset - 43200, 'unixepoch') AS night,
+        "SELECT date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch') AS night,
                 SUM(CASE WHEN session_type IN (1, 3) THEN duration_secs ELSE 0 END) AS total_secs,
                 SUM(CASE WHEN session_type IN (2, 4) THEN duration_secs ELSE 0 END) AS deep_secs
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 + 43200 AND start_ts <= ?2 + 43200
+         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
            AND session_type <= 4
          GROUP BY night
          ORDER BY night ASC",
@@ -323,10 +323,10 @@ pub fn load_sleep_nights(
     let label_fmt = period == 2;
 
     let mut stmt = conn.prepare(
-        "SELECT date(start_ts + utc_offset - 43200, 'unixepoch') AS night,
+        "SELECT date(start_ts + utc_offset + CASE WHEN session_type IN (1,2) THEN 43200 ELSE 0 END, 'unixepoch') AS night,
                 start_ts, utc_offset, duration_secs, session_type
          FROM health_activity_sessions
-         WHERE start_ts >= ?1 + 43200 AND start_ts <= ?2 + 43200
+         WHERE start_ts >= ?1 - 43200 AND start_ts <= ?2 + 43200
            AND session_type <= 4
          ORDER BY night ASC, start_ts ASC",
     )?;
