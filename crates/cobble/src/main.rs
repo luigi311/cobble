@@ -447,15 +447,14 @@ fn update_sleep_nav(w: &AppWindow, period: i32, offset: i32) {
 fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_daily_steps(&conn, period, offset) {
-            Err(e) => warn!("load daily steps failed: {e}"),
-            Ok(steps) => {
-                window.set_today_steps_label(cobble_db::compute_steps_summary(&steps, period).into());
-                window.set_steps_avg_label(cobble_db::compute_steps_avg_label(&steps, period).into());
-                let steps_delta = cobble_db::compute_steps_delta(&conn, period, offset);
-                window.set_steps_delta_positive(steps_delta.starts_with('+'));
-                window.set_steps_delta_label(steps_delta.into());
-                let slint_steps: Vec<DaySteps> = steps.into_iter().map(|s| DaySteps {
+        Ok(conn) => match cobble_db::load_steps_chart(&conn, period, offset) {
+            Err(e) => warn!("load steps chart failed: {e}"),
+            Ok(chart) => {
+                window.set_today_steps_label(chart.summary.into());
+                window.set_steps_avg_label(chart.avg_label.into());
+                window.set_steps_delta_positive(chart.delta_positive);
+                window.set_steps_delta_label(chart.delta_label.into());
+                let slint_steps: Vec<DaySteps> = chart.bars.into_iter().map(|s| DaySteps {
                     label: s.label.into(),
                     steps_label: s.steps_label.into(),
                     fraction: s.fraction,
@@ -496,15 +495,14 @@ fn reload_workout_sessions(
 fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_sleep_bars(&conn, period, offset) {
-            Err(e) => warn!("load sleep bars failed: {e}"),
-            Ok(bars) => {
-                window.set_sleep_label(cobble_db::compute_sleep_summary(&bars, period).into());
-                window.set_sleep_avg_label(cobble_db::compute_sleep_avg_label(&bars, period).into());
-                let sleep_delta = cobble_db::compute_sleep_delta(&conn, period, offset);
-                window.set_sleep_delta_positive(sleep_delta.starts_with('+'));
-                window.set_sleep_delta_label(sleep_delta.into());
-                let slint_bars: Vec<SleepBar> = bars.into_iter().map(|b| SleepBar {
+        Ok(conn) => match cobble_db::load_sleep_chart(&conn, period, offset) {
+            Err(e) => warn!("load sleep chart failed: {e}"),
+            Ok(chart) => {
+                window.set_sleep_label(chart.summary.into());
+                window.set_sleep_avg_label(chart.avg_label.into());
+                window.set_sleep_delta_positive(chart.delta_positive);
+                window.set_sleep_delta_label(chart.delta_label.into());
+                let slint_bars: Vec<SleepBar> = chart.bars.into_iter().map(|b| SleepBar {
                     label: b.label.into(),
                     bar_start: b.bar_start as i32,
                     bar_end: b.bar_end as i32,
