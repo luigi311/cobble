@@ -773,9 +773,8 @@ name = "cobble"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "chrono",
  "cobble-client",
- "rusqlite",
+ "cobble-db",
  "serde",
  "slint",
  "slint-build",
@@ -795,18 +794,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "cobble-db"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libpebble-ble",
+ "rusqlite",
+ "tracing",
+]
+
+[[package]]
 name = "cobbled"
 version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cobble-db",
  "futures",
  "hostname",
  "libpebble-ble",
  "notify",
  "png 0.17.16",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",

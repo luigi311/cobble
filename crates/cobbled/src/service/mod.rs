@@ -62,7 +62,7 @@ use libpebble_ble::{
     WatchVersionInfo, WeatherType,
 };
 
-use crate::db::AppDb;
+use cobble_db::AppDb;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 use zbus::{
