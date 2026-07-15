@@ -184,26 +184,6 @@ pub fn fetch_daily_wellness(
     let nights = fetch_sleep_nights(conn, range)?;
     let mut primary_spans_by_date = BTreeMap::<NaiveDate, Vec<(i64, i64)>>::new();
     for night in &nights {
-        let total_secs = night.total_secs();
-        if total_secs <= 0 {
-            continue;
-        }
-        let sleep_secs = u32::try_from(total_secs).map_err(|_| {
-            anyhow::anyhow!(
-                "sleep total for {} is outside u32 range: {total_secs}",
-                night.wake_date
-            )
-        })?;
-        by_date
-            .entry(night.wake_date)
-            .or_insert_with(|| DailyWellness {
-                date: night.wake_date,
-                steps: None,
-                sleep_secs: None,
-                avg_sleeping_hr: None,
-            })
-            .sleep_secs = Some(sleep_secs);
-
         primary_spans_by_date
             .entry(night.wake_date)
             .or_default()
@@ -233,6 +213,25 @@ pub fn fetch_daily_wellness(
                 }
                 merged.push((start, end));
             }
+            let total_secs: i64 = merged.iter().map(|&(start, end)| end - start).sum();
+            if total_secs <= 0 {
+                continue;
+            }
+            let sleep_secs = u32::try_from(total_secs).map_err(|_| {
+                anyhow::anyhow!(
+                    "sleep total for {} is outside u32 range: {total_secs}",
+                    date
+                )
+            })?;
+            by_date
+                .entry(date)
+                .or_insert_with(|| DailyWellness {
+                    date,
+                    steps: None,
+                    sleep_secs: None,
+                    avg_sleeping_hr: None,
+                })
+                .sleep_secs = Some(sleep_secs);
             primary_spans.extend(merged.into_iter().map(|(start, end)| (date, start, end)));
         }
         primary_spans.sort_unstable_by_key(|&(_, start, _)| start);
@@ -1196,7 +1195,7 @@ mod tests {
 
         let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
         assert_eq!(wellness.len(), 1);
-        assert_eq!(wellness[0].sleep_secs, Some(9 * 3600));
+        assert_eq!(wellness[0].sleep_secs, Some(8 * 3600));
         assert_eq!(wellness[0].steps, Some(0));
         assert_eq!(wellness[0].avg_sleeping_hr, Some(55.0));
     }
