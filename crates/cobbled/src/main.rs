@@ -84,10 +84,14 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    info!("loaded config from {}", config_path.display());
+    info!(
+        "loaded config from {} (intervals_icu={:?})",
+        config_path.display(),
+        cfg.redacted_intervals_icu()
+    );
 
     let db_path = match cfg.db {
-        Some(p) => p,
+        Some(p) => PathBuf::from(p),
         None => default_db_path()?,
     };
     let app_db: Option<Arc<Mutex<AppDb>>> = match AppDb::open(&db_path) {

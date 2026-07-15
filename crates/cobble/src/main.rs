@@ -241,6 +241,7 @@ fn main() -> anyhow::Result<()> {
                     let s = w.get_cfg_db().to_string();
                     if s.is_empty() { None } else { Some(s) }
                 },
+                integrations: cfg.integrations.clone(),
             };
             match config::save(&cfg_path2, &new_cfg) {
                 Err(e) => { w.set_save_status(format!("Error: {e}").into()); }

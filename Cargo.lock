@@ -770,10 +770,11 @@ dependencies = [
 
 [[package]]
 name = "cobble"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cobble-client",
+ "cobble-config",
  "cobble-db",
  "serde",
  "slint",
@@ -794,6 +795,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cobble-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "cobble-db"
 version = "0.6.0"
 dependencies = [
@@ -806,10 +816,11 @@ dependencies = [
 
 [[package]]
 name = "cobbled"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cobble-config",
  "cobble-db",
  "futures",
  "hostname",

@@ -851,9 +851,10 @@ impl CobbleDaemon {
             .map_err(|e| DaemonError::Failed(e.to_string()))?;
 
         debug!(
-            "reload_config: adapter={}, address{}",
+            "reload_config: adapter={}, address{}, intervals_icu={:?}",
             new_cfg.adapter,
             if new_cfg.address.is_empty() { " (none)" } else { " set" },
+            new_cfg.redacted_intervals_icu(),
         );
 
         // Read state.pebble in the same lock scope as the config update so
