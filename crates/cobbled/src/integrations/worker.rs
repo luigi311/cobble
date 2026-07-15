@@ -1,7 +1,7 @@
 //! Background wellness reconciliation worker.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,6 +68,7 @@ pub(crate) async fn run(
     mut manual_sync_rx: watch::Receiver<u64>,
     mut shutdown_rx: watch::Receiver<bool>,
     running: Arc<AtomicBool>,
+    status_revision: Arc<AtomicU64>,
 ) {
     let _running_reset = RunningReset(running.clone());
     let mut config = integration_rx.borrow().clone();
@@ -78,6 +79,7 @@ pub(crate) async fn run(
         WellnessWake::Startup,
         &authentication_blocked_config,
         &running,
+        &status_revision,
     );
     let mut pending_wake = None;
     let mut health_rx_open = true;
@@ -112,6 +114,7 @@ pub(crate) async fn run(
                         reason,
                         &authentication_blocked_config,
                         &running,
+                        &status_revision,
                     );
                 } else {
                     running.store(false, Ordering::SeqCst);
@@ -132,6 +135,7 @@ pub(crate) async fn run(
                     WellnessWake::ConfigChanged,
                     &authentication_blocked_config,
                     &running,
+                    &status_revision,
                 );
             }
             changed = health_rx.changed(), if health_rx_open => {
@@ -148,6 +152,7 @@ pub(crate) async fn run(
                         reason,
                         &authentication_blocked_config,
                         &running,
+                        &status_revision,
                     );
                 }
             }
@@ -165,6 +170,7 @@ pub(crate) async fn run(
                         reason,
                         &authentication_blocked_config,
                         &running,
+                        &status_revision,
                     );
                 }
             }
@@ -180,6 +186,7 @@ pub(crate) async fn run(
                         reason,
                         &authentication_blocked_config,
                         &running,
+                        &status_revision,
                     );
                 }
             }
@@ -218,6 +225,7 @@ fn start_reconciliation(
     reason: WellnessWake,
     authentication_blocked_config: &Option<IntervalsIcuConfig>,
     running: &Arc<AtomicBool>,
+    status_revision: &Arc<AtomicU64>,
 ) -> Option<JoinHandle<ReconcileOutcome>> {
     if authentication_blocked_config
         .as_ref()
@@ -233,9 +241,10 @@ fn start_reconciliation(
 
     let db = db.clone();
     let config = config.clone();
+    let status_revision = status_revision.clone();
     running.store(true, Ordering::SeqCst);
     Some(tokio::spawn(async move {
-        reconcile(&db, &config, reason).await
+        reconcile(&db, &config, reason, status_revision).await
     }))
 }
 
@@ -263,6 +272,7 @@ async fn reconcile(
     db: &Arc<Mutex<AppDb>>,
     config: &IntervalsIcuConfig,
     reason: WellnessWake,
+    status_revision: Arc<AtomicU64>,
 ) -> ReconcileOutcome {
     if !config.enabled {
         debug!(?reason, "wellness exporter wake ignored while disabled");
@@ -344,14 +354,16 @@ async fn reconcile(
         Ok(client) => client,
         Err(error) => {
             warn!("could not create wellness client: {error}");
-            record_failure(
+            if record_failure(
                 db,
                 config,
                 &payloads,
                 Some(retry_at(RECONCILIATION_INTERVAL)),
                 "wellness client initialization failed",
             )
-            .await;
+            .await {
+                status_revision.fetch_add(1, Ordering::SeqCst);
+            }
             return ReconcileOutcome::Complete;
         }
     };
@@ -390,6 +402,7 @@ async fn reconcile(
                     warn!("recording wellness upload success failed: {error}");
                     return ReconcileOutcome::Complete;
                 }
+                status_revision.fetch_add(1, Ordering::SeqCst);
                 info!(
                     provider = PROVIDER,
                     athlete_id = %config.athlete_id,
@@ -411,7 +424,9 @@ async fn reconcile(
                     "wellness upload failed"
                 );
                 if authentication_failure {
-                    record_failure(db, config, payload_chunk, next_attempt_at, &error).await;
+                    if record_failure(db, config, payload_chunk, next_attempt_at, &error).await {
+                        status_revision.fetch_add(1, Ordering::SeqCst);
+                    }
                     return ReconcileOutcome::AuthenticationFailure;
                 }
                 if payload_failure
@@ -443,7 +458,9 @@ async fn reconcile(
                         "wellness payload-isolation budget exhausted"
                     );
                 }
-                record_failure(db, config, payload_chunk, next_attempt_at, &error).await;
+                if record_failure(db, config, payload_chunk, next_attempt_at, &error).await {
+                    status_revision.fetch_add(1, Ordering::SeqCst);
+                }
                 if payload_failure {
                     continue;
                 }
@@ -588,7 +605,7 @@ async fn record_failure(
     payloads: &[PayloadHash],
     next_attempt_at: Option<i64>,
     error: &str,
-) {
+) -> bool {
     let dates: Vec<_> = payloads.iter().map(|(date, _)| *date).collect();
     let db = db.clone();
     let provider = PROVIDER.to_string();
@@ -610,6 +627,9 @@ async fn record_failure(
     .and_then(|result| result)
     {
         warn!("recording wellness upload failure failed: {db_error}");
+        false
+    } else {
+        true
     }
 }
 

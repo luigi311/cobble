@@ -55,7 +55,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -186,6 +186,12 @@ fn wellness_status_to_dbus_map(
     ])
 }
 
+struct CachedWellnessStatus {
+    revision: u64,
+    account_id: String,
+    status: WellnessExportStatus,
+}
+
 // ---------------------------------------------------------------------------
 // CobbleDaemon
 // ---------------------------------------------------------------------------
@@ -203,6 +209,10 @@ pub struct CobbleDaemon {
     wellness_sync_tx: watch::Sender<u64>,
     /// True from request/start until the serialized reconciliation completes.
     wellness_running: Arc<AtomicBool>,
+    /// Bumped when wellness data, configuration, or export state changes.
+    wellness_status_revision: Arc<AtomicU64>,
+    /// Hash-aware status snapshot reused between unchanged D-Bus polls.
+    wellness_status_cache: Arc<Mutex<Option<CachedWellnessStatus>>>,
     /// Notifies subscribers when the watch connects or disconnects.
     connection_tx: watch::Sender<bool>,
     /// Forwards watch music-control actions to the MPRIS monitor.
@@ -219,6 +229,7 @@ impl CobbleDaemon {
         integration_config: IntervalsIcuConfig,
         wellness_sync_tx: watch::Sender<u64>,
         wellness_running: Arc<AtomicBool>,
+        wellness_status_revision: Arc<AtomicU64>,
         config_path: PathBuf,
         event_tx: mpsc::UnboundedSender<DaemonEvent>,
         db: Option<Arc<Mutex<AppDb>>>,
@@ -251,6 +262,8 @@ impl CobbleDaemon {
             integration_config,
             wellness_sync_tx,
             wellness_running,
+            wellness_status_revision,
+            wellness_status_cache: Arc::new(Mutex::new(None)),
             music_action_tx,
             phone_action_tx,
             connection_tx,
@@ -590,39 +603,68 @@ impl CobbleDaemon {
     /// Error text comes from the sanitized export ledger and never includes
     /// credentials or response bodies.
     async fn get_wellness_sync_status(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
-        let config = self.integration_config.subscribe().borrow().clone();
-        let account_id = config.athlete_id.clone();
-        let db = self
-            .state
-            .lock()
-            .unwrap()
-            .db
-            .clone()
-            .ok_or_else(|| DaemonError::Failed("app database is not available".into()))?;
-        let status = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let db = db.lock().unwrap();
-            let current_payloads = match (db.oldest_wellness_date()?, db.newest_wellness_date()?) {
-                (Some(start), Some(end)) => db
-                    .fetch_daily_wellness(DateRange { start, end })?
-                    .into_iter()
-                    .map(|daily| {
-                        let record = crate::integrations::intervals_icu::WellnessRecord::from(&daily);
-                        Ok((daily.date, record.payload_hash()?))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-                _ => Vec::new(),
-            };
-            db.fetch_wellness_export_status(
-                "intervals_icu",
-                &account_id,
-                &current_payloads,
-            )
-        })
-        .await
-        .map_err(|error| DaemonError::Failed(error.to_string()))?
-        .map_err(|error| DaemonError::Failed(error.to_string()))?;
-        let running = self.wellness_running.load(Ordering::SeqCst);
-        Ok(wellness_status_to_dbus_map(&config, status, running))
+        loop {
+            let config = self.integration_config.subscribe().borrow().clone();
+            let account_id = config.athlete_id.clone();
+            let revision = self.wellness_status_revision.load(Ordering::Acquire);
+            if let Some(status) = self
+                .wellness_status_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|cached| {
+                    cached.revision == revision && cached.account_id == account_id
+                })
+                .map(|cached| cached.status.clone())
+            {
+                let running = self.wellness_running.load(Ordering::SeqCst);
+                return Ok(wellness_status_to_dbus_map(&config, status, running));
+            }
+
+            let db = self
+                .state
+                .lock()
+                .unwrap()
+                .db
+                .clone()
+                .ok_or_else(|| DaemonError::Failed("app database is not available".into()))?;
+            let account_id_for_load = account_id.clone();
+            let status = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let db = db.lock().unwrap();
+                let current_payloads =
+                    match (db.oldest_wellness_date()?, db.newest_wellness_date()?) {
+                        (Some(start), Some(end)) => db
+                            .fetch_daily_wellness(DateRange { start, end })?
+                            .into_iter()
+                            .map(|daily| {
+                                let record =
+                                    crate::integrations::intervals_icu::WellnessRecord::from(&daily);
+                                Ok((daily.date, record.payload_hash()?))
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?,
+                        _ => Vec::new(),
+                    };
+                db.fetch_wellness_export_status(
+                    "intervals_icu",
+                    &account_id_for_load,
+                    &current_payloads,
+                )
+            })
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))?
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+
+            if self.wellness_status_revision.load(Ordering::Acquire) != revision {
+                continue;
+            }
+            self.wellness_status_cache.lock().unwrap().replace(CachedWellnessStatus {
+                revision,
+                account_id,
+                status: status.clone(),
+            });
+            let running = self.wellness_running.load(Ordering::SeqCst);
+            return Ok(wellness_status_to_dbus_map(&config, status, running));
+        }
     }
 
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>, DaemonError> {
@@ -989,7 +1031,7 @@ impl CobbleDaemon {
         };
 
         let integration_config = new_cfg.integrations.intervals_icu.clone();
-        self.integration_config.send_if_modified(|current| {
+        let integration_changed = self.integration_config.send_if_modified(|current| {
             if *current == integration_config {
                 false
             } else {
@@ -997,6 +1039,9 @@ impl CobbleDaemon {
                 true
             }
         });
+        if integration_changed {
+            self.wellness_status_revision.fetch_add(1, Ordering::SeqCst);
+        }
 
         if let Some(pebble) = pebble_to_disconnect {
             let _ = pebble.disconnect().await;
@@ -1147,6 +1192,7 @@ mod tests {
             initial,
             watch::channel(0).0,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
             path.clone(),
             event_tx,
             None,
@@ -1211,6 +1257,7 @@ mod tests {
             },
             sync_tx,
             running.clone(),
+            Arc::new(AtomicU64::new(0)),
             test_path(),
             event_tx,
             Some(db),
@@ -1333,6 +1380,9 @@ pub async fn run_signal_emitter(
                         Ok(Err(e)) => warn!("app DB insert failed: {e}"),
                         Err(e) => warn!("app DB task panicked: {e}"),
                         Ok(Ok(true)) => {
+                            daemon
+                                .wellness_status_revision
+                                .fetch_add(1, Ordering::SeqCst);
                             wellness_revision_tx.send_modify(|revision| {
                                 *revision = revision.wrapping_add(1);
                             });
