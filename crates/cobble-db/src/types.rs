@@ -45,6 +45,9 @@ pub struct HealthSessionData {
 pub struct NightPhase {
     pub local_start: i64,
     pub local_end: i64,
+    /// Absolute UTC bounds for matching per-minute activity samples.
+    pub utc_start: i64,
+    pub utc_end: i64,
     /// Deep phases (session types 2/4) overlay the primary phases (1/3);
     /// they don't add to the night's total.
     pub is_deep: bool,
@@ -101,6 +104,16 @@ impl Night {
         }
         self.phases.iter().filter(|p| !p.is_deep).collect()
     }
+}
+
+/// Provider-neutral wellness observations for one watch-local calendar date.
+/// Missing observations stay absent instead of becoming zero-valued updates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyWellness {
+    pub date: NaiveDate,
+    pub steps: Option<u32>,
+    pub sleep_secs: Option<u32>,
+    pub avg_sleeping_hr: Option<f32>,
 }
 
 /// Everything the steps chart needs, computed in one call so the bars and the

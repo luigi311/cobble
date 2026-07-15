@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use chrono::{DateTime, Datelike, NaiveDate};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::time::{self, *};
 use crate::types::*;
@@ -77,14 +78,14 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
     // slack also absorbs per-row utc_offset differences. Exact bucketing
     // happens below on wake dates.
     let mut stmt = conn.prepare(
-        "SELECT start_ts + utc_offset, duration_secs, session_type
+        "SELECT start_ts, utc_offset, duration_secs, session_type
          FROM health_activity_sessions
          WHERE session_type <= 4 AND start_ts >= ?1 AND start_ts <= ?2
          ORDER BY start_ts ASC",
     )?;
-    let rows: Vec<(i64, i64, i32)> = stmt
+    let rows: Vec<(i64, i64, i64, i32)> = stmt
         .query_map(params![utc_start - 48 * 3600, utc_end + 12 * 3600], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -94,21 +95,32 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
 
     // Primary sessions (sleep=1, nap=3) define the nights.
     let mut nights: BTreeMap<NaiveDate, Night> = BTreeMap::new();
-    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 1 | 3)) {
+    for &(utc_start, utc_offset, dur, ty) in rows.iter().filter(|r| matches!(r.3, 1 | 3)) {
+        let local_start = utc_start + utc_offset;
         let local_end = local_start + dur;
+        let utc_end = utc_start + dur;
         let Some(date) = wake_date(local_end) else { continue };
         nights
             .entry(date)
             .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
             .phases
-            .push(NightPhase { local_start, local_end, is_deep: false, is_nap: ty == 3 });
+            .push(NightPhase {
+                local_start,
+                local_end,
+                utc_start,
+                utc_end,
+                is_deep: false,
+                is_nap: ty == 3,
+            });
     }
 
     // Deep segments (2/4) attach to the night they overlap; a segment ending
     // before midnight belongs with the following morning's wake-up, not its
     // own end date. Orphans (no overlapping primary) fall back to wake date.
-    for &(local_start, dur, ty) in rows.iter().filter(|r| matches!(r.2, 2 | 4)) {
+    for &(utc_start, utc_offset, dur, ty) in rows.iter().filter(|r| matches!(r.3, 2 | 4)) {
+        let local_start = utc_start + utc_offset;
         let local_end = local_start + dur;
+        let utc_end = utc_start + dur;
         let date = nights
             .values()
             .find(|n| {
@@ -123,7 +135,14 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
             .entry(date)
             .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
             .phases
-            .push(NightPhase { local_start, local_end, is_deep: true, is_nap: ty == 4 });
+            .push(NightPhase {
+                local_start,
+                local_end,
+                utc_start,
+                utc_end,
+                is_deep: true,
+                is_nap: ty == 4,
+            });
     }
 
     let mut nights: Vec<Night> = nights
@@ -134,6 +153,193 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
         n.phases.sort_by_key(|p| p.local_start);
     }
     Ok(nights)
+}
+
+/// Aggregate supported wellness observations by watch-local calendar date.
+///
+/// Steps use each minute row's own offset. Sleep is grouped by the wake-up date
+/// and includes naps, while deep-sleep rows remain overlays. Sleeping heart-rate
+/// samples are matched against absolute UTC sleep bounds and are counted once
+/// when overlapping primary sleep spans contain the same minute.
+pub fn fetch_daily_wellness(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<Vec<DailyWellness>> {
+    let mut by_date = BTreeMap::<NaiveDate, DailyWellness>::new();
+
+    for (date, total) in fetch_steps_by_day(conn, range)? {
+        let steps = u32::try_from(total)
+            .map_err(|_| anyhow::anyhow!("steps total for {date} is outside u32 range: {total}"))?;
+        by_date
+            .entry(date)
+            .or_insert_with(|| DailyWellness {
+                date,
+                steps: None,
+                sleep_secs: None,
+                avg_sleeping_hr: None,
+            })
+            .steps = Some(steps);
+    }
+
+    let nights = fetch_sleep_nights(conn, range)?;
+    let mut primary_spans_by_date = BTreeMap::<NaiveDate, Vec<(i64, i64)>>::new();
+    for night in &nights {
+        let total_secs = night.total_secs();
+        if total_secs <= 0 {
+            continue;
+        }
+        let sleep_secs = u32::try_from(total_secs).map_err(|_| {
+            anyhow::anyhow!(
+                "sleep total for {} is outside u32 range: {total_secs}",
+                night.wake_date
+            )
+        })?;
+        by_date
+            .entry(night.wake_date)
+            .or_insert_with(|| DailyWellness {
+                date: night.wake_date,
+                steps: None,
+                sleep_secs: None,
+                avg_sleeping_hr: None,
+            })
+            .sleep_secs = Some(sleep_secs);
+
+        primary_spans_by_date
+            .entry(night.wake_date)
+            .or_default()
+            .extend(
+                night
+                    .phases
+                    .iter()
+                    .filter(|phase| !phase.is_deep && phase.utc_start < phase.utc_end)
+                    .map(|phase| (phase.utc_start, phase.utc_end)),
+            );
+    }
+
+    if !primary_spans_by_date.is_empty() {
+        // Merge overlaps within each wake date first. This guarantees that a
+        // sample in overlapping primary phases contributes once to that date,
+        // matching the previous per-night HashSet de-duplication.
+        let mut primary_spans = Vec::new();
+        for (date, mut spans) in primary_spans_by_date {
+            spans.sort_unstable_by_key(|&(start, _)| start);
+            let mut merged = Vec::new();
+            for (start, end) in spans {
+                if let Some((_, merged_end)) = merged.last_mut() {
+                    if start <= *merged_end {
+                        *merged_end = (*merged_end).max(end);
+                        continue;
+                    }
+                }
+                merged.push((start, end));
+            }
+            primary_spans.extend(merged.into_iter().map(|(start, end)| (date, start, end)));
+        }
+        primary_spans.sort_unstable_by_key(|&(_, start, _)| start);
+
+        let utc_start = primary_spans
+            .iter()
+            .map(|&(_, start, _)| start)
+            .min()
+            .unwrap();
+        let utc_end = primary_spans.iter().map(|&(_, _, end)| end).max().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT start_ts, heart_rate_bpm
+             FROM health_activity_minutes
+             WHERE start_ts >= ?1
+               AND start_ts < ?2
+               AND heart_rate_bpm IS NOT NULL
+               AND heart_rate_bpm > 0
+             ORDER BY start_ts ASC",
+        )?;
+        let mut next_span = 0;
+        let mut active = BTreeMap::<NaiveDate, i64>::new();
+        let mut expirations = BinaryHeap::<Reverse<(i64, NaiveDate)>>::new();
+        let mut hr_totals = BTreeMap::<NaiveDate, (f64, u32)>::new();
+
+        // Both the SQL rows and primary_spans are sorted by UTC start. Each
+        // sample advances the interval cursor once; active intervals are
+        // visited only when a sample actually overlaps them.
+        for row in stmt.query_map(params![utc_start, utc_end], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (sample_ts, bpm) = row?;
+
+            while let Some(&Reverse((end, date))) = expirations.peek() {
+                if end > sample_ts {
+                    break;
+                }
+                expirations.pop();
+                if active.get(&date) == Some(&end) {
+                    active.remove(&date);
+                }
+            }
+
+            while let Some(&(date, start, end)) = primary_spans.get(next_span) {
+                if start > sample_ts {
+                    break;
+                }
+                next_span += 1;
+                if end > sample_ts {
+                    active.insert(date, end);
+                    expirations.push(Reverse((end, date)));
+                }
+            }
+
+            for &date in active.keys() {
+                let (sum, count) = hr_totals.entry(date).or_default();
+                *sum += bpm as f64;
+                *count += 1;
+            }
+        }
+
+        for (date, (sum, count)) in hr_totals {
+            if let Some(day) = by_date.get_mut(&date) {
+                day.avg_sleeping_hr = Some((sum / f64::from(count)) as f32);
+            }
+        }
+    }
+
+    Ok(by_date.into_values().collect())
+}
+
+fn wellness_date_bounds(
+    conn: &Connection,
+) -> anyhow::Result<(Option<NaiveDate>, Option<NaiveDate>)> {
+    let (oldest, newest): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT MIN(day), MAX(day)
+         FROM (
+             SELECT date(start_ts + utc_offset, 'unixepoch') AS day
+             FROM health_activity_minutes
+             UNION ALL
+             SELECT date(start_ts + utc_offset + duration_secs, 'unixepoch') AS day
+             FROM health_activity_sessions
+             WHERE session_type IN (1, 3)
+         )",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let parse = |value: Option<String>| {
+        value
+            .map(|value| {
+                NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                    .map_err(|error| anyhow::anyhow!("invalid wellness date {value:?}: {error}"))
+            })
+            .transpose()
+    };
+    Ok((parse(oldest)?, parse(newest)?))
+}
+
+/// Return the oldest watch-local date containing steps or primary sleep/nap data.
+pub fn oldest_wellness_date(conn: &Connection) -> anyhow::Result<Option<NaiveDate>> {
+    Ok(wellness_date_bounds(conn)?.0)
+}
+
+/// Return the newest watch-local date containing steps or primary sleep/nap data.
+pub fn newest_wellness_date(conn: &Connection) -> anyhow::Result<Option<NaiveDate>> {
+    Ok(wellness_date_bounds(conn)?.1)
 }
 
 // ═══ Presentation layer ═══════════════════════════════════════════════════════
@@ -710,6 +916,23 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_minute_at(
+        conn: &Connection,
+        utc_start: i64,
+        utc_offset: i64,
+        steps: i64,
+        heart_rate: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO health_activity_minutes
+             (health_record_id, record_version, start_ts, utc_offset, steps, orientation, vmc, light,
+              heart_rate_bpm, raw)
+             VALUES (1, 7, ?1, ?2, ?3, 0, 0, 0, ?4, x'00')",
+            params![utc_start, utc_offset, steps, heart_rate],
+        )
+        .unwrap();
+    }
+
     /// The whole point of the redesign: sleep starting the night of Jul 3 and
     /// ending the morning of Jul 4 belongs to Jul 4, including a deep segment
     /// that ends before midnight.
@@ -864,6 +1087,131 @@ mod tests {
         // And Jul 3 must not double-count it under either rule.
         assert!(fetch_steps_by_day(&conn, DateRange::day(jul3)).unwrap().is_empty());
         assert!(fetch_steps_by_hour(&conn, jul3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn daily_wellness_aggregates_steps_sleep_naps_and_deep_overlays() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+
+        insert_minute(&conn, local(jul4, 9, 0), 125);
+        insert_minute(&conn, local(jul4, 18, 0), 75);
+        insert_session(&conn, 1, local(jul3, 23, 0), 8 * 3600);
+        insert_session(&conn, 2, local(jul3, 23, 10), 40 * 60);
+        insert_session(&conn, 2, local(jul4, 2, 0), 50 * 60);
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600);
+
+        let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(
+            wellness,
+            vec![DailyWellness {
+                date: jul4,
+                steps: Some(200),
+                sleep_secs: Some(9 * 3600),
+                avg_sleeping_hr: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn daily_wellness_preserves_missing_fields_and_wake_date_bounds() {
+        let conn = setup();
+        let jul2 = d(2026, 7, 2);
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+        let jul6 = d(2026, 7, 6);
+
+        insert_minute(&conn, local(jul2, 12, 0), 10);
+        insert_session(&conn, 1, local(jul4, 23, 0), 8 * 3600);
+        // Deep-only data is not an independently uploadable wellness field.
+        insert_session(&conn, 2, local(jul6, 1, 0), 30 * 60);
+
+        let wellness = fetch_daily_wellness(
+            &conn,
+            DateRange { start: jul2, end: jul5 },
+        )
+        .unwrap();
+        assert_eq!(wellness.len(), 2);
+        assert_eq!(wellness[0].date, jul2);
+        assert_eq!(wellness[0].steps, Some(10));
+        assert_eq!(wellness[0].sleep_secs, None);
+        assert_eq!(wellness[0].avg_sleeping_hr, None);
+        assert_eq!(wellness[1].date, jul5);
+        assert_eq!(wellness[1].steps, None);
+        assert_eq!(wellness[1].sleep_secs, Some(8 * 3600));
+        assert_eq!(wellness[1].avg_sleeping_hr, None);
+        assert_eq!(oldest_wellness_date(&conn).unwrap(), Some(jul2));
+        assert_eq!(newest_wellness_date(&conn).unwrap(), Some(jul5));
+    }
+
+    #[test]
+    fn daily_wellness_uses_each_activity_row_offset() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let row_offset = TZ + 3600;
+        let row_local_start = local(jul4, 0, 30);
+        insert_minute_at(
+            &conn,
+            row_local_start - row_offset,
+            row_offset,
+            42,
+            None,
+        );
+
+        let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(wellness[0].date, jul4);
+        assert_eq!(wellness[0].steps, Some(42));
+    }
+
+    #[test]
+    fn daily_wellness_matches_sleeping_hr_in_absolute_time_and_omits_zero() {
+        let conn = setup();
+        let jul3 = d(2026, 7, 3);
+        let jul4 = d(2026, 7, 4);
+        let sleep_start_utc = local(jul3, 23, 0) - TZ;
+
+        insert_session(&conn, 1, local(jul3, 23, 0), 8 * 3600);
+        // This nap overlaps the overnight session, so an HR minute in the
+        // overlap must still be counted only once.
+        insert_session(&conn, 3, local(jul4, 0, 30), 3600);
+
+        // Keep the minute's absolute timestamp inside sleep while storing a
+        // different row offset, proving matching does not use local wall time.
+        insert_minute_at(&conn, sleep_start_utc + 2 * 3600, TZ + 3600, 0, Some(50));
+        insert_minute_at(
+            &conn,
+            sleep_start_utc + 2 * 3600 + 60,
+            TZ,
+            0,
+            Some(60),
+        );
+        insert_minute_at(
+            &conn,
+            sleep_start_utc + 2 * 3600 + 120,
+            TZ,
+            0,
+            Some(0),
+        );
+
+        let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(wellness.len(), 1);
+        assert_eq!(wellness[0].sleep_secs, Some(9 * 3600));
+        assert_eq!(wellness[0].steps, Some(0));
+        assert_eq!(wellness[0].avg_sleeping_hr, Some(55.0));
+    }
+
+    #[test]
+    fn daily_wellness_reflects_late_arriving_activity() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let range = DateRange::day(jul4);
+
+        insert_minute(&conn, local(jul4, 9, 0), 10);
+        assert_eq!(fetch_daily_wellness(&conn, range).unwrap()[0].steps, Some(10));
+
+        insert_minute(&conn, local(jul4, 12, 0), 5);
+        assert_eq!(fetch_daily_wellness(&conn, range).unwrap()[0].steps, Some(15));
     }
 
     #[test]
@@ -1027,6 +1375,8 @@ mod tests {
                 phases: vec![NightPhase {
                     local_start: 0,
                     local_end: 6 * 3600,
+                    utc_start: 0,
+                    utc_end: 6 * 3600,
                     is_deep: false,
                     is_nap: false,
                 }],
@@ -1034,8 +1384,22 @@ mod tests {
             Night {
                 wake_date: d(2026, 7, 4),
                 phases: vec![
-                    NightPhase { local_start: 0, local_end: 8 * 3600, is_deep: false, is_nap: false },
-                    NightPhase { local_start: 0, local_end: 2 * 3600, is_deep: true, is_nap: false },
+                    NightPhase {
+                        local_start: 0,
+                        local_end: 8 * 3600,
+                        utc_start: 0,
+                        utc_end: 8 * 3600,
+                        is_deep: false,
+                        is_nap: false,
+                    },
+                    NightPhase {
+                        local_start: 0,
+                        local_end: 2 * 3600,
+                        utc_start: 0,
+                        utc_end: 2 * 3600,
+                        is_deep: true,
+                        is_nap: false,
+                    },
                 ],
             },
         ];

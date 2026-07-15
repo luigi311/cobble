@@ -11,7 +11,8 @@ use rusqlite::{params, Connection};
 use tracing::{debug, warn};
 
 use crate::schema;
-use crate::types::IpLocation;
+use crate::time::DateRange;
+use crate::types::{DailyWellness, IpLocation};
 
 // Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
@@ -58,6 +59,21 @@ impl AppDb {
         schema::initialize_schema(&conn)?;
 
         Ok(Self { conn })
+    }
+
+    /// Aggregate supported wellness observations for a watch-local date range.
+    pub fn fetch_daily_wellness(&self, range: DateRange) -> anyhow::Result<Vec<DailyWellness>> {
+        crate::queries::fetch_daily_wellness(&self.conn, range)
+    }
+
+    /// Return the oldest watch-local date with steps or primary sleep/nap data.
+    pub fn oldest_wellness_date(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        crate::queries::oldest_wellness_date(&self.conn)
+    }
+
+    /// Return the newest watch-local date with steps or primary sleep/nap data.
+    pub fn newest_wellness_date(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        crate::queries::newest_wellness_date(&self.conn)
     }
 
     /// Insert a raw batch into health_records and parse individual records into the
