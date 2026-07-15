@@ -98,6 +98,13 @@ cat > "${XDG_CONFIG_HOME:-$HOME/.config}/cobbled/config.toml" << 'EOF'
 # adapter = "hci0"                # optional, default is hci0
 # verbose = false                  # optional, or use -v at runtime
 # db = "/custom/path/cobbled.db"   # optional, default is XDG_DATA_HOME/cobbled/cobbled.db
+
+# Intervals.icu wellness export is disabled by default. Uncomment and fill in
+# both credentials to enable the integration.
+# [integrations.intervals_icu]
+# enabled = true
+# athlete_id = "i123456"
+# api_key = "replace-with-personal-api-key"
 EOF
 ```
 
@@ -176,7 +183,20 @@ The GUI (`cobble`) can scan for Pebble devices and write the config for you.
 # adapter = "hci0"               # optional, default hci0
 # verbose = false                 # optional
 # db = "/custom/path/cobbled.db"  # optional, default XDG_DATA_HOME/cobbled/cobbled.db
+
+# Optional Intervals.icu wellness export. The GUI exposes these same fields.
+# [integrations.intervals_icu]
+# enabled = true
+# athlete_id = "i123456"
+# api_key = "replace-with-personal-api-key"
 ```
+
+Intervals.icu export is disabled unless `enabled = true` and both credentials
+are present. The daemon stores the API key in the TOML file for now; the GUI
+writes that file with mode `0600` on Unix and the daemon never logs or stores
+the key in its SQLite export ledger. Enabling a new athlete account performs a
+full local-history backfill. Disabling the integration stops outbound requests
+without deleting local data or export state.
 
 Start as a user service (must be a user service — the notification monitor
 connects to your session D-Bus, which only exists inside your login):
@@ -235,6 +255,8 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `ReprocessHealthData` | `()` | rebuild derived health tables from raw blobs |
 | Method | `PushWeather` | `(ay, s, s, n, y, n, n, y, n, n, b)` | location\_key (16 bytes), location\_name, forecast\_short, current\_temp\_c, current\_weather, today\_high\_c, today\_low\_c, tomorrow\_weather, tomorrow\_high\_c, tomorrow\_low\_c, is\_current\_location. Weather types: 0=PartlyCloudy 1=CloudyDay 2=LightSnow 3=LightRain 4=HeavyRain 5=HeavySnow 6=Generic 7=Sun 8=RainAndSnow |
 | Method | `ReloadConfig` | `()` | re-read config; disconnects if address/adapter changed. Also called automatically by the filesystem watcher. |
+| Method | `SyncWellness` | `()` | request one serialized Intervals.icu reconciliation; fails when the integration is disabled/invalid or the app database is unavailable |
+| Method | `GetWellnessSyncStatus` | `() → a{sv}` | durable account-scoped status; includes `enabled`, `valid`, `athlete_id`, `exported_dates`, `pending_dates`, `last_success`, `last_error`, and `last_error_at` |
 | Signal | `AppMessageReceived` | `(s, a{i(sv)})` | uuid, data |
 | Signal | `AckReceived` | `(u)` | txn |
 | Signal | `NackReceived` | `(u)` | txn |
@@ -255,6 +277,70 @@ Health data is stored automatically in SQLite at
 `$XDG_DATA_HOME/cobbled/cobbled.db` (or the path set in `config.toml`).
 The `HealthDataReceived` signal fires for each batch so external tools can
 consume raw records without reading the database directly.
+
+### Intervals.icu wellness export
+
+The exporter owns only the fields it sends: `steps`, `sleepSecs`, and
+`avgSleepingHR`. Missing local observations are omitted from a request, so
+they do not clear unrelated remote wellness fields. The worker scans local
+history on startup and configuration changes, reconciles changed dates using a
+durable payload-hash ledger, and performs bounded bulk uploads. Successful
+health-data persistence wakes it early; an hourly reconciliation remains as a
+safety net.
+
+Use the GUI’s **Sync Now** control or call `SyncWellness` to request an
+immediate run. `GetWellnessSyncStatus` reports the current account and the
+latest durable success/error summary. Its error text is sanitized and contains
+no response body, authorization header, or API key.
+
+#### Manual verification checklist
+
+Run this checklist with a dedicated test athlete/account and a dedicated test
+date. Do not use production credentials in a repository, issue, log, or screen
+capture.
+
+1. Record the remote wellness document for the test date before syncing,
+   including fields that Cobble does not own (for example, mood, calories, or
+   notes).
+2. Configure the test account through the GUI or the TOML example above.
+   Confirm that the API key field is masked in the GUI, the configuration file
+   is readable only by its owner on Unix, and daemon logs contain no key.
+3. Trigger `SyncWellness` or the GUI’s **Sync Now** control. Confirm that the
+   request updates only `steps`, `sleepSecs`, and `avgSleepingHR`; missing local
+   observations are omitted rather than sent as zeroes or nulls.
+4. Compare the remote document with the baseline. Confirm that unrelated
+   fields are unchanged, and query `GetWellnessSyncStatus` to confirm the
+   account, exported-date count, and successful-sync timestamp.
+5. Trigger the same sync again and restart the daemon. Confirm that the
+   durable ledger prevents an unchanged date from being treated as new work.
+6. Add or correct a local health record for the test date, trigger another
+   sync, and confirm that only the corresponding owned field changes remotely.
+7. Temporarily use an invalid key. Confirm that the status and logs expose
+   only a sanitized error, then restore the key and reload the configuration
+   without losing the local health data.
+8. Change the athlete ID and confirm that the new account is backfilled. Disable
+   the integration and confirm that outbound requests stop while local state
+   remains available; re-enable it only after cleanup.
+9. Remove the dedicated test data or reset the test account according to the
+   provider’s policy.
+
+This checklist requires a reachable Intervals.icu test account and is not part
+of the automated build; no live provider test is run by default.
+
+#### Field ownership and conflict policy
+
+Cobble is authoritative only for the fields it emits: `steps`, `sleepSecs`,
+and `avgSleepingHR`. A successful reconciliation can replace those three
+remote values with the current local aggregates. It does not merge, clear, or
+otherwise modify fields outside that set. When a local observation is missing,
+the corresponding field is omitted from the partial update so the existing
+remote value is preserved.
+
+There is no conflict detection for another service writing one of Cobble’s
+owned fields: the last successful writer wins. Configure a single owner for
+those fields, or disable the Cobble integration if another service should be
+authoritative. The per-account, per-date ledger prevents re-sending an
+unchanged Cobble payload, but it is not a remote conflict-resolution system.
 
 ## Supported features
 
@@ -300,6 +386,7 @@ consume raw records without reading the database directly.
 - [x] AppMessages
   - [x] External applications
 - [x] Health (data sync + profile/settings read)
+- [x] Intervals.icu wellness export (durable backfill, retries, GUI status/control)
 - [x] Watch info + device management (version, color, battery, screenshot, reboot/reset/forget)
 - [x] Music push + MPRIS auto-discovery (desktop players → watch metadata + watch controls → desktop player, system volume via pactl/wpctl)
 - [x] Weather (Open-Meteo auto-fetch, GeoClue2/ipapi.co location, 3h refresh, connection-gated)
