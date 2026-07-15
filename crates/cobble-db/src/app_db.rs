@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +9,7 @@ use anyhow::Context;
 use chrono::NaiveDate;
 use libpebble_ble::endpoints::datalog::tag as datalog_tag;
 use libpebble_ble::DatalogData;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
 use crate::schema;
@@ -138,46 +139,38 @@ impl AppDb {
         &self,
         provider: &str,
         account_id: &str,
+        current_payloads: &[(NaiveDate, String)],
     ) -> anyhow::Result<WellnessExportStatus> {
-        let (exported_dates, pending_dates, last_success_at) = self.conn.query_row(
-            "SELECT
-                 COALESCE(SUM(CASE WHEN payload_hash IS NOT NULL THEN 1 ELSE 0 END), 0),
-                 COALESCE(SUM(
-                     CASE WHEN last_success_at IS NULL OR last_error IS NOT NULL
-                          THEN 1 ELSE 0 END
-                 ), 0),
-                 MAX(last_success_at)
-             FROM wellness_export_state
-             WHERE provider = ?1 AND account_id = ?2",
-            params![provider, account_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                ))
-            },
-        )?;
-        let latest_error = self
-            .conn
-            .query_row(
-                "SELECT last_error, last_attempt_at
-                 FROM wellness_export_state
-                 WHERE provider = ?1 AND account_id = ?2 AND last_error IS NOT NULL
-                 ORDER BY last_attempt_at DESC
-                 LIMIT 1",
-                params![provider, account_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                    ))
-                },
-            )
-            .optional()?;
-
+        let states = self.fetch_wellness_export_states(provider, account_id)?;
+        let successful_hashes: HashMap<NaiveDate, &str> = states
+            .iter()
+            .filter_map(|state| {
+                state
+                    .payload_hash
+                    .as_deref()
+                    .map(|hash| (state.wellness_date, hash))
+            })
+            .collect();
+        let exported_dates = current_payloads
+            .iter()
+            .filter(|(date, hash)| successful_hashes.get(date) == Some(&hash.as_str()))
+            .count() as i64;
+        let pending_dates = current_payloads.len() as i64 - exported_dates;
+        let last_success_at = states.iter().filter_map(|state| state.last_success_at).max();
+        let latest_error = states
+            .iter()
+            .filter_map(|state| {
+                state.last_error.as_ref().map(|error| {
+                    (
+                        state.last_attempt_at.unwrap_or(i64::MIN),
+                        error.clone(),
+                        state.last_attempt_at,
+                    )
+                })
+            })
+            .max_by_key(|(attempted_at, _, _)| *attempted_at);
         let (last_error, last_error_at) = latest_error
-            .map(|(error, attempted_at)| (Some(error), attempted_at))
+            .map(|(_, error, attempted_at)| (Some(error), attempted_at))
             .unwrap_or((None, None));
         Ok(WellnessExportStatus {
             exported_dates,
@@ -745,5 +738,41 @@ mod tests {
         assert_eq!(state.last_attempt_at, Some(700));
         assert_eq!(state.last_success_at, Some(700));
         assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn wellness_export_status_compares_current_payloads_with_successful_hashes() {
+        let db = memory_db();
+        let exported = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
+        let changed = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap();
+        let unseen = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+
+        db.record_wellness_export_success(
+            "intervals_icu",
+            "athlete-a",
+            &[
+                (exported, "hash-exported".into()),
+                (changed, "hash-before-change".into()),
+            ],
+            100,
+        )
+        .unwrap();
+
+        let status = db
+            .fetch_wellness_export_status(
+                "intervals_icu",
+                "athlete-a",
+                &[
+                    (exported, "hash-exported".into()),
+                    (changed, "hash-after-change".into()),
+                    (unseen, "hash-unseen".into()),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(status.exported_dates, 1);
+        assert_eq!(status.pending_dates, 2);
+        assert_eq!(status.last_success_at, Some(100));
+        assert_eq!(status.last_error, None);
     }
 }

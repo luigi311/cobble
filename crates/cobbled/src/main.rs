@@ -6,6 +6,7 @@
 //! connection, and runs until signalled.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
@@ -112,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
     let (wellness_sync_tx, wellness_sync_rx) = watch::channel(0_u64);
     let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
+    let wellness_running = Arc::new(AtomicBool::new(false));
 
     // Channel for forwarding watch music-control actions to the MPRIS monitor.
     let (music_action_tx, music_action_rx) = mpsc::unbounded_channel();
@@ -124,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.adapter.clone(),
         cfg.integrations.intervals_icu.clone(),
         wellness_sync_tx,
+        wellness_running.clone(),
         config_path.clone(),
         event_tx,
         app_db.clone(),
@@ -162,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
             wellness_revision_rx,
             wellness_sync_rx,
             wellness_shutdown_rx,
+            wellness_running,
         ))
     });
 

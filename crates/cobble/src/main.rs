@@ -1,6 +1,6 @@
 mod config;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -27,6 +27,9 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = config::load(&config_path).unwrap_or_default();
     let initial_integrations = cfg.integrations.clone();
+    let intervals_baseline = Rc::new(RefCell::new(
+        cfg.integrations.intervals_icu.clone(),
+    ));
     window.set_cfg_address(cfg.address.clone().into());
     window.set_cfg_adapter(cfg.adapter.clone().into());
     window.set_cfg_verbose(cfg.verbose);
@@ -238,6 +241,7 @@ fn main() -> anyhow::Result<()> {
         let weak = window.as_weak();
         let cfg_path2 = config_path.clone();
         let rt_handle = rt.handle().clone();
+        let intervals_baseline = intervals_baseline.clone();
         window.on_save_config(move || {
             let Some(w) = weak.upgrade() else { return };
             let mut integrations = match config::load(&cfg_path2) {
@@ -248,20 +252,17 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
-            let initial_intervals = &initial_integrations.intervals_icu;
             let intervals = &mut integrations.intervals_icu;
-            let enabled = w.get_cfg_intervals_enabled();
-            let athlete_id = w.get_cfg_intervals_athlete_id().to_string();
-            let api_key = w.get_cfg_intervals_api_key().to_string();
-            if enabled != initial_intervals.enabled {
-                intervals.enabled = enabled;
-            }
-            if athlete_id != initial_intervals.athlete_id {
-                intervals.athlete_id = athlete_id;
-            }
-            if api_key != initial_intervals.api_key {
-                intervals.api_key = api_key;
-            }
+            let edited_intervals = config::IntervalsIcuConfig {
+                enabled: w.get_cfg_intervals_enabled(),
+                athlete_id: w.get_cfg_intervals_athlete_id().to_string(),
+                api_key: w.get_cfg_intervals_api_key().to_string(),
+            };
+            config::merge_intervals_edits(
+                intervals,
+                &intervals_baseline.borrow(),
+                &edited_intervals,
+            );
             let new_cfg = config::Config {
                 address: w.get_cfg_address().to_string(),
                 adapter: w.get_cfg_adapter().to_string(),
@@ -275,6 +276,7 @@ fn main() -> anyhow::Result<()> {
             match config::save(&cfg_path2, &new_cfg) {
                 Err(e) => { w.set_save_status(format!("Error: {e}").into()); }
                 Ok(()) => {
+                    *intervals_baseline.borrow_mut() = edited_intervals;
                     w.set_save_status("Saved.".into());
                     let weak2 = weak.clone();
                     rt_handle.spawn(async move {
@@ -304,7 +306,7 @@ fn main() -> anyhow::Result<()> {
         let rt_handle = rt.handle().clone();
         window.on_sync_wellness(move || {
             let Some(w) = weak.upgrade() else { return };
-            w.set_cfg_intervals_status("Sync requested…".into());
+            w.set_cfg_intervals_status("Sync in progress…".into());
             w.set_cfg_intervals_status_error(false);
             let weak2 = weak.clone();
             rt_handle.spawn(async move {
@@ -312,13 +314,7 @@ fn main() -> anyhow::Result<()> {
                     Err(error) => Err(error.to_string()),
                     Ok(client) => match client.sync_wellness().await {
                         Err(error) => Err(error.to_string()),
-                        Ok(()) => {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            client
-                                .get_wellness_sync_status()
-                                .await
-                                .map_err(|error| error.to_string())
-                        }
+                        Ok(()) => wait_for_wellness_sync(&client).await,
                     },
                 };
                 slint::invoke_from_event_loop(move || {
@@ -468,37 +464,62 @@ where
 fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
     let rt = rt.clone();
     rt.spawn(async move {
-        let result = match CobbleClient::new().await {
-            Err(error) => Err(error.to_string()),
-            Ok(client) => client
-                .get_wellness_sync_status()
-                .await
-                .map_err(|error| error.to_string()),
-        };
-        slint::invoke_from_event_loop(move || {
-            if let Some(w) = weak.upgrade() {
-                match result {
-                    Ok(status) => apply_wellness_status(&w, &status),
-                    Err(error) => {
-                        w.set_cfg_intervals_status(format!("Error: {error}").into());
-                        w.set_cfg_intervals_status_error(true);
+        loop {
+            let result = match CobbleClient::new().await {
+                Err(error) => Err(error.to_string()),
+                Ok(client) => client
+                    .get_wellness_sync_status()
+                    .await
+                    .map_err(|error| error.to_string()),
+            };
+            let delay = match &result {
+                Ok(status) if wellness_status_bool(status, "running") => Duration::from_secs(2),
+                Ok(_) => Duration::from_secs(60),
+                Err(_) => Duration::from_secs(10),
+            };
+            let weak2 = weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak2.upgrade() {
+                    match result {
+                        Ok(status) => apply_wellness_status(&w, &status),
+                        Err(error) => {
+                            w.set_cfg_intervals_status(format!("Error: {error}").into());
+                            w.set_cfg_intervals_status_error(true);
+                        }
                     }
                 }
-            }
-        })
-        .ok();
+            })
+            .ok();
+            tokio::time::sleep(delay).await;
+        }
     });
+}
+
+async fn wait_for_wellness_sync(client: &CobbleClient) -> Result<VarDict, String> {
+    loop {
+        let status = client
+            .get_wellness_sync_status()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !wellness_status_bool(&status, "running") {
+            return Ok(status);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 fn apply_wellness_status(w: &AppWindow, status: &VarDict) {
     let enabled = wellness_status_bool(status, "enabled");
     let valid = wellness_status_bool(status, "valid");
+    let running = wellness_status_bool(status, "running");
+    let last_error = wellness_status_string(status, "last_error");
     let message = if !enabled {
         "Wellness sync disabled.".to_string()
     } else if !valid {
         "Invalid Intervals.icu configuration.".to_string()
+    } else if running {
+        "Sync in progress…".to_string()
     } else {
-        let last_error = wellness_status_string(status, "last_error");
         if !last_error.is_empty() {
             format!("Last error: {last_error}")
         } else {
@@ -516,7 +537,9 @@ fn apply_wellness_status(w: &AppWindow, status: &VarDict) {
         }
     };
     w.set_cfg_intervals_status(message.into());
-    w.set_cfg_intervals_status_error(enabled && !valid || (enabled && !wellness_status_string(status, "last_error").is_empty()));
+    w.set_cfg_intervals_status_error(
+        enabled && (!valid || (!running && !last_error.is_empty())),
+    );
 }
 
 fn wellness_status_string(status: &VarDict, key: &str) -> String {

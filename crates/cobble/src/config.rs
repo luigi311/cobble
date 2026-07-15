@@ -5,7 +5,7 @@ use anyhow::Context;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-pub use cobble_config::Config;
+pub use cobble_config::{Config, IntervalsIcuConfig, merge_intervals_edits};
 
 pub fn default_config_path() -> anyhow::Result<PathBuf> {
     let base = if let Some(p) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {

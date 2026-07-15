@@ -136,9 +136,9 @@ pub struct WellnessExportState {
 /// Aggregated durable status for one provider/account wellness export.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WellnessExportStatus {
-    /// Dates with a successful payload hash in the export ledger.
+    /// Current local dates whose payload matches the last successful export.
     pub exported_dates: i64,
-    /// Dates with no successful export yet or with a pending recorded error.
+    /// Current local dates that are unseen or differ from the successful hash.
     pub pending_dates: i64,
     pub last_success_at: Option<i64>,
     pub last_error: Option<String>,

@@ -55,6 +55,26 @@ pub struct IntervalsIcuConfig {
     pub api_key: String,
 }
 
+/// Apply only fields edited since a caller last established its baseline.
+///
+/// This three-way merge preserves concurrent changes to untouched fields while
+/// still allowing a later edit to revert a field to an earlier value.
+pub fn merge_intervals_edits(
+    latest: &mut IntervalsIcuConfig,
+    baseline: &IntervalsIcuConfig,
+    edited: &IntervalsIcuConfig,
+) {
+    if edited.enabled != baseline.enabled {
+        latest.enabled = edited.enabled;
+    }
+    if edited.athlete_id != baseline.athlete_id {
+        latest.athlete_id.clone_from(&edited.athlete_id);
+    }
+    if edited.api_key != baseline.api_key {
+        latest.api_key.clone_from(&edited.api_key);
+    }
+}
+
 impl IntervalsIcuConfig {
     /// Whether both credentials are present after trimming for validation.
     pub fn is_configured(&self) -> bool {
@@ -182,5 +202,32 @@ mod tests {
                 api_key_configured: true,
             }
         );
+    }
+
+    #[test]
+    fn interval_edits_preserve_external_changes_and_support_later_reverts() {
+        let original = IntervalsIcuConfig {
+            enabled: false,
+            athlete_id: "i1".into(),
+            api_key: "key-1".into(),
+        };
+        let mut latest = IntervalsIcuConfig {
+            enabled: true,
+            athlete_id: "external-athlete".into(),
+            api_key: "external-key".into(),
+        };
+        let first_edit = IntervalsIcuConfig {
+            athlete_id: "i2".into(),
+            ..original.clone()
+        };
+
+        merge_intervals_edits(&mut latest, &original, &first_edit);
+        assert!(latest.enabled);
+        assert_eq!(latest.athlete_id, "i2");
+        assert_eq!(latest.api_key, "external-key");
+
+        let mut second_latest = latest.clone();
+        merge_intervals_edits(&mut second_latest, &first_edit, &original);
+        assert_eq!(second_latest.athlete_id, "i1");
     }
 }

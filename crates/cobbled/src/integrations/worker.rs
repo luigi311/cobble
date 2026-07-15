@@ -1,6 +1,7 @@
 //! Background wellness reconciliation worker.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,7 +67,9 @@ pub(crate) async fn run(
     mut health_rx: watch::Receiver<u64>,
     mut manual_sync_rx: watch::Receiver<u64>,
     mut shutdown_rx: watch::Receiver<bool>,
+    running: Arc<AtomicBool>,
 ) {
+    let _running_reset = RunningReset(running.clone());
     let mut config = integration_rx.borrow().clone();
     let mut authentication_blocked_config = None;
     let mut active = start_reconciliation(
@@ -74,6 +77,7 @@ pub(crate) async fn run(
         &config,
         WellnessWake::Startup,
         &authentication_blocked_config,
+        &running,
     );
     let mut pending_wake = None;
     let mut health_rx_open = true;
@@ -107,7 +111,10 @@ pub(crate) async fn run(
                         &config,
                         reason,
                         &authentication_blocked_config,
+                        &running,
                     );
+                } else {
+                    running.store(false, Ordering::SeqCst);
                 }
             }
             changed = integration_rx.changed() => {
@@ -124,6 +131,7 @@ pub(crate) async fn run(
                     &config,
                     WellnessWake::ConfigChanged,
                     &authentication_blocked_config,
+                    &running,
                 );
             }
             changed = health_rx.changed(), if health_rx_open => {
@@ -139,6 +147,7 @@ pub(crate) async fn run(
                         &config,
                         reason,
                         &authentication_blocked_config,
+                        &running,
                     );
                 }
             }
@@ -155,6 +164,7 @@ pub(crate) async fn run(
                         &config,
                         reason,
                         &authentication_blocked_config,
+                        &running,
                     );
                 }
             }
@@ -169,6 +179,7 @@ pub(crate) async fn run(
                         &config,
                         reason,
                         &authentication_blocked_config,
+                        &running,
                     );
                 }
             }
@@ -181,6 +192,7 @@ pub(crate) async fn run(
         }
     }
 
+    running.store(false, Ordering::SeqCst);
     debug!("wellness exporter stopped");
 }
 
@@ -205,6 +217,7 @@ fn start_reconciliation(
     config: &IntervalsIcuConfig,
     reason: WellnessWake,
     authentication_blocked_config: &Option<IntervalsIcuConfig>,
+    running: &Arc<AtomicBool>,
 ) -> Option<JoinHandle<ReconcileOutcome>> {
     if authentication_blocked_config
         .as_ref()
@@ -214,14 +227,24 @@ fn start_reconciliation(
             ?reason,
             "wellness exporter paused after authentication failure"
         );
+        running.store(false, Ordering::SeqCst);
         return None;
     }
 
     let db = db.clone();
     let config = config.clone();
+    running.store(true, Ordering::SeqCst);
     Some(tokio::spawn(async move {
         reconcile(&db, &config, reason).await
     }))
+}
+
+struct RunningReset(Arc<AtomicBool>);
+
+impl Drop for RunningReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 async fn cancel_reconciliation(active: &mut Option<JoinHandle<ReconcileOutcome>>) {
@@ -614,8 +637,6 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
 
     #[test]
@@ -663,6 +684,13 @@ mod tests {
 
         assert!(active.is_none());
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dropping_the_worker_resets_running_state() {
+        let running = Arc::new(AtomicBool::new(true));
+        drop(RunningReset(running.clone()));
+        assert!(!running.load(Ordering::SeqCst));
     }
 
     #[test]

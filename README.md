@@ -256,7 +256,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `PushWeather` | `(ay, s, s, n, y, n, n, y, n, n, b)` | location\_key (16 bytes), location\_name, forecast\_short, current\_temp\_c, current\_weather, today\_high\_c, today\_low\_c, tomorrow\_weather, tomorrow\_high\_c, tomorrow\_low\_c, is\_current\_location. Weather types: 0=PartlyCloudy 1=CloudyDay 2=LightSnow 3=LightRain 4=HeavyRain 5=HeavySnow 6=Generic 7=Sun 8=RainAndSnow |
 | Method | `ReloadConfig` | `()` | re-read config; disconnects if address/adapter changed. Also called automatically by the filesystem watcher. |
 | Method | `SyncWellness` | `()` | request one serialized Intervals.icu reconciliation; fails when the integration is disabled/invalid or the app database is unavailable |
-| Method | `GetWellnessSyncStatus` | `() → a{sv}` | durable account-scoped status; includes `enabled`, `valid`, `athlete_id`, `exported_dates`, `pending_dates`, `last_success`, `last_error`, and `last_error_at` |
+| Method | `GetWellnessSyncStatus` | `() → a{sv}` | live and durable account-scoped status; includes `enabled`, `configured`, `valid`, `running`, `athlete_id`, hash-aware `exported_dates`/`pending_dates`, `last_success`, `last_error`, and `last_error_at` |
 | Signal | `AppMessageReceived` | `(s, a{i(sv)})` | uuid, data |
 | Signal | `AckReceived` | `(u)` | txn |
 | Signal | `NackReceived` | `(u)` | txn |
@@ -289,9 +289,13 @@ health-data persistence wakes it early; an hourly reconciliation remains as a
 safety net.
 
 Use the GUI’s **Sync Now** control or call `SyncWellness` to request an
-immediate run. `GetWellnessSyncStatus` reports the current account and the
-latest durable success/error summary. Its error text is sanitized and contains
-no response body, authorization header, or API key.
+immediate run. The GUI polls until the serialized reconciliation finishes.
+`GetWellnessSyncStatus` reports whether work is currently running, the current
+account, and the latest durable success/error summary. Exported and pending
+counts compare current local payload hashes with the successful ledger, so
+newly discovered and locally changed dates are pending even before an upload
+attempt. Error text is sanitized and contains no response body, authorization
+header, or API key.
 
 #### Manual verification checklist
 
