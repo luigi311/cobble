@@ -37,6 +37,11 @@ fn main() -> anyhow::Result<()> {
     window.set_cfg_intervals_enabled(cfg.integrations.intervals_icu.enabled);
     window.set_cfg_intervals_athlete_id(cfg.integrations.intervals_icu.athlete_id.clone().into());
     window.set_cfg_intervals_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
+    window.set_cfg_intervals_applied_enabled(cfg.integrations.intervals_icu.enabled);
+    window.set_cfg_intervals_applied_athlete_id(
+        cfg.integrations.intervals_icu.athlete_id.clone().into(),
+    );
+    window.set_cfg_intervals_applied_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
     window.set_cfg_intervals_status("Loading sync status…".into());
 
     let effective_db_path = cfg
@@ -276,7 +281,16 @@ fn main() -> anyhow::Result<()> {
             match config::save(&cfg_path2, &new_cfg) {
                 Err(e) => { w.set_save_status(format!("Error: {e}").into()); }
                 Ok(()) => {
-                    *intervals_baseline.borrow_mut() = new_cfg.integrations.intervals_icu.clone();
+                    let written_intervals = new_cfg.integrations.intervals_icu.clone();
+                    *intervals_baseline.borrow_mut() = written_intervals.clone();
+                    w.set_cfg_intervals_enabled(written_intervals.enabled);
+                    w.set_cfg_intervals_athlete_id(written_intervals.athlete_id.clone().into());
+                    w.set_cfg_intervals_api_key(written_intervals.api_key.clone().into());
+                    w.set_cfg_intervals_applied_enabled(written_intervals.enabled);
+                    w.set_cfg_intervals_applied_athlete_id(
+                        written_intervals.athlete_id.into(),
+                    );
+                    w.set_cfg_intervals_applied_api_key(written_intervals.api_key.into());
                     w.set_save_status("Saved.".into());
                     let weak2 = weak.clone();
                     rt_handle.spawn(async move {

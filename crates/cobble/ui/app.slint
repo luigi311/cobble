@@ -53,6 +53,13 @@ export component AppWindow inherits Window {
     in-out property <bool>   cfg-intervals-enabled: false;
     in-out property <string> cfg-intervals-athlete-id;
     in-out property <string> cfg-intervals-api-key;
+    in property <bool> cfg-intervals-applied-enabled: false;
+    in property <string> cfg-intervals-applied-athlete-id;
+    in property <string> cfg-intervals-applied-api-key;
+    private property <bool> cfg-intervals-dirty:
+        cfg-intervals-enabled != cfg-intervals-applied-enabled
+        || cfg-intervals-athlete-id != cfg-intervals-applied-athlete-id
+        || cfg-intervals-api-key != cfg-intervals-applied-api-key;
     in property <string> cfg-intervals-status;
     in property <bool> cfg-intervals-status-error: false;
     in property <string> save-status: "";
@@ -442,8 +449,12 @@ export component AppWindow inherits Window {
                         height: 52px; spacing: 8px;
                         Rectangle {
                             width: 112px; border-radius: 8px; background: Palette.surface;
+                            opacity: root.cfg-intervals-dirty ? 0.5 : 1.0;
                             Text { text: "Sync Now"; color: Palette.accent; font-size: 14px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                            TouchArea { clicked => { root.sync-wellness(); } }
+                            TouchArea {
+                                enabled: !root.cfg-intervals-dirty;
+                                clicked => { root.sync-wellness(); }
+                            }
                         }
                         Text {
                             text: root.cfg-intervals-status;
