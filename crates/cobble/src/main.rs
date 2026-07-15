@@ -31,6 +31,9 @@ fn main() -> anyhow::Result<()> {
     window.set_cfg_adapter(cfg.adapter.clone().into());
     window.set_cfg_verbose(cfg.verbose);
     window.set_cfg_db(cfg.db.clone().unwrap_or_default().into());
+    window.set_cfg_intervals_enabled(cfg.integrations.intervals_icu.enabled);
+    window.set_cfg_intervals_athlete_id(cfg.integrations.intervals_icu.athlete_id.clone().into());
+    window.set_cfg_intervals_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
 
     let effective_db_path = cfg
         .db
@@ -234,7 +237,7 @@ fn main() -> anyhow::Result<()> {
         let rt_handle = rt.handle().clone();
         window.on_save_config(move || {
             let Some(w) = weak.upgrade() else { return };
-            let integrations = match config::load(&cfg_path2) {
+            let mut integrations = match config::load(&cfg_path2) {
                 Ok(latest) => latest.integrations,
                 Err(_error) if !cfg_path2.exists() => initial_integrations.clone(),
                 Err(error) => {
@@ -242,6 +245,20 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
+            let initial_intervals = &initial_integrations.intervals_icu;
+            let intervals = &mut integrations.intervals_icu;
+            let enabled = w.get_cfg_intervals_enabled();
+            let athlete_id = w.get_cfg_intervals_athlete_id().to_string();
+            let api_key = w.get_cfg_intervals_api_key().to_string();
+            if enabled != initial_intervals.enabled {
+                intervals.enabled = enabled;
+            }
+            if athlete_id != initial_intervals.athlete_id {
+                intervals.athlete_id = athlete_id;
+            }
+            if api_key != initial_intervals.api_key {
+                intervals.api_key = api_key;
+            }
             let new_cfg = config::Config {
                 address: w.get_cfg_address().to_string(),
                 adapter: w.get_cfg_adapter().to_string(),

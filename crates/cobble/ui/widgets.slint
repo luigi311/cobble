@@ -26,6 +26,7 @@ export component FormField inherits VerticalLayout {
     in property <string> label;
     in-out property <string> value;
     in property <string> placeholder;
+    in property <InputType> input-type: InputType.text;
     spacing: 6px;
     Text { text: root.label; color: Palette.muted; font-size: 12px; }
     Rectangle {
@@ -36,6 +37,7 @@ export component FormField inherits VerticalLayout {
         }
         TextInput {
             text <=> root.value; color: Palette.text; font-size: 14px;
+            input-type: root.input-type;
             x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center;
         }
     }
