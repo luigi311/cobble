@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 #[cfg(unix)]
@@ -41,21 +42,49 @@ pub fn save(path: &Path, cfg: &Config) -> anyhow::Result<()> {
             .with_context(|| format!("create config dir {}", parent.display()))?;
     }
     let text = toml::to_string_pretty(cfg).context("serialise config")?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", path.display()))?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.tmp-{}-{unique}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("open config {}", path.display()))?;
-    #[cfg(unix)]
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("set permissions on config {}", path.display()))?;
-    file.set_len(0)
-        .with_context(|| format!("truncate config {}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("write config {}", path.display()))?;
-    Ok(())
+    let mut temp_created = false;
+    let result = (|| {
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("open config {}", path.display()))?;
+        temp_created = true;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("set permissions on config {}", path.display()))?;
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("write config {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("flush config {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync config {}", path.display()))?;
+        drop(file);
+        std::fs::rename(&temp_path, path)
+            .with_context(|| format!("replace config {}", path.display()))?;
+        Ok(())
+    })();
+    if temp_created && result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
 }
 
 #[cfg(test)]
