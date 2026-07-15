@@ -761,26 +761,29 @@ const RESTING_HR_MAX_BPM: i64 = 220;
 /// the day's estimate.
 fn lowest_sustained_resting_hr(samples: &[(i64, i64)]) -> Option<u16> {
     let mut best: Option<f64> = None;
-    let mut start = 0;
+    let mut earliest_start = 0;
 
     for end in 0..samples.len() {
-        while samples[end].0 - samples[start].0 > RESTING_HR_WINDOW_SECS {
-            start += 1;
+        while samples[end].0 - samples[earliest_start].0 > RESTING_HR_WINDOW_SECS {
+            earliest_start += 1;
         }
-        let window = &samples[start..=end];
+        for start in earliest_start..=end {
+            let window = &samples[start..=end];
+            if window.len() < RESTING_HR_MIN_SAMPLES {
+                break;
+            }
+            if samples[end].0 - samples[start].0 < RESTING_HR_MIN_SPAN_SECS
+                || window
+                    .windows(2)
+                    .any(|pair| pair[1].0 - pair[0].0 > RESTING_HR_MAX_GAP_SECS)
+            {
+                continue;
+            }
 
-        if window.len() < RESTING_HR_MIN_SAMPLES
-            || samples[end].0 - samples[start].0 < RESTING_HR_MIN_SPAN_SECS
-            || window
-                .windows(2)
-                .any(|pair| pair[1].0 - pair[0].0 > RESTING_HR_MAX_GAP_SECS)
-        {
-            continue;
+            let mean = window.iter().map(|(_, bpm)| *bpm as f64).sum::<f64>()
+                / window.len() as f64;
+            best = Some(best.map_or(mean, |current| current.min(mean)));
         }
-
-        let mean = window.iter().map(|(_, bpm)| *bpm as f64).sum::<f64>()
-            / window.len() as f64;
-        best = Some(best.map_or(mean, |current| current.min(mean)));
     }
 
     best.map(|bpm| bpm.round() as u16)
@@ -792,15 +795,7 @@ fn estimated_resting_hr_by_wake_date(
     conn: &Connection,
     nights: &[Night],
 ) -> anyhow::Result<BTreeMap<NaiveDate, u16>> {
-    let mut stmt = conn.prepare(
-        "SELECT start_ts, heart_rate_bpm
-         FROM health_activity_minutes
-         WHERE start_ts >= ?1 AND start_ts < ?2
-           AND heart_rate_bpm BETWEEN ?3 AND ?4
-         ORDER BY start_ts ASC",
-    )?;
-    let mut estimates = BTreeMap::new();
-
+    let mut primary_spans = Vec::new();
     for night in nights {
         let mut spans: Vec<(i64, i64)> = night
             .phases
@@ -810,9 +805,6 @@ fn estimated_resting_hr_by_wake_date(
             })
             .map(|phase| (phase.utc_start, phase.utc_end))
             .collect();
-        if spans.is_empty() {
-            continue;
-        }
         spans.sort_unstable_by_key(|&(start, _)| start);
 
         let mut merged: Vec<(i64, i64)> = Vec::new();
@@ -825,31 +817,84 @@ fn estimated_resting_hr_by_wake_date(
             }
             merged.push((start, end));
         }
+        primary_spans.extend(
+            merged
+                .into_iter()
+                .map(|(start, end)| (night.wake_date, start, end)),
+        );
+    }
+    if primary_spans.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    primary_spans.sort_unstable_by_key(|&(_, start, _)| start);
 
-        let query_start = merged.first().map(|span| span.0).unwrap_or_default();
-        let query_end = merged.last().map(|span| span.1).unwrap_or_default();
-        let rows = stmt.query_map(
-            params![
-                query_start,
-                query_end,
-                RESTING_HR_MIN_BPM,
-                RESTING_HR_MAX_BPM
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        let mut samples = Vec::new();
-        for row in rows {
-            let sample = row?;
-            if merged
-                .iter()
-                .any(|&(start, end)| start <= sample.0 && sample.0 < end)
-            {
-                samples.push(sample);
+    let query_start = primary_spans
+        .iter()
+        .map(|&(_, start, _)| start)
+        .min()
+        .unwrap();
+    let query_end = primary_spans
+        .iter()
+        .map(|&(_, _, end)| end)
+        .max()
+        .unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, heart_rate_bpm
+         FROM health_activity_minutes
+         WHERE start_ts >= ?1 AND start_ts < ?2
+           AND heart_rate_bpm BETWEEN ?3 AND ?4
+         ORDER BY start_ts ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            query_start,
+            query_end,
+            RESTING_HR_MIN_BPM,
+            RESTING_HR_MAX_BPM
+        ],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let mut next_span = 0;
+    let mut active = BTreeMap::<NaiveDate, i64>::new();
+    let mut expirations = BinaryHeap::<Reverse<(i64, NaiveDate)>>::new();
+    let mut samples_by_date = BTreeMap::<NaiveDate, Vec<(i64, i64)>>::new();
+
+    for row in rows {
+        let (sample_ts, bpm) = row?;
+
+        while let Some(&Reverse((end, date))) = expirations.peek() {
+            if end > sample_ts {
+                break;
+            }
+            expirations.pop();
+            if active.get(&date) == Some(&end) {
+                active.remove(&date);
             }
         }
 
+        while let Some(&(date, start, end)) = primary_spans.get(next_span) {
+            if start > sample_ts {
+                break;
+            }
+            next_span += 1;
+            if end > sample_ts {
+                active.insert(date, end);
+                expirations.push(Reverse((end, date)));
+            }
+        }
+
+        for &date in active.keys() {
+            samples_by_date
+                .entry(date)
+                .or_default()
+                .push((sample_ts, bpm));
+        }
+    }
+
+    let mut estimates = BTreeMap::new();
+    for (date, samples) in samples_by_date {
         if let Some(resting_hr) = lowest_sustained_resting_hr(&samples) {
-            estimates.insert(night.wake_date, resting_hr);
+            estimates.insert(date, resting_hr);
         }
     }
 
@@ -1468,6 +1513,18 @@ mod tests {
         ];
 
         assert_eq!(lowest_sustained_resting_hr(&samples), Some(60));
+        // The older high sample remains inside the trailing hour, but the
+        // four-reading suffix is independently sustained and lower.
+        assert_eq!(
+            lowest_sustained_resting_hr(&[
+                (0, 100),
+                (10 * 60, 60),
+                (20 * 60, 60),
+                (30 * 60, 60),
+                (40 * 60, 60),
+            ]),
+            Some(60)
+        );
         assert_eq!(
             lowest_sustained_resting_hr(&[(0, 50), (600, 80), (1200, 80), (1800, 80)]),
             Some(73)
@@ -1522,6 +1579,46 @@ mod tests {
         assert_eq!(resting_hr.get(&jul4), Some(&60));
         let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
         assert_eq!(wellness[0].resting_hr, Some(60));
+    }
+
+    #[test]
+    fn daily_resting_hr_batch_assigns_samples_to_each_wake_date() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+        let first_start = local(d(2026, 7, 3), 23, 0);
+        let second_start = local(jul4, 23, 0);
+        insert_session(&conn, 1, first_start, 8 * 3600);
+        insert_session(&conn, 1, second_start, 8 * 3600);
+
+        for (start, bpm) in [(first_start, 60), (second_start, 65)] {
+            for minute in [0, 10, 20, 30] {
+                insert_minute_at(
+                    &conn,
+                    start - TZ + minute * 60,
+                    TZ,
+                    0,
+                    Some(bpm),
+                );
+            }
+        }
+        // These lower daytime readings fall inside the batched SQL bounds but
+        // outside every merged overnight span and must not affect either day.
+        let midday = local(jul4, 12, 0);
+        for minute in [0, 10, 20, 30] {
+            insert_minute_at(&conn, midday - TZ + minute * 60, TZ, 0, Some(40));
+        }
+
+        let resting_hr = fetch_daily_resting_hr(
+            &conn,
+            DateRange {
+                start: jul4,
+                end: jul5,
+            },
+        )
+        .unwrap();
+        assert_eq!(resting_hr.get(&jul4), Some(&60));
+        assert_eq!(resting_hr.get(&jul5), Some(&65));
     }
 
     #[test]
