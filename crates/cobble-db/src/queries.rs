@@ -160,7 +160,8 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
 /// Steps use each minute row's own offset. Sleep is grouped by the wake-up date
 /// and includes naps, while deep-sleep rows remain overlays. Sleeping heart-rate
 /// samples are matched against absolute UTC sleep bounds and are counted once
-/// when overlapping primary sleep spans contain the same minute.
+/// when overlapping primary sleep spans contain the same minute. Resting HR is
+/// the lowest sustained qualifying window during primary overnight sleep.
 pub fn fetch_daily_wellness(
     conn: &Connection,
     range: DateRange,
@@ -177,6 +178,7 @@ pub fn fetch_daily_wellness(
                 steps: None,
                 sleep_secs: None,
                 avg_sleeping_hr: None,
+                resting_hr: None,
             })
             .steps = Some(steps);
     }
@@ -232,6 +234,7 @@ pub fn fetch_daily_wellness(
                     steps: None,
                     sleep_secs: None,
                     avg_sleeping_hr: None,
+                    resting_hr: None,
                 })
                 .sleep_secs = Some(sleep_secs);
             primary_spans.extend(merged.into_iter().map(|(start, end)| (date, start, end)));
@@ -299,6 +302,12 @@ pub fn fetch_daily_wellness(
             if let Some(day) = by_date.get_mut(&date) {
                 day.avg_sleeping_hr = Some((sum / f64::from(count)) as f32);
             }
+        }
+    }
+
+    for (date, resting_hr) in estimated_resting_hr_by_wake_date(conn, &nights)? {
+        if let Some(day) = by_date.get_mut(&date) {
+            day.resting_hr = Some(resting_hr);
         }
     }
 
@@ -1228,6 +1237,7 @@ mod tests {
                 steps: Some(200),
                 sleep_secs: Some(9 * 3600),
                 avg_sleeping_hr: None,
+                resting_hr: None,
             }]
         );
     }
@@ -1255,10 +1265,12 @@ mod tests {
         assert_eq!(wellness[0].steps, Some(10));
         assert_eq!(wellness[0].sleep_secs, None);
         assert_eq!(wellness[0].avg_sleeping_hr, None);
+        assert_eq!(wellness[0].resting_hr, None);
         assert_eq!(wellness[1].date, jul5);
         assert_eq!(wellness[1].steps, None);
         assert_eq!(wellness[1].sleep_secs, Some(8 * 3600));
         assert_eq!(wellness[1].avg_sleeping_hr, None);
+        assert_eq!(wellness[1].resting_hr, None);
         assert_eq!(oldest_wellness_date(&conn).unwrap(), Some(jul2));
         assert_eq!(newest_wellness_date(&conn).unwrap(), Some(jul5));
     }
@@ -1317,6 +1329,7 @@ mod tests {
         assert_eq!(wellness[0].sleep_secs, Some(8 * 3600));
         assert_eq!(wellness[0].steps, Some(0));
         assert_eq!(wellness[0].avg_sleeping_hr, Some(55.0));
+        assert_eq!(wellness[0].resting_hr, None);
     }
 
     #[test]
@@ -1507,6 +1520,8 @@ mod tests {
 
         let resting_hr = fetch_daily_resting_hr(&conn, DateRange::day(jul4)).unwrap();
         assert_eq!(resting_hr.get(&jul4), Some(&60));
+        let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(wellness[0].resting_hr, Some(60));
     }
 
     #[test]
