@@ -116,6 +116,23 @@ pub struct DailyWellness {
     pub avg_sleeping_hr: Option<f32>,
 }
 
+/// Durable state for one provider/account/date wellness export.
+///
+/// The payload hash is the last successfully uploaded representation. API
+/// keys and other credentials are intentionally not part of this record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WellnessExportState {
+    pub provider: String,
+    pub account_id: String,
+    pub wellness_date: NaiveDate,
+    pub payload_hash: Option<String>,
+    pub attempt_count: i64,
+    pub next_attempt_at: Option<i64>,
+    pub last_attempt_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
 /// Everything the steps chart needs, computed in one call so the bars and the
 /// header labels always agree on bucketing.
 pub struct StepsChart {

@@ -154,6 +154,24 @@ CREATE TABLE IF NOT EXISTS ip_locations (
     region     TEXT    NOT NULL,
     fetched_at INTEGER NOT NULL
 );
+
+-- Durable state for provider wellness exports. The account/athlete ID is part
+-- of the key so changing accounts naturally creates a fresh backfill scope.
+-- Credentials are deliberately absent from this table.
+CREATE TABLE IF NOT EXISTS wellness_export_state (
+    provider          TEXT    NOT NULL,
+    account_id        TEXT    NOT NULL,
+    wellness_date     TEXT    NOT NULL,
+    payload_hash      TEXT,
+    attempt_count     INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at   INTEGER,
+    last_attempt_at   INTEGER,
+    last_success_at   INTEGER,
+    last_error        TEXT,
+    PRIMARY KEY (provider, account_id, wellness_date)
+);
+CREATE INDEX IF NOT EXISTS idx_wellness_export_retry
+    ON wellness_export_state(provider, account_id, next_attempt_at);
 "#;
 
 pub const VIEWS_DDL: &str = r#"

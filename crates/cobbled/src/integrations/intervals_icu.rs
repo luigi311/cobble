@@ -6,6 +6,7 @@ use anyhow::Context;
 use cobble_config::IntervalsIcuConfig;
 use cobble_db::DailyWellness;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// One partial wellness update in the Intervals.icu bulk request.
 ///
@@ -30,6 +31,17 @@ impl From<&DailyWellness> for WellnessRecord {
             sleep_secs: wellness.sleep_secs,
             avg_sleeping_hr: wellness.avg_sleeping_hr,
         }
+    }
+}
+
+impl WellnessRecord {
+    /// Hash the compact JSON representation that is sent to Intervals.icu.
+    /// Struct field order and omission rules make this a stable per-date
+    /// representation of exactly the fields owned by Cobble.
+    pub(crate) fn payload_hash(&self) -> anyhow::Result<String> {
+        let canonical = serde_json::to_vec(self).context("serialize wellness payload")?;
+        let digest = Sha256::digest(canonical);
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 }
 
