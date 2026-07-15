@@ -27,5 +27,7 @@ notify = "6"
 serde_json = "1"
 sha2 = "0.10"
 hostname = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+fastrand = "2"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

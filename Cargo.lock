@@ -828,9 +828,11 @@ name = "cobbled"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "cobble-config",
  "cobble-db",
+ "fastrand",
  "futures",
  "hostname",
  "httpdate",

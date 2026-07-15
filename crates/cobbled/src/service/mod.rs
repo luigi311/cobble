@@ -74,6 +74,7 @@ use zbus::{
 };
 
 use crate::codec::{decode_wire_dict, encode_wire_dict, WireDict};
+use crate::integrations::worker::WellnessWake;
 use crate::notification::app_name_to_category;
 
 mod state;
@@ -1075,6 +1076,7 @@ pub async fn run_signal_emitter(
     daemon: CobbleDaemon,
     mut event_rx: mpsc::UnboundedReceiver<DaemonEvent>,
     app_db: Option<Arc<Mutex<AppDb>>>,
+    wellness_wake_tx: mpsc::UnboundedSender<WellnessWake>,
 ) {
     while let Some(event) = event_rx.recv().await {
         let iface_result = conn
@@ -1167,7 +1169,9 @@ pub async fn run_signal_emitter(
                     {
                         Ok(Err(e)) => warn!("app DB insert failed: {e}"),
                         Err(e) => warn!("app DB task panicked: {e}"),
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            let _ = wellness_wake_tx.send(WellnessWake::HealthData);
+                        }
                     }
                 }
                 let _ = CobbleDaemon::health_data_received(

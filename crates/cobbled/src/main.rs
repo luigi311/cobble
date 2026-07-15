@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use tokio::{signal, signal::unix::SignalKind, sync::mpsc};
+use tokio::{signal, signal::unix::SignalKind, sync::{mpsc, watch}};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -28,6 +28,7 @@ mod supervisor;
 mod weather;
 
 use cobble_db::AppDb;
+use integrations::worker;
 use notify_monitor::NotificationMonitor;
 use service::{run_signal_emitter, BUS_NAME, OBJECT_PATH, CobbleDaemon};
 use supervisor::run_supervisor;
@@ -108,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (wellness_wake_tx, wellness_wake_rx) = mpsc::unbounded_channel();
+    let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
 
     // Channel for forwarding watch music-control actions to the MPRIS monitor.
     let (music_action_tx, music_action_rx) = mpsc::unbounded_channel();
@@ -138,9 +141,26 @@ async fn main() -> anyhow::Result<()> {
     // Start the signal emission task.
     let conn_for_signals = conn.clone();
     let daemon_for_signals = daemon.clone();
+    let app_db_for_signals = app_db.clone();
     tokio::spawn(async move {
-        run_signal_emitter(conn_for_signals, daemon_for_signals, event_rx, app_db).await;
+        run_signal_emitter(
+            conn_for_signals,
+            daemon_for_signals,
+            event_rx,
+            app_db_for_signals,
+            wellness_wake_tx,
+        )
+        .await;
     });
+
+    if let Some(db) = app_db.clone() {
+        tokio::spawn(worker::run(
+            db,
+            daemon.integration_config_changed(),
+            wellness_wake_rx,
+            wellness_shutdown_rx,
+        ));
+    }
 
     // Start the desktop notification monitor.
     let mut notify_monitor = NotificationMonitor::new();
@@ -213,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("shutting down ...");
+    let _ = wellness_shutdown_tx.send(true);
     daemon.set_stopping();
     notify_monitor.stop().await;
 
