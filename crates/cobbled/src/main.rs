@@ -18,6 +18,7 @@ mod codec;
 mod config;
 mod config_watcher;
 mod http;
+mod integrations;
 mod location;
 mod mpris_monitor;
 mod notification;
