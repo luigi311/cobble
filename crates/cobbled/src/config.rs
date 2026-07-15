@@ -24,15 +24,7 @@ pub fn default_config_path() -> anyhow::Result<PathBuf> {
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let config: Config = toml::from_str(&text)
-                .with_context(|| format!("parse config file {}", path.display()))?;
-            if let Err(error) = config.validate() {
-                warn!(
-                    "config file {} has invalid integration settings: {error}",
-                    path.display()
-                );
-            }
-            Ok(config)
+            toml::from_str(&text).with_context(|| format!("parse config file {}", path.display()))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Return a default config so the daemon can start without a
@@ -42,5 +34,15 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
             Ok(Config::default())
         }
         Err(e) => Err(e).with_context(|| format!("read config file {}", path.display())),
+    }
+}
+
+/// Log invalid integration settings after the caller has initialized tracing.
+pub fn warn_if_invalid(path: &Path, config: &Config) {
+    if let Err(error) = config.validate() {
+        warn!(
+            "config file {} has invalid integration settings: {error}",
+            path.display()
+        );
     }
 }

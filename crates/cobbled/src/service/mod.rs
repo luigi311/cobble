@@ -63,6 +63,7 @@ use libpebble_ble::{
 };
 
 use cobble_db::AppDb;
+use cobble_config::IntervalsIcuConfig;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 use zbus::{
@@ -158,6 +159,9 @@ pub struct CobbleDaemon {
     /// Bumped by reload_config so the supervisor can wait event-driven
     /// when no address is configured.
     config_revision: watch::Sender<u64>,
+    /// Latest integration configuration; changes wake the exporter without
+    /// being treated as BLE connection parameter changes.
+    integration_config: watch::Sender<IntervalsIcuConfig>,
     /// Notifies subscribers when the watch connects or disconnects.
     connection_tx: watch::Sender<bool>,
     /// Forwards watch music-control actions to the MPRIS monitor.
@@ -171,6 +175,7 @@ impl CobbleDaemon {
     pub fn new(
         address: String,
         adapter: String,
+        integration_config: IntervalsIcuConfig,
         config_path: PathBuf,
         event_tx: mpsc::UnboundedSender<DaemonEvent>,
         db: Option<Arc<Mutex<AppDb>>>,
@@ -178,6 +183,7 @@ impl CobbleDaemon {
         phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
     ) -> Self {
         let (config_revision, _) = watch::channel(0);
+        let (integration_config, _) = watch::channel(integration_config);
         let (connection_tx, _) = watch::channel(false);
         Self {
             state: Arc::new(Mutex::new(DaemonState {
@@ -199,6 +205,7 @@ impl CobbleDaemon {
                 music: MusicState::default(),
             })),
             config_revision,
+            integration_config,
             music_action_tx,
             phone_action_tx,
             connection_tx,
@@ -219,6 +226,11 @@ impl CobbleDaemon {
     /// Used by the supervisor to wait event-driven when no address is set.
     pub fn config_changed(&self) -> watch::Receiver<u64> {
         self.config_revision.subscribe()
+    }
+
+    /// Returns a receiver that fires when integration settings change.
+    pub fn integration_config_changed(&self) -> watch::Receiver<IntervalsIcuConfig> {
+        self.integration_config.subscribe()
     }
 
     /// Returns a receiver that fires when the watch connects or disconnects.
@@ -849,6 +861,7 @@ impl CobbleDaemon {
 
         let new_cfg = crate::config::load(&config_path)
             .map_err(|e| DaemonError::Failed(e.to_string()))?;
+        crate::config::warn_if_invalid(&config_path, &new_cfg);
 
         debug!(
             "reload_config: adapter={}, address{}, intervals_icu={:?}",
@@ -869,6 +882,16 @@ impl CobbleDaemon {
             state.adapter = new_cfg.adapter;
             if changed { state.pebble.clone() } else { None }
         };
+
+        let integration_config = new_cfg.integrations.intervals_icu.clone();
+        self.integration_config.send_if_modified(|current| {
+            if *current == integration_config {
+                false
+            } else {
+                *current = integration_config.clone();
+                true
+            }
+        });
 
         if let Some(pebble) = pebble_to_disconnect {
             let _ = pebble.disconnect().await;
@@ -972,6 +995,73 @@ impl CobbleDaemon {
         action: &str,
         cookie: u32,
     ) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cobbled-reload-test-{unique}.toml"))
+    }
+
+    #[tokio::test]
+    async fn integration_reload_wakes_worker_without_replacing_ble_params() {
+        let path = test_path();
+        let initial = IntervalsIcuConfig {
+            enabled: false,
+            athlete_id: String::new(),
+            api_key: String::new(),
+        };
+        let updated = crate::config::Config {
+            address: "watch-address".into(),
+            adapter: "hci0".into(),
+            verbose: false,
+            db: None,
+            integrations: cobble_config::Integrations {
+                intervals_icu: IntervalsIcuConfig {
+                    enabled: true,
+                    athlete_id: "i123456".into(),
+                    api_key: "test-only-value".into(),
+                },
+            },
+        };
+        std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            "watch-address".into(),
+            "hci0".into(),
+            initial,
+            path.clone(),
+            event_tx,
+            None,
+            music_tx,
+            phone_tx,
+        );
+        let mut integration_rx = daemon.integration_config_changed();
+        let revision_rx = daemon.config_changed();
+
+        daemon.reload_config().await.unwrap();
+        integration_rx.changed().await.unwrap();
+        assert_eq!(integration_rx.borrow().athlete_id, "i123456");
+        assert!(integration_rx.borrow().enabled);
+        assert!(revision_rx.has_changed().unwrap());
+        assert_eq!(
+            daemon.current_connection_params(),
+            ("watch-address".into(), "hci0".into())
+        );
+        assert!(!*daemon.watch_connection().borrow());
+
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------

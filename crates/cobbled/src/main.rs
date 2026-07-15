@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    config::warn_if_invalid(&config_path, &cfg);
     info!(
         "loaded config from {} (intervals_icu={:?})",
         config_path.display(),
@@ -113,7 +114,16 @@ async fn main() -> anyhow::Result<()> {
     // Channel for forwarding watch phone actions to the call monitor.
     let (phone_action_tx, phone_action_rx) = mpsc::unbounded_channel();
 
-    let daemon = CobbleDaemon::new(cfg.address.clone(), cfg.adapter.clone(), config_path.clone(), event_tx, app_db.clone(), music_action_tx, phone_action_tx);
+    let daemon = CobbleDaemon::new(
+        cfg.address.clone(),
+        cfg.adapter.clone(),
+        cfg.integrations.intervals_icu.clone(),
+        config_path.clone(),
+        event_tx,
+        app_db.clone(),
+        music_action_tx,
+        phone_action_tx,
+    );
 
     // Build the session D-Bus connection.
     let conn = zbus::connection::Builder::session()?
