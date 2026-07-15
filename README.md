@@ -287,13 +287,15 @@ consume raw records without reading the database directly.
 
 ### Intervals.icu wellness export
 
-The exporter owns only the fields it sends: `steps`, `sleepSecs`, and
-`avgSleepingHR`. Missing local observations are omitted from a request, so
-they do not clear unrelated remote wellness fields. The worker scans local
-history on startup and configuration changes, reconciles changed dates using a
-durable payload-hash ledger, and performs bounded bulk uploads. Successful
-health-data persistence wakes it early; an hourly reconciliation remains as a
-safety net.
+The exporter owns only the fields it sends: `steps`, `sleepSecs`,
+`avgSleepingHR`, and `restingHR`. Resting HR is the lowest qualifying average
+from a rolling 60-minute primary overnight-sleep window with at least four
+samples spanning at least 30 minutes and no sample gap over 30 minutes. Missing
+local observations are omitted from a request, so they do not clear unrelated
+remote wellness fields. The worker scans local history on startup and
+configuration changes, reconciles changed dates using a durable payload-hash
+ledger, and performs bounded bulk uploads. Successful health-data persistence
+wakes it early; an hourly reconciliation remains as a safety net.
 
 Use the GUI’s **Sync Now** control or call `SyncWellness` to request an
 immediate run. The GUI polls until the serialized reconciliation finishes.
@@ -317,8 +319,8 @@ capture.
    Confirm that the API key field is masked in the GUI, the configuration file
    is readable only by its owner on Unix, and daemon logs contain no key.
 3. Trigger `SyncWellness` or the GUI’s **Sync Now** control. Confirm that the
-   request updates only `steps`, `sleepSecs`, and `avgSleepingHR`; missing local
-   observations are omitted rather than sent as zeroes or nulls.
+   request updates only `steps`, `sleepSecs`, `avgSleepingHR`, and `restingHR`;
+   missing local observations are omitted rather than sent as zeroes or nulls.
 4. Compare the remote document with the baseline. Confirm that unrelated
    fields are unchanged, and query `GetWellnessSyncStatus` to confirm the
    account, exported-date count, and successful-sync timestamp.
@@ -341,7 +343,7 @@ of the automated build; no live provider test is run by default.
 #### Field ownership and conflict policy
 
 Cobble is authoritative only for the fields it emits: `steps`, `sleepSecs`,
-and `avgSleepingHR`. A successful reconciliation can replace those three
+`avgSleepingHR`, and `restingHR`. A successful reconciliation can replace those
 remote values with the current local aggregates. It does not merge, clear, or
 otherwise modify fields outside that set. When a local observation is missing,
 the corresponding field is omitted from the partial update so the existing

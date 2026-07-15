@@ -21,6 +21,8 @@ pub(crate) struct WellnessRecord {
     pub(crate) sleep_secs: Option<u32>,
     #[serde(rename = "avgSleepingHR", skip_serializing_if = "Option::is_none")]
     pub(crate) avg_sleeping_hr: Option<f32>,
+    #[serde(rename = "restingHR", skip_serializing_if = "Option::is_none")]
+    pub(crate) resting_hr: Option<u16>,
 }
 
 impl From<&DailyWellness> for WellnessRecord {
@@ -30,6 +32,7 @@ impl From<&DailyWellness> for WellnessRecord {
             steps: wellness.steps,
             sleep_secs: wellness.sleep_secs,
             avg_sleeping_hr: wellness.avg_sleeping_hr,
+            resting_hr: wellness.resting_hr,
         }
     }
 }
@@ -175,5 +178,37 @@ impl IntervalsIcuClient {
             .send()
             .await
             .context("send Intervals.icu wellness request")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use super::*;
+
+    #[test]
+    fn resting_hr_is_optional_and_part_of_the_exact_payload_hash() {
+        let wellness = DailyWellness {
+            date: NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+            steps: Some(8_000),
+            sleep_secs: Some(8 * 3600),
+            avg_sleeping_hr: Some(64.5),
+            resting_hr: Some(58),
+        };
+        let record = WellnessRecord::from(&wellness);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json.get("restingHR").and_then(|value| value.as_u64()), Some(58));
+
+        let without_resting_hr = WellnessRecord::from(&DailyWellness {
+            resting_hr: None,
+            ..wellness
+        });
+        let json_without = serde_json::to_value(&without_resting_hr).unwrap();
+        assert!(json_without.get("restingHR").is_none());
+        assert_ne!(
+            record.payload_hash().unwrap(),
+            without_resting_hr.payload_hash().unwrap()
+        );
     }
 }

@@ -722,6 +722,7 @@ mod tests {
                 steps: Some(day),
                 sleep_secs: None,
                 avg_sleeping_hr: None,
+                resting_hr: None,
             })
             .collect();
         let payloads: Vec<_> = records

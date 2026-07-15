@@ -114,6 +114,7 @@ pub struct DailyWellness {
     pub steps: Option<u32>,
     pub sleep_secs: Option<u32>,
     pub avg_sleeping_hr: Option<f32>,
+    pub resting_hr: Option<u16>,
 }
 
 /// Durable state for one provider/account/date wellness export.

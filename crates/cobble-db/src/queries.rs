@@ -160,7 +160,8 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
 /// Steps use each minute row's own offset. Sleep is grouped by the wake-up date
 /// and includes naps, while deep-sleep rows remain overlays. Sleeping heart-rate
 /// samples are matched against absolute UTC sleep bounds and are counted once
-/// when overlapping primary sleep spans contain the same minute.
+/// when overlapping primary sleep spans contain the same minute. Resting HR is
+/// the lowest sustained qualifying window during primary overnight sleep.
 pub fn fetch_daily_wellness(
     conn: &Connection,
     range: DateRange,
@@ -177,6 +178,7 @@ pub fn fetch_daily_wellness(
                 steps: None,
                 sleep_secs: None,
                 avg_sleeping_hr: None,
+                resting_hr: None,
             })
             .steps = Some(steps);
     }
@@ -232,6 +234,7 @@ pub fn fetch_daily_wellness(
                     steps: None,
                     sleep_secs: None,
                     avg_sleeping_hr: None,
+                    resting_hr: None,
                 })
                 .sleep_secs = Some(sleep_secs);
             primary_spans.extend(merged.into_iter().map(|(start, end)| (date, start, end)));
@@ -299,6 +302,12 @@ pub fn fetch_daily_wellness(
             if let Some(day) = by_date.get_mut(&date) {
                 day.avg_sleeping_hr = Some((sum / f64::from(count)) as f32);
             }
+        }
+    }
+
+    for (date, resting_hr) in estimated_resting_hr_by_wake_date(conn, &nights)? {
+        if let Some(day) = by_date.get_mut(&date) {
+            day.resting_hr = Some(resting_hr);
         }
     }
 
@@ -738,6 +747,169 @@ pub fn load_sessions_filtered(
 
 // ─── Sleep stats ─────────────────────────────────────────────────────────────
 
+const RESTING_HR_WINDOW_SECS: i64 = 60 * 60;
+const RESTING_HR_MIN_SPAN_SECS: i64 = 30 * 60;
+const RESTING_HR_MAX_GAP_SECS: i64 = 30 * 60;
+const RESTING_HR_MIN_SAMPLES: usize = 4;
+const RESTING_HR_MIN_BPM: i64 = 30;
+const RESTING_HR_MAX_BPM: i64 = 220;
+
+/// Estimate resting HR as the lowest qualifying mean inside any rolling
+/// 60-minute window. A window must contain at least four readings, cover at
+/// least 30 minutes from first to last reading, and contain no gap over 30
+/// minutes. These constraints prevent an isolated low reading from becoming
+/// the day's estimate.
+fn lowest_sustained_resting_hr(samples: &[(i64, i64)]) -> Option<u16> {
+    let mut best: Option<f64> = None;
+    let mut earliest_start = 0;
+
+    for end in 0..samples.len() {
+        while samples[end].0 - samples[earliest_start].0 > RESTING_HR_WINDOW_SECS {
+            earliest_start += 1;
+        }
+        for start in earliest_start..=end {
+            let window = &samples[start..=end];
+            if window.len() < RESTING_HR_MIN_SAMPLES {
+                break;
+            }
+            if samples[end].0 - samples[start].0 < RESTING_HR_MIN_SPAN_SECS
+                || window
+                    .windows(2)
+                    .any(|pair| pair[1].0 - pair[0].0 > RESTING_HR_MAX_GAP_SECS)
+            {
+                continue;
+            }
+
+            let mean = window.iter().map(|(_, bpm)| *bpm as f64).sum::<f64>()
+                / window.len() as f64;
+            best = Some(best.map_or(mean, |current| current.min(mean)));
+        }
+    }
+
+    best.map(|bpm| bpm.round() as u16)
+}
+
+/// Calculate daily estimates from primary overnight sleep.
+/// Naps are intentionally excluded.
+fn estimated_resting_hr_by_wake_date(
+    conn: &Connection,
+    nights: &[Night],
+) -> anyhow::Result<BTreeMap<NaiveDate, u16>> {
+    let mut primary_spans = Vec::new();
+    for night in nights {
+        let mut spans: Vec<(i64, i64)> = night
+            .phases
+            .iter()
+            .filter(|phase| {
+                !phase.is_deep && !phase.is_nap && phase.utc_start < phase.utc_end
+            })
+            .map(|phase| (phase.utc_start, phase.utc_end))
+            .collect();
+        spans.sort_unstable_by_key(|&(start, _)| start);
+
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (start, end) in spans {
+            if let Some((_, merged_end)) = merged.last_mut()
+                && start <= *merged_end
+            {
+                *merged_end = (*merged_end).max(end);
+                continue;
+            }
+            merged.push((start, end));
+        }
+        primary_spans.extend(
+            merged
+                .into_iter()
+                .map(|(start, end)| (night.wake_date, start, end)),
+        );
+    }
+    if primary_spans.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    primary_spans.sort_unstable_by_key(|&(_, start, _)| start);
+
+    let query_start = primary_spans
+        .iter()
+        .map(|&(_, start, _)| start)
+        .min()
+        .unwrap();
+    let query_end = primary_spans
+        .iter()
+        .map(|&(_, _, end)| end)
+        .max()
+        .unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, heart_rate_bpm
+         FROM health_activity_minutes
+         WHERE start_ts >= ?1 AND start_ts < ?2
+           AND heart_rate_bpm BETWEEN ?3 AND ?4
+         ORDER BY start_ts ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            query_start,
+            query_end,
+            RESTING_HR_MIN_BPM,
+            RESTING_HR_MAX_BPM
+        ],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let mut next_span = 0;
+    let mut active = BTreeMap::<NaiveDate, i64>::new();
+    let mut expirations = BinaryHeap::<Reverse<(i64, NaiveDate)>>::new();
+    let mut samples_by_date = BTreeMap::<NaiveDate, Vec<(i64, i64)>>::new();
+
+    for row in rows {
+        let (sample_ts, bpm) = row?;
+
+        while let Some(&Reverse((end, date))) = expirations.peek() {
+            if end > sample_ts {
+                break;
+            }
+            expirations.pop();
+            if active.get(&date) == Some(&end) {
+                active.remove(&date);
+            }
+        }
+
+        while let Some(&(date, start, end)) = primary_spans.get(next_span) {
+            if start > sample_ts {
+                break;
+            }
+            next_span += 1;
+            if end > sample_ts {
+                active.insert(date, end);
+                expirations.push(Reverse((end, date)));
+            }
+        }
+
+        for &date in active.keys() {
+            samples_by_date
+                .entry(date)
+                .or_default()
+                .push((sample_ts, bpm));
+        }
+    }
+
+    let mut estimates = BTreeMap::new();
+    for (date, samples) in samples_by_date {
+        if let Some(resting_hr) = lowest_sustained_resting_hr(&samples) {
+            estimates.insert(date, resting_hr);
+        }
+    }
+
+    Ok(estimates)
+}
+
+/// Return sustained overnight resting-HR estimates keyed by sleep wake date.
+pub fn fetch_daily_resting_hr(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<BTreeMap<NaiveDate, u16>> {
+    let nights = fetch_sleep_nights(conn, range)?;
+    estimated_resting_hr_by_wake_date(conn, &nights)
+}
+
 /// Compute key statistics from sleep data for the current period.
 pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepStats> {
     let range = range_for(period, offset);
@@ -803,7 +975,6 @@ pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::
         .filter(|n| n.total_secs() > 0)
         .map(|n| n.deep_secs())
         .sum();
-
     Ok(SleepStats {
         deep_avg_label: format_duration(slept_deep / slept_nights),
         light_pct,
@@ -1111,6 +1282,7 @@ mod tests {
                 steps: Some(200),
                 sleep_secs: Some(9 * 3600),
                 avg_sleeping_hr: None,
+                resting_hr: None,
             }]
         );
     }
@@ -1138,10 +1310,12 @@ mod tests {
         assert_eq!(wellness[0].steps, Some(10));
         assert_eq!(wellness[0].sleep_secs, None);
         assert_eq!(wellness[0].avg_sleeping_hr, None);
+        assert_eq!(wellness[0].resting_hr, None);
         assert_eq!(wellness[1].date, jul5);
         assert_eq!(wellness[1].steps, None);
         assert_eq!(wellness[1].sleep_secs, Some(8 * 3600));
         assert_eq!(wellness[1].avg_sleeping_hr, None);
+        assert_eq!(wellness[1].resting_hr, None);
         assert_eq!(oldest_wellness_date(&conn).unwrap(), Some(jul2));
         assert_eq!(newest_wellness_date(&conn).unwrap(), Some(jul5));
     }
@@ -1200,6 +1374,7 @@ mod tests {
         assert_eq!(wellness[0].sleep_secs, Some(8 * 3600));
         assert_eq!(wellness[0].steps, Some(0));
         assert_eq!(wellness[0].avg_sleeping_hr, Some(55.0));
+        assert_eq!(wellness[0].resting_hr, None);
     }
 
     #[test]
@@ -1322,6 +1497,128 @@ mod tests {
         assert_eq!(stats.avg_wakeup, "7:00 AM");
         assert_eq!(stats.highest_dur, "7h 0m");
         assert_eq!(stats.lowest_dur, "7h 0m");
+    }
+
+    #[test]
+    fn resting_hr_uses_the_lowest_sustained_window() {
+        let samples = [
+            (0, 80),
+            (10 * 60, 79),
+            (20 * 60, 81),
+            (30 * 60, 80),
+            (2 * 3600, 60),
+            (2 * 3600 + 10 * 60, 59),
+            (2 * 3600 + 20 * 60, 61),
+            (2 * 3600 + 30 * 60, 60),
+        ];
+
+        assert_eq!(lowest_sustained_resting_hr(&samples), Some(60));
+        // The older high sample remains inside the trailing hour, but the
+        // four-reading suffix is independently sustained and lower.
+        assert_eq!(
+            lowest_sustained_resting_hr(&[
+                (0, 100),
+                (10 * 60, 60),
+                (20 * 60, 60),
+                (30 * 60, 60),
+                (40 * 60, 60),
+            ]),
+            Some(60)
+        );
+        assert_eq!(
+            lowest_sustained_resting_hr(&[(0, 50), (600, 80), (1200, 80), (1800, 80)]),
+            Some(73)
+        );
+    }
+
+    #[test]
+    fn resting_hr_requires_sustained_sample_coverage() {
+        assert_eq!(
+            lowest_sustained_resting_hr(&[(0, 60), (600, 60), (1800, 60)]),
+            None
+        );
+        assert_eq!(
+            lowest_sustained_resting_hr(&[(0, 60), (600, 60), (1200, 60), (1799, 60)]),
+            None
+        );
+        assert_eq!(
+            lowest_sustained_resting_hr(&[(0, 60), (600, 60), (1200, 60), (3001, 60)]),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_resting_hr_uses_overnight_sleep_and_excludes_naps() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let sleep_start = local(d(2026, 7, 3), 23, 0);
+        let nap_start = local(jul4, 14, 0);
+        insert_session(&conn, 1, sleep_start, 8 * 3600);
+        insert_session(&conn, 3, nap_start, 3600);
+
+        for (minute, bpm) in [(0, 60), (10, 59), (20, 61), (30, 60)] {
+            insert_minute_at(
+                &conn,
+                sleep_start - TZ + minute * 60,
+                TZ,
+                0,
+                Some(bpm),
+            );
+        }
+        for (minute, bpm) in [(0, 40), (10, 40), (20, 40), (30, 40)] {
+            insert_minute_at(
+                &conn,
+                nap_start - TZ + minute * 60,
+                TZ,
+                0,
+                Some(bpm),
+            );
+        }
+
+        let resting_hr = fetch_daily_resting_hr(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(resting_hr.get(&jul4), Some(&60));
+        let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(wellness[0].resting_hr, Some(60));
+    }
+
+    #[test]
+    fn daily_resting_hr_batch_assigns_samples_to_each_wake_date() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+        let first_start = local(d(2026, 7, 3), 23, 0);
+        let second_start = local(jul4, 23, 0);
+        insert_session(&conn, 1, first_start, 8 * 3600);
+        insert_session(&conn, 1, second_start, 8 * 3600);
+
+        for (start, bpm) in [(first_start, 60), (second_start, 65)] {
+            for minute in [0, 10, 20, 30] {
+                insert_minute_at(
+                    &conn,
+                    start - TZ + minute * 60,
+                    TZ,
+                    0,
+                    Some(bpm),
+                );
+            }
+        }
+        // These lower daytime readings fall inside the batched SQL bounds but
+        // outside every merged overnight span and must not affect either day.
+        let midday = local(jul4, 12, 0);
+        for minute in [0, 10, 20, 30] {
+            insert_minute_at(&conn, midday - TZ + minute * 60, TZ, 0, Some(40));
+        }
+
+        let resting_hr = fetch_daily_resting_hr(
+            &conn,
+            DateRange {
+                start: jul4,
+                end: jul5,
+            },
+        )
+        .unwrap();
+        assert_eq!(resting_hr.get(&jul4), Some(&60));
+        assert_eq!(resting_hr.get(&jul5), Some(&65));
     }
 
     #[test]
