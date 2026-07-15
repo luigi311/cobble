@@ -276,7 +276,7 @@ fn main() -> anyhow::Result<()> {
             match config::save(&cfg_path2, &new_cfg) {
                 Err(e) => { w.set_save_status(format!("Error: {e}").into()); }
                 Ok(()) => {
-                    *intervals_baseline.borrow_mut() = edited_intervals;
+                    *intervals_baseline.borrow_mut() = new_cfg.integrations.intervals_icu.clone();
                     w.set_save_status("Saved.".into());
                     let weak2 = weak.clone();
                     rt_handle.spawn(async move {
