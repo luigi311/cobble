@@ -93,7 +93,9 @@ You can create it with just the watch address (everything else has sane defaults
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/cobbled"
-cat > "${XDG_CONFIG_HOME:-$HOME/.config}/cobbled/config.toml" << 'EOF'
+config_path="${XDG_CONFIG_HOME:-$HOME/.config}/cobbled/config.toml"
+install -m 600 /dev/null "$config_path"
+cat > "$config_path" << 'EOF'
 # address = "E6:94:0A:D4:D5:DC"   # your watch Bluetooth address
 # adapter = "hci0"                # optional, default is hci0
 # verbose = false                  # optional, or use -v at runtime
@@ -176,6 +178,11 @@ The daemon starts without it — it will wait for a config change or
 D-Bus `ReloadConfig` before attempting a watch connection.
 
 The GUI (`cobble`) can scan for Pebble devices and write the config for you.
+
+When configuring the file manually, create it with mode `0600` before adding
+credentials (for example, `install -m 600 /dev/null "${XDG_CONFIG_HOME:-$HOME/.config}/cobbled/config.toml"`),
+or run `chmod 600` on an existing file first. Keep the file owner-only readable
+and writable so the stored API key is not exposed to other local users.
 
 ```toml
 # $XDG_CONFIG_HOME/cobbled/config.toml
