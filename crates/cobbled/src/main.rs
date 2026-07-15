@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (wellness_wake_tx, wellness_wake_rx) = mpsc::unbounded_channel();
+    let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
     let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
 
     // Channel for forwarding watch music-control actions to the MPRIS monitor.
@@ -148,19 +148,19 @@ async fn main() -> anyhow::Result<()> {
             daemon_for_signals,
             event_rx,
             app_db_for_signals,
-            wellness_wake_tx,
+            wellness_revision_tx,
         )
         .await;
     });
 
-    if let Some(db) = app_db.clone() {
+    let wellness_worker = app_db.clone().map(|db| {
         tokio::spawn(worker::run(
             db,
             daemon.integration_config_changed(),
-            wellness_wake_rx,
+            wellness_revision_rx,
             wellness_shutdown_rx,
-        ));
-    }
+        ))
+    });
 
     // Start the desktop notification monitor.
     let mut notify_monitor = NotificationMonitor::new();
@@ -234,6 +234,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down ...");
     let _ = wellness_shutdown_tx.send(true);
+    if let Some(worker) = wellness_worker {
+        if let Err(error) = worker.await {
+            warn!("wellness exporter shutdown failed: {error}");
+        }
+    }
     daemon.set_stopping();
     notify_monitor.stop().await;
 

@@ -210,8 +210,8 @@ impl AppDb {
     }
 
     /// Insert a raw batch into health_records and parse individual records into the
-    /// per-tag tables. Silently skips duplicate batches (same CRC).
-    pub fn insert_batch(&self, batch: &DatalogData) -> anyhow::Result<()> {
+    /// per-tag tables. Returns whether the batch was new and supported.
+    pub fn insert_batch(&self, batch: &DatalogData) -> anyhow::Result<bool> {
         let received_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -235,7 +235,7 @@ impl AppDb {
 
         if rows_changed == 0 {
             // Duplicate batch; child records already stored on the first receipt.
-            return Ok(());
+            return Ok(false);
         }
 
         let record_id = self.conn.last_insert_rowid();
@@ -252,8 +252,10 @@ impl AppDb {
             }
             // tag 85 (HR) is protobuf — skip until schema is known.
             // tag 87 is device/firmware summary — not health data.
-            _ => Ok(()),
-        }
+            _ => return Ok(false),
+        }?;
+
+        Ok(true)
     }
 
     /// Parse tag 81 per-minute activity chunks.
