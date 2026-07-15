@@ -177,11 +177,13 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                     warn!("health sync on connect failed: {e}");
                 }
 
-                // Periodic health sync while connected.
+                // Periodic health sync while connected. Hourly polling keeps
+                // watch and phone wakeups modest while still collecting data
+                // often enough for wellness export and the local UI.
                 let pebble_sync = Arc::clone(&pebble);
                 let sync_task = tokio::spawn(async move {
                     let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+                        tokio::time::interval(std::time::Duration::from_secs(60 * 60));
                     interval.tick().await; // skip the immediate first tick
                     loop {
                         interval.tick().await;
