@@ -184,16 +184,18 @@ pub fn fetch_daily_wellness(
     let nights = fetch_sleep_nights(conn, range)?;
     let mut primary_spans_by_date = BTreeMap::<NaiveDate, Vec<(i64, i64)>>::new();
     for night in &nights {
-        primary_spans_by_date
-            .entry(night.wake_date)
-            .or_default()
-            .extend(
-                night
-                    .phases
-                    .iter()
-                    .filter(|phase| !phase.is_deep && phase.utc_start < phase.utc_end)
-                    .map(|phase| (phase.utc_start, phase.utc_end)),
-            );
+        let spans: Vec<_> = night
+            .phases
+            .iter()
+            .filter(|phase| !phase.is_deep && phase.utc_start < phase.utc_end)
+            .map(|phase| (phase.utc_start, phase.utc_end))
+            .collect();
+        if !spans.is_empty() {
+            primary_spans_by_date
+                .entry(night.wake_date)
+                .or_default()
+                .extend(spans);
+        }
     }
 
     if !primary_spans_by_date.is_empty() {
