@@ -100,12 +100,20 @@ impl IntervalsIcuConfig {
     }
 }
 
+fn redacted_identifier(identifier: &str) -> String {
+    if identifier.trim().is_empty() {
+        String::new()
+    } else {
+        "[REDACTED]".to_string()
+    }
+}
+
 impl fmt::Debug for IntervalsIcuConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("IntervalsIcuConfig")
             .field("enabled", &self.enabled)
-            .field("athlete_id", &self.athlete_id)
+            .field("athlete_id", &redacted_identifier(&self.athlete_id))
             .field("api_key", &"[REDACTED]")
             .finish()
     }
@@ -122,7 +130,7 @@ impl Config {
         let intervals = &self.integrations.intervals_icu;
         RedactedIntervalsIcuConfig {
             enabled: intervals.enabled,
-            athlete_id: intervals.athlete_id.clone(),
+            athlete_id: redacted_identifier(&intervals.athlete_id),
             api_key_configured: !intervals.api_key.trim().is_empty(),
         }
     }
@@ -190,15 +198,17 @@ mod tests {
     #[test]
     fn debug_output_redacts_api_key() {
         let mut config = Config::default();
+        config.integrations.intervals_icu.athlete_id = "i123456".into();
         config.integrations.intervals_icu.api_key = "secret-api-key".into();
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret-api-key"));
+        assert!(!debug.contains("i123456"));
         assert!(debug.contains("[REDACTED]"));
         assert_eq!(
             config.redacted_intervals_icu(),
             RedactedIntervalsIcuConfig {
                 enabled: false,
-                athlete_id: String::new(),
+                athlete_id: "[REDACTED]".into(),
                 api_key_configured: true,
             }
         );
