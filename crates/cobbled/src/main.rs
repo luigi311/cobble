@@ -6,10 +6,11 @@
 //! connection, and runs until signalled.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use tokio::{signal, signal::unix::SignalKind, sync::mpsc};
+use tokio::{signal, signal::unix::SignalKind, sync::{mpsc, watch}};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -18,6 +19,7 @@ mod codec;
 mod config;
 mod config_watcher;
 mod http;
+mod integrations;
 mod location;
 mod mpris_monitor;
 mod notification;
@@ -27,6 +29,7 @@ mod supervisor;
 mod weather;
 
 use cobble_db::AppDb;
+use integrations::worker;
 use notify_monitor::NotificationMonitor;
 use service::{run_signal_emitter, BUS_NAME, OBJECT_PATH, CobbleDaemon};
 use supervisor::run_supervisor;
@@ -84,10 +87,15 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    info!("loaded config from {}", config_path.display());
+    config::warn_if_invalid(&config_path, &cfg);
+    info!(
+        "loaded config from {} (intervals_icu={:?})",
+        config_path.display(),
+        cfg.redacted_intervals_icu()
+    );
 
     let db_path = match cfg.db {
-        Some(p) => p,
+        Some(p) => PathBuf::from(p),
         None => default_db_path()?,
     };
     let app_db: Option<Arc<Mutex<AppDb>>> = match AppDb::open(&db_path) {
@@ -102,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
+    let (wellness_sync_tx, wellness_sync_rx) = watch::channel(0_u64);
+    let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
+    let wellness_running = Arc::new(AtomicBool::new(false));
+    let wellness_status_revision = Arc::new(AtomicU64::new(0));
 
     // Channel for forwarding watch music-control actions to the MPRIS monitor.
     let (music_action_tx, music_action_rx) = mpsc::unbounded_channel();
@@ -109,7 +122,19 @@ async fn main() -> anyhow::Result<()> {
     // Channel for forwarding watch phone actions to the call monitor.
     let (phone_action_tx, phone_action_rx) = mpsc::unbounded_channel();
 
-    let daemon = CobbleDaemon::new(cfg.address.clone(), cfg.adapter.clone(), config_path.clone(), event_tx, app_db.clone(), music_action_tx, phone_action_tx);
+    let daemon = CobbleDaemon::new(
+        cfg.address.clone(),
+        cfg.adapter.clone(),
+        cfg.integrations.intervals_icu.clone(),
+        wellness_sync_tx,
+        wellness_running.clone(),
+        wellness_status_revision.clone(),
+        config_path.clone(),
+        event_tx,
+        app_db.clone(),
+        music_action_tx,
+        phone_action_tx,
+    );
 
     // Build the session D-Bus connection.
     let conn = zbus::connection::Builder::session()?
@@ -123,8 +148,28 @@ async fn main() -> anyhow::Result<()> {
     // Start the signal emission task.
     let conn_for_signals = conn.clone();
     let daemon_for_signals = daemon.clone();
+    let app_db_for_signals = app_db.clone();
     tokio::spawn(async move {
-        run_signal_emitter(conn_for_signals, daemon_for_signals, event_rx, app_db).await;
+        run_signal_emitter(
+            conn_for_signals,
+            daemon_for_signals,
+            event_rx,
+            app_db_for_signals,
+            wellness_revision_tx,
+        )
+        .await;
+    });
+
+    let wellness_worker = app_db.clone().map(|db| {
+        tokio::spawn(worker::run(
+            db,
+            daemon.integration_config_changed(),
+            wellness_revision_rx,
+            wellness_sync_rx,
+            wellness_shutdown_rx,
+            wellness_running,
+            wellness_status_revision,
+        ))
     });
 
     // Start the desktop notification monitor.
@@ -198,6 +243,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("shutting down ...");
+    let _ = wellness_shutdown_tx.send(true);
+    if let Some(worker) = wellness_worker {
+        if let Err(error) = worker.await {
+            warn!("wellness exporter shutdown failed: {error}");
+        }
+    }
     daemon.set_stopping();
     notify_monitor.stop().await;
 

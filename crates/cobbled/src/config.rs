@@ -1,27 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    /// Watch Bluetooth address, e.g. E6:94:0A:D4:D5:DC
-    #[serde(default)]
-    pub address: String,
-    /// HCI adapter name
-    #[serde(default = "default_adapter")]
-    pub adapter: String,
-    /// Enable verbose (TRACE-level) logging
-    #[serde(default)]
-    pub verbose: bool,
-    /// Path to the SQLite database
-    pub db: Option<PathBuf>,
-}
-
-fn default_adapter() -> String {
-    "hci0".to_string()
-}
+pub use cobble_config::Config;
 
 /// Returns `$XDG_CONFIG_HOME/cobbled/config.toml` or
 /// `~/.config/cobbled/config.toml` as a fallback.
@@ -41,20 +23,26 @@ pub fn default_config_path() -> anyhow::Result<PathBuf> {
 
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text)
-            .with_context(|| format!("parse config file {}", path.display())),
+        Ok(text) => {
+            toml::from_str(&text).with_context(|| format!("parse config file {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Return a default config so the daemon can start without a
             // pre-existing config file. The GUI (or manual editing) can
             // supply a watch address later; reload_config will pick it up.
             debug!("config file {} not found; using defaults", path.display());
-            Ok(Config {
-                address: String::new(),
-                adapter: default_adapter(),
-                verbose: false,
-                db: None,
-            })
+            Ok(Config::default())
         }
         Err(e) => Err(e).with_context(|| format!("read config file {}", path.display())),
+    }
+}
+
+/// Log invalid integration settings after the caller has initialized tracing.
+pub fn warn_if_invalid(path: &Path, config: &Config) {
+    if let Err(error) = config.validate() {
+        warn!(
+            "config file {} has invalid integration settings: {error}",
+            path.display()
+        );
     }
 }

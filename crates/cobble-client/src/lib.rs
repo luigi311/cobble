@@ -195,6 +195,8 @@ pub trait CobbleDaemon {
 
     // ---- Daemon control ----
 
+    async fn sync_wellness(&self) -> Result<()>;
+    async fn get_wellness_sync_status(&self) -> Result<VarDict>;
     async fn reload_config(&self) -> Result<()>;
 
     // ---- Signals ----
@@ -487,6 +489,14 @@ impl CobbleClient {
     }
 
     // ---- Daemon control ----
+
+    pub async fn sync_wellness(&self) -> Result<()> {
+        self.proxy().await?.sync_wellness().await
+    }
+
+    pub async fn get_wellness_sync_status(&self) -> Result<VarDict> {
+        self.proxy().await?.get_wellness_sync_status().await
+    }
 
     pub async fn reload_config(&self) -> Result<()> {
         self.proxy().await?.reload_config().await

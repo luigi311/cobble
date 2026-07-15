@@ -34,6 +34,8 @@
 //!     Forget()  remove the Bluetooth bond (unpair); re-pairs on next reconnect
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
 //!     ReprocessHealthData()
+//!     SyncWellness()
+//!     GetWellnessSyncStatus() -> a{sv}
 //!
 //!   Signals
 //!     AppMessageReceived(s uuid, a{i(sv)} data)
@@ -53,6 +55,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -62,7 +65,8 @@ use libpebble_ble::{
     WatchVersionInfo, WeatherType,
 };
 
-use cobble_db::AppDb;
+use cobble_db::{AppDb, DateRange, WellnessExportStatus};
+use cobble_config::IntervalsIcuConfig;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 use zbus::{
@@ -148,6 +152,46 @@ fn watch_color_to_map(c: &WatchColorInfo) -> HashMap<String, OwnedValue> {
     ])
 }
 
+fn wellness_status_to_dbus_map(
+    config: &IntervalsIcuConfig,
+    status: WellnessExportStatus,
+    running: bool,
+) -> HashMap<String, OwnedValue> {
+    let format_timestamp = |timestamp: Option<i64>| {
+        timestamp
+            .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+            .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_default()
+    };
+    HashMap::from([
+        ("enabled".into(), dbus_val(config.enabled)),
+        ("configured".into(), dbus_val(config.is_configured())),
+        ("valid".into(), dbus_val(config.validate().is_ok())),
+        ("running".into(), dbus_val(running)),
+        ("athlete_id".into(), dbus_val(config.athlete_id.clone())),
+        ("exported_dates".into(), dbus_val(status.exported_dates as u64)),
+        ("pending_dates".into(), dbus_val(status.pending_dates as u64)),
+        (
+            "last_success".into(),
+            dbus_val(format_timestamp(status.last_success_at)),
+        ),
+        (
+            "last_error".into(),
+            dbus_val(status.last_error.unwrap_or_default()),
+        ),
+        (
+            "last_error_at".into(),
+            dbus_val(format_timestamp(status.last_error_at)),
+        ),
+    ])
+}
+
+struct CachedWellnessStatus {
+    revision: u64,
+    account_id: String,
+    status: WellnessExportStatus,
+}
+
 // ---------------------------------------------------------------------------
 // CobbleDaemon
 // ---------------------------------------------------------------------------
@@ -158,6 +202,17 @@ pub struct CobbleDaemon {
     /// Bumped by reload_config so the supervisor can wait event-driven
     /// when no address is configured.
     config_revision: watch::Sender<u64>,
+    /// Latest integration configuration; changes wake the exporter without
+    /// being treated as BLE connection parameter changes.
+    integration_config: watch::Sender<IntervalsIcuConfig>,
+    /// Coalesced manual sync requests for the wellness exporter.
+    wellness_sync_tx: watch::Sender<u64>,
+    /// True from request/start until the serialized reconciliation completes.
+    wellness_running: Arc<AtomicBool>,
+    /// Bumped when wellness data, configuration, or export state changes.
+    wellness_status_revision: Arc<AtomicU64>,
+    /// Hash-aware status snapshot reused between unchanged D-Bus polls.
+    wellness_status_cache: Arc<Mutex<Option<CachedWellnessStatus>>>,
     /// Notifies subscribers when the watch connects or disconnects.
     connection_tx: watch::Sender<bool>,
     /// Forwards watch music-control actions to the MPRIS monitor.
@@ -171,6 +226,10 @@ impl CobbleDaemon {
     pub fn new(
         address: String,
         adapter: String,
+        integration_config: IntervalsIcuConfig,
+        wellness_sync_tx: watch::Sender<u64>,
+        wellness_running: Arc<AtomicBool>,
+        wellness_status_revision: Arc<AtomicU64>,
         config_path: PathBuf,
         event_tx: mpsc::UnboundedSender<DaemonEvent>,
         db: Option<Arc<Mutex<AppDb>>>,
@@ -178,6 +237,7 @@ impl CobbleDaemon {
         phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
     ) -> Self {
         let (config_revision, _) = watch::channel(0);
+        let (integration_config, _) = watch::channel(integration_config);
         let (connection_tx, _) = watch::channel(false);
         Self {
             state: Arc::new(Mutex::new(DaemonState {
@@ -199,6 +259,11 @@ impl CobbleDaemon {
                 music: MusicState::default(),
             })),
             config_revision,
+            integration_config,
+            wellness_sync_tx,
+            wellness_running,
+            wellness_status_revision,
+            wellness_status_cache: Arc::new(Mutex::new(None)),
             music_action_tx,
             phone_action_tx,
             connection_tx,
@@ -219,6 +284,11 @@ impl CobbleDaemon {
     /// Used by the supervisor to wait event-driven when no address is set.
     pub fn config_changed(&self) -> watch::Receiver<u64> {
         self.config_revision.subscribe()
+    }
+
+    /// Returns a receiver that fires when integration settings change.
+    pub fn integration_config_changed(&self) -> watch::Receiver<IntervalsIcuConfig> {
+        self.integration_config.subscribe()
     }
 
     /// Returns a receiver that fires when the watch connects or disconnects.
@@ -506,6 +576,95 @@ impl CobbleDaemon {
 
     fn ping(&self) -> bool {
         true
+    }
+
+    /// Request one serialized wellness reconciliation run.
+    fn sync_wellness(&self) -> Result<(), DaemonError> {
+        let config = self.integration_config.subscribe().borrow().clone();
+        if !config.enabled {
+            return Err(DaemonError::Failed(
+                "Intervals.icu wellness sync is disabled".into(),
+            ));
+        }
+        config
+            .validate()
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        if self.state.lock().unwrap().db.is_none() {
+            return Err(DaemonError::Failed("app database is not available".into()));
+        }
+        self.wellness_running.store(true, Ordering::SeqCst);
+        self.wellness_sync_tx.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+        Ok(())
+    }
+
+    /// Return the durable wellness export status for the current account.
+    /// Error text comes from the sanitized export ledger and never includes
+    /// credentials or response bodies.
+    async fn get_wellness_sync_status(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        loop {
+            let config = self.integration_config.subscribe().borrow().clone();
+            let account_id = config.athlete_id.clone();
+            let revision = self.wellness_status_revision.load(Ordering::Acquire);
+            if let Some(status) = self
+                .wellness_status_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|cached| {
+                    cached.revision == revision && cached.account_id == account_id
+                })
+                .map(|cached| cached.status.clone())
+            {
+                let running = self.wellness_running.load(Ordering::SeqCst);
+                return Ok(wellness_status_to_dbus_map(&config, status, running));
+            }
+
+            let db = self
+                .state
+                .lock()
+                .unwrap()
+                .db
+                .clone()
+                .ok_or_else(|| DaemonError::Failed("app database is not available".into()))?;
+            let account_id_for_load = account_id.clone();
+            let status = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let db = db.lock().unwrap();
+                let current_payloads =
+                    match (db.oldest_wellness_date()?, db.newest_wellness_date()?) {
+                        (Some(start), Some(end)) => db
+                            .fetch_daily_wellness(DateRange { start, end })?
+                            .into_iter()
+                            .map(|daily| {
+                                let record =
+                                    crate::integrations::intervals_icu::WellnessRecord::from(&daily);
+                                Ok((daily.date, record.payload_hash()?))
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?,
+                        _ => Vec::new(),
+                    };
+                db.fetch_wellness_export_status(
+                    "intervals_icu",
+                    &account_id_for_load,
+                    &current_payloads,
+                )
+            })
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))?
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+
+            if self.wellness_status_revision.load(Ordering::Acquire) != revision {
+                continue;
+            }
+            self.wellness_status_cache.lock().unwrap().replace(CachedWellnessStatus {
+                revision,
+                account_id,
+                status: status.clone(),
+            });
+            let running = self.wellness_running.load(Ordering::SeqCst);
+            return Ok(wellness_status_to_dbus_map(&config, status, running));
+        }
     }
 
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>, DaemonError> {
@@ -849,11 +1008,13 @@ impl CobbleDaemon {
 
         let new_cfg = crate::config::load(&config_path)
             .map_err(|e| DaemonError::Failed(e.to_string()))?;
+        crate::config::warn_if_invalid(&config_path, &new_cfg);
 
         debug!(
-            "reload_config: adapter={}, address{}",
+            "reload_config: adapter={}, address{}, intervals_icu={:?}",
             new_cfg.adapter,
             if new_cfg.address.is_empty() { " (none)" } else { " set" },
+            new_cfg.redacted_intervals_icu(),
         );
 
         // Read state.pebble in the same lock scope as the config update so
@@ -868,6 +1029,19 @@ impl CobbleDaemon {
             state.adapter = new_cfg.adapter;
             if changed { state.pebble.clone() } else { None }
         };
+
+        let integration_config = new_cfg.integrations.intervals_icu.clone();
+        let integration_changed = self.integration_config.send_if_modified(|current| {
+            if *current == integration_config {
+                false
+            } else {
+                *current = integration_config.clone();
+                true
+            }
+        });
+        if integration_changed {
+            self.wellness_status_revision.fetch_add(1, Ordering::SeqCst);
+        }
 
         if let Some(pebble) = pebble_to_disconnect {
             let _ = pebble.disconnect().await;
@@ -973,6 +1147,134 @@ impl CobbleDaemon {
     ) -> zbus::Result<()>;
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cobbled-reload-test-{unique}.toml"))
+    }
+
+    #[tokio::test]
+    async fn integration_reload_wakes_worker_without_replacing_ble_params() {
+        let path = test_path();
+        let initial = IntervalsIcuConfig {
+            enabled: false,
+            athlete_id: String::new(),
+            api_key: String::new(),
+        };
+        let updated = crate::config::Config {
+            address: "watch-address".into(),
+            adapter: "hci0".into(),
+            verbose: false,
+            db: None,
+            integrations: cobble_config::Integrations {
+                intervals_icu: IntervalsIcuConfig {
+                    enabled: true,
+                    athlete_id: "i123456".into(),
+                    api_key: "test-only-value".into(),
+                },
+            },
+        };
+        std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            "watch-address".into(),
+            "hci0".into(),
+            initial,
+            watch::channel(0).0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            path.clone(),
+            event_tx,
+            None,
+            music_tx,
+            phone_tx,
+        );
+        let mut integration_rx = daemon.integration_config_changed();
+        let revision_rx = daemon.config_changed();
+
+        daemon.reload_config().await.unwrap();
+        integration_rx.changed().await.unwrap();
+        assert_eq!(integration_rx.borrow().athlete_id, "i123456");
+        assert!(integration_rx.borrow().enabled);
+        assert!(revision_rx.has_changed().unwrap());
+        assert_eq!(
+            daemon.current_connection_params(),
+            ("watch-address".into(), "hci0".into())
+        );
+        assert!(!*daemon.watch_connection().borrow());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn wellness_status_map_reports_running_without_exposing_credentials() {
+        let config = IntervalsIcuConfig {
+            enabled: true,
+            athlete_id: "i123456".into(),
+            api_key: "secret-api-key".into(),
+        };
+        let map = wellness_status_to_dbus_map(
+            &config,
+            WellnessExportStatus {
+                exported_dates: 3,
+                pending_dates: 2,
+                ..WellnessExportStatus::default()
+            },
+            true,
+        );
+
+        assert!(bool::try_from(map.get("running").unwrap()).unwrap());
+        assert_eq!(u64::try_from(map.get("pending_dates").unwrap()).unwrap(), 2);
+        assert!(!format!("{map:?}").contains("secret-api-key"));
+    }
+
+    #[test]
+    fn manual_sync_marks_running_before_notifying_the_worker() {
+        let db_path = test_path().with_extension("db");
+        let db = Arc::new(Mutex::new(AppDb::open(&db_path).unwrap()));
+        let (sync_tx, sync_rx) = watch::channel(0_u64);
+        let running = Arc::new(AtomicBool::new(false));
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            "watch-address".into(),
+            "hci0".into(),
+            IntervalsIcuConfig {
+                enabled: true,
+                athlete_id: "i123456".into(),
+                api_key: "test-only-value".into(),
+            },
+            sync_tx,
+            running.clone(),
+            Arc::new(AtomicU64::new(0)),
+            test_path(),
+            event_tx,
+            Some(db),
+            music_tx,
+            phone_tx,
+        );
+
+        daemon.sync_wellness().unwrap();
+
+        assert!(running.load(Ordering::SeqCst));
+        assert_eq!(*sync_rx.borrow(), 1);
+
+        drop(daemon);
+        std::fs::remove_file(db_path).unwrap();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Signal emission task
 // ---------------------------------------------------------------------------
@@ -984,6 +1286,7 @@ pub async fn run_signal_emitter(
     daemon: CobbleDaemon,
     mut event_rx: mpsc::UnboundedReceiver<DaemonEvent>,
     app_db: Option<Arc<Mutex<AppDb>>>,
+    wellness_revision_tx: watch::Sender<u64>,
 ) {
     while let Some(event) = event_rx.recv().await {
         let iface_result = conn
@@ -1076,7 +1379,15 @@ pub async fn run_signal_emitter(
                     {
                         Ok(Err(e)) => warn!("app DB insert failed: {e}"),
                         Err(e) => warn!("app DB task panicked: {e}"),
-                        Ok(Ok(())) => {}
+                        Ok(Ok(true)) => {
+                            daemon
+                                .wellness_status_revision
+                                .fetch_add(1, Ordering::SeqCst);
+                            wellness_revision_tx.send_modify(|revision| {
+                                *revision = revision.wrapping_add(1);
+                            });
+                        }
+                        Ok(Ok(false)) => {}
                     }
                 }
                 let _ = CobbleDaemon::health_data_received(

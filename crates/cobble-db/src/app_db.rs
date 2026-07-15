@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,13 +6,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Context;
+use chrono::NaiveDate;
 use libpebble_ble::endpoints::datalog::tag as datalog_tag;
 use libpebble_ble::DatalogData;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
 use crate::schema;
-use crate::types::IpLocation;
+use crate::time::DateRange;
+use crate::types::{
+    DailyWellness, IpLocation, WellnessExportState, WellnessExportStatus,
+};
 
 // Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
@@ -60,9 +65,204 @@ impl AppDb {
         Ok(Self { conn })
     }
 
+    /// Aggregate supported wellness observations for a watch-local date range.
+    pub fn fetch_daily_wellness(&self, range: DateRange) -> anyhow::Result<Vec<DailyWellness>> {
+        crate::queries::fetch_daily_wellness(&self.conn, range)
+    }
+
+    /// Return the oldest watch-local date with steps or primary sleep/nap data.
+    pub fn oldest_wellness_date(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        crate::queries::oldest_wellness_date(&self.conn)
+    }
+
+    /// Return the newest watch-local date with steps or primary sleep/nap data.
+    pub fn newest_wellness_date(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        crate::queries::newest_wellness_date(&self.conn)
+    }
+
+    /// Return all durable export state for one provider/account pair.
+    pub fn fetch_wellness_export_states(
+        &self,
+        provider: &str,
+        account_id: &str,
+    ) -> anyhow::Result<Vec<WellnessExportState>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT wellness_date, payload_hash, attempt_count, next_attempt_at,
+                    last_attempt_at, last_success_at, last_error
+             FROM wellness_export_state
+             WHERE provider = ?1 AND account_id = ?2
+             ORDER BY wellness_date ASC",
+        )?;
+        let rows = stmt.query_map(params![provider, account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+
+        let mut states = Vec::new();
+        for row in rows {
+            let (
+                wellness_date,
+                payload_hash,
+                attempt_count,
+                next_attempt_at,
+                last_attempt_at,
+                last_success_at,
+                last_error,
+            ) = row?;
+            let wellness_date = NaiveDate::parse_from_str(&wellness_date, "%Y-%m-%d")
+                .with_context(|| format!("parse wellness export date {wellness_date}"))?;
+            states.push(WellnessExportState {
+                provider: provider.to_string(),
+                account_id: account_id.to_string(),
+                wellness_date,
+                payload_hash,
+                attempt_count,
+                next_attempt_at,
+                last_attempt_at,
+                last_success_at,
+                last_error,
+            });
+        }
+        Ok(states)
+    }
+
+    /// Return an aggregate status snapshot for one provider/account pair.
+    /// Error text is already sanitized when it enters the ledger.
+    pub fn fetch_wellness_export_status(
+        &self,
+        provider: &str,
+        account_id: &str,
+        current_payloads: &[(NaiveDate, String)],
+    ) -> anyhow::Result<WellnessExportStatus> {
+        let states = self.fetch_wellness_export_states(provider, account_id)?;
+        let successful_hashes: HashMap<NaiveDate, &str> = states
+            .iter()
+            .filter_map(|state| {
+                state
+                    .payload_hash
+                    .as_deref()
+                    .map(|hash| (state.wellness_date, hash))
+            })
+            .collect();
+        let exported_dates = current_payloads
+            .iter()
+            .filter(|(date, hash)| successful_hashes.get(date) == Some(&hash.as_str()))
+            .count() as i64;
+        let pending_dates = current_payloads.len() as i64 - exported_dates;
+        let last_success_at = states.iter().filter_map(|state| state.last_success_at).max();
+        let latest_error = states
+            .iter()
+            .filter_map(|state| {
+                state.last_error.as_ref().map(|error| {
+                    (
+                        state.last_attempt_at.unwrap_or(i64::MIN),
+                        error.clone(),
+                        state.last_attempt_at,
+                    )
+                })
+            })
+            .max_by_key(|(attempted_at, _, _)| *attempted_at);
+        let (last_error, last_error_at) = latest_error
+            .map(|(_, error, attempted_at)| (Some(error), attempted_at))
+            .unwrap_or((None, None));
+        Ok(WellnessExportStatus {
+            exported_dates,
+            pending_dates,
+            last_success_at,
+            last_error,
+            last_error_at,
+        })
+    }
+
+    /// Record one successfully uploaded batch atomically.
+    ///
+    /// The hashes are the exact per-date payload hashes sent in the batch.
+    /// Success resets the retry counter and clears prior failure state.
+    pub fn record_wellness_export_success(
+        &self,
+        provider: &str,
+        account_id: &str,
+        payloads: &[(NaiveDate, String)],
+        completed_at: i64,
+    ) -> anyhow::Result<()> {
+        let txn = self.conn.unchecked_transaction()?;
+        for (date, payload_hash) in payloads {
+            txn.execute(
+                "INSERT INTO wellness_export_state
+                     (provider, account_id, wellness_date, payload_hash,
+                      attempt_count, next_attempt_at, last_attempt_at,
+                      last_success_at, last_error)
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL, ?5, ?5, NULL)
+                 ON CONFLICT(provider, account_id, wellness_date) DO UPDATE SET
+                     payload_hash = excluded.payload_hash,
+                     attempt_count = 0,
+                     next_attempt_at = NULL,
+                     last_attempt_at = excluded.last_attempt_at,
+                     last_success_at = excluded.last_success_at,
+                     last_error = NULL",
+                params![
+                    provider,
+                    account_id,
+                    date.format("%Y-%m-%d").to_string(),
+                    payload_hash,
+                    completed_at,
+                ],
+            )?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Mark every date in a failed batch for the next retry in one transaction.
+    /// The last successful hash is intentionally preserved until a whole batch
+    /// succeeds, so a partial response cannot claim individual success.
+    pub fn record_wellness_export_failure(
+        &self,
+        provider: &str,
+        account_id: &str,
+        dates: &[NaiveDate],
+        attempted_at: i64,
+        next_attempt_at: Option<i64>,
+        error_summary: &str,
+    ) -> anyhow::Result<()> {
+        let error_summary = sanitize_export_error(error_summary);
+        let txn = self.conn.unchecked_transaction()?;
+        for date in dates {
+            txn.execute(
+                "INSERT INTO wellness_export_state
+                     (provider, account_id, wellness_date, payload_hash,
+                      attempt_count, next_attempt_at, last_attempt_at,
+                      last_success_at, last_error)
+                 VALUES (?1, ?2, ?3, NULL, 1, ?4, ?5, NULL, ?6)
+                 ON CONFLICT(provider, account_id, wellness_date) DO UPDATE SET
+                     attempt_count = wellness_export_state.attempt_count + 1,
+                     next_attempt_at = excluded.next_attempt_at,
+                     last_attempt_at = excluded.last_attempt_at,
+                     last_error = excluded.last_error",
+                params![
+                    provider,
+                    account_id,
+                    date.format("%Y-%m-%d").to_string(),
+                    next_attempt_at,
+                    attempted_at,
+                    &error_summary,
+                ],
+            )?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Insert a raw batch into health_records and parse individual records into the
-    /// per-tag tables. Silently skips duplicate batches (same CRC).
-    pub fn insert_batch(&self, batch: &DatalogData) -> anyhow::Result<()> {
+    /// per-tag tables. Returns whether the batch was new and supported.
+    pub fn insert_batch(&self, batch: &DatalogData) -> anyhow::Result<bool> {
         let received_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -86,7 +286,7 @@ impl AppDb {
 
         if rows_changed == 0 {
             // Duplicate batch; child records already stored on the first receipt.
-            return Ok(());
+            return Ok(false);
         }
 
         let record_id = self.conn.last_insert_rowid();
@@ -103,8 +303,10 @@ impl AppDb {
             }
             // tag 85 (HR) is protobuf — skip until schema is known.
             // tag 87 is device/firmware summary — not health data.
-            _ => Ok(()),
-        }
+            _ => return Ok(false),
+        }?;
+
+        Ok(true)
     }
 
     /// Parse tag 81 per-minute activity chunks.
@@ -403,5 +605,174 @@ impl AppDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+}
+
+fn sanitize_export_error(error: &str) -> String {
+    const MAX_ERROR_LENGTH: usize = 512;
+    let sanitized: String = error
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(MAX_ERROR_LENGTH)
+        .collect();
+    if sanitized.is_empty() {
+        "unknown export error".to_string()
+    } else {
+        sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_db() -> AppDb {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::initialize_schema(&conn).unwrap();
+        AppDb { conn }
+    }
+
+    #[test]
+    fn wellness_export_state_is_isolated_by_account_and_records_success() {
+        let db = memory_db();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
+
+        db.record_wellness_export_success(
+            "intervals_icu",
+            "athlete-a",
+            &[(date, "hash-a".to_string())],
+            100,
+        )
+        .unwrap();
+
+        let states = db
+            .fetch_wellness_export_states("intervals_icu", "athlete-a")
+            .unwrap();
+        assert_eq!(
+            states,
+            vec![WellnessExportState {
+                provider: "intervals_icu".into(),
+                account_id: "athlete-a".into(),
+                wellness_date: date,
+                payload_hash: Some("hash-a".into()),
+                attempt_count: 0,
+                next_attempt_at: None,
+                last_attempt_at: Some(100),
+                last_success_at: Some(100),
+                last_error: None,
+            }]
+        );
+        assert!(db
+            .fetch_wellness_export_states("intervals_icu", "athlete-b")
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .fetch_wellness_export_states("other_provider", "athlete-a")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn wellness_export_failure_preserves_success_and_increments_attempts() {
+        let db = memory_db();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
+
+        db.record_wellness_export_success(
+            "intervals_icu",
+            "athlete-a",
+            &[(date, "old-hash".to_string())],
+            100,
+        )
+        .unwrap();
+        db.record_wellness_export_failure(
+            "intervals_icu",
+            "athlete-a",
+            &[date],
+            200,
+            Some(500),
+            "HTTP 503:\ntransient response",
+        )
+        .unwrap();
+
+        let state = &db
+            .fetch_wellness_export_states("intervals_icu", "athlete-a")
+            .unwrap()[0];
+        assert_eq!(state.payload_hash.as_deref(), Some("old-hash"));
+        assert_eq!(state.attempt_count, 1);
+        assert_eq!(state.next_attempt_at, Some(500));
+        assert_eq!(state.last_attempt_at, Some(200));
+        assert_eq!(state.last_success_at, Some(100));
+        assert_eq!(state.last_error.as_deref(), Some("HTTP 503: transient response"));
+
+        db.record_wellness_export_failure(
+            "intervals_icu",
+            "athlete-a",
+            &[date],
+            600,
+            None,
+            "HTTP 401: authentication failure",
+        )
+        .unwrap();
+        let state = &db
+            .fetch_wellness_export_states("intervals_icu", "athlete-a")
+            .unwrap()[0];
+        assert_eq!(state.attempt_count, 2);
+        assert_eq!(state.next_attempt_at, None);
+        assert_eq!(state.last_attempt_at, Some(600));
+        assert_eq!(state.last_success_at, Some(100));
+        assert_eq!(state.last_error.as_deref(), Some("HTTP 401: authentication failure"));
+
+        db.record_wellness_export_success(
+            "intervals_icu",
+            "athlete-a",
+            &[(date, "new-hash".to_string())],
+            700,
+        )
+        .unwrap();
+        let state = &db
+            .fetch_wellness_export_states("intervals_icu", "athlete-a")
+            .unwrap()[0];
+        assert_eq!(state.payload_hash.as_deref(), Some("new-hash"));
+        assert_eq!(state.attempt_count, 0);
+        assert_eq!(state.next_attempt_at, None);
+        assert_eq!(state.last_attempt_at, Some(700));
+        assert_eq!(state.last_success_at, Some(700));
+        assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn wellness_export_status_compares_current_payloads_with_successful_hashes() {
+        let db = memory_db();
+        let exported = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
+        let changed = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap();
+        let unseen = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+
+        db.record_wellness_export_success(
+            "intervals_icu",
+            "athlete-a",
+            &[
+                (exported, "hash-exported".into()),
+                (changed, "hash-before-change".into()),
+            ],
+            100,
+        )
+        .unwrap();
+
+        let status = db
+            .fetch_wellness_export_status(
+                "intervals_icu",
+                "athlete-a",
+                &[
+                    (exported, "hash-exported".into()),
+                    (changed, "hash-after-change".into()),
+                    (unseen, "hash-unseen".into()),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(status.exported_dates, 1);
+        assert_eq!(status.pending_dates, 2);
+        assert_eq!(status.last_success_at, Some(100));
+        assert_eq!(status.last_error, None);
     }
 }

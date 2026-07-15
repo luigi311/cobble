@@ -50,6 +50,18 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-adapter: "hci0";
     in-out property <bool>   cfg-verbose: false;
     in-out property <string> cfg-db;
+    in-out property <bool>   cfg-intervals-enabled: false;
+    in-out property <string> cfg-intervals-athlete-id;
+    in-out property <string> cfg-intervals-api-key;
+    in property <bool> cfg-intervals-applied-enabled: false;
+    in property <string> cfg-intervals-applied-athlete-id;
+    in property <string> cfg-intervals-applied-api-key;
+    private property <bool> cfg-intervals-dirty:
+        cfg-intervals-enabled != cfg-intervals-applied-enabled
+        || cfg-intervals-athlete-id != cfg-intervals-applied-athlete-id
+        || cfg-intervals-api-key != cfg-intervals-applied-api-key;
+    in property <string> cfg-intervals-status;
+    in property <bool> cfg-intervals-status-error: false;
     in property <string> save-status: "";
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
@@ -62,6 +74,7 @@ export component AppWindow inherits Window {
 
     // ── Callbacks ──
     callback save-config();
+    callback sync-wellness();
     callback scan-watches();
     callback refresh-data();
     callback refresh-device();
@@ -415,6 +428,41 @@ export component AppWindow inherits Window {
                         }
                     }
                     FormField { label: "Database Path"; value <=> root.cfg-db; placeholder: "~/.local/share/cobbled/cobbled.db"; }
+                    Text { text: "Intervals.icu"; color: Palette.muted; font-size: 12px; }
+                    Rectangle {
+                        background: Palette.surface; border-radius: 10px; height: 52px;
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 16px;
+                            Text { text: "Enable wellness sync"; color: Palette.text; font-size: 14px; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Toggle { checked <=> root.cfg-intervals-enabled; y: (parent.height - self.height) / 2; }
+                        }
+                    }
+                    FormField { label: "Intervals.icu Athlete ID"; value <=> root.cfg-intervals-athlete-id; placeholder: "i123456"; }
+                    FormField {
+                        label: "Intervals.icu API key";
+                        value <=> root.cfg-intervals-api-key;
+                        placeholder: "API key";
+                        input-type: InputType.password;
+                    }
+                    HorizontalLayout {
+                        height: 52px; spacing: 8px;
+                        Rectangle {
+                            width: 112px; border-radius: 8px; background: Palette.surface;
+                            opacity: root.cfg-intervals-dirty ? 0.5 : 1.0;
+                            Text { text: "Sync Now"; color: Palette.accent; font-size: 14px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea {
+                                enabled: !root.cfg-intervals-dirty;
+                                clicked => { root.sync-wellness(); }
+                            }
+                        }
+                        Text {
+                            text: root.cfg-intervals-status;
+                            color: root.cfg-intervals-status-error ? Palette.red : Palette.muted;
+                            font-size: 12px; vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
                     Rectangle {
                         height: 52px; border-radius: 10px; background: Palette.accent;
                         Text { text: "Save & Apply"; color: white; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
