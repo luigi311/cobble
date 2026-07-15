@@ -1,8 +1,9 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub use cobble_config::Config;
 
@@ -40,10 +41,20 @@ pub fn save(path: &Path, cfg: &Config) -> anyhow::Result<()> {
             .with_context(|| format!("create config dir {}", parent.display()))?;
     }
     let text = toml::to_string_pretty(cfg).context("serialise config")?;
-    std::fs::write(path, text).with_context(|| format!("write config {}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
     #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("open config {}", path.display()))?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set permissions on config {}", path.display()))?;
+    file.set_len(0)
+        .with_context(|| format!("truncate config {}", path.display()))?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("write config {}", path.display()))?;
     Ok(())
 }
 

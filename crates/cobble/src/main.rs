@@ -26,6 +26,7 @@ fn main() -> anyhow::Result<()> {
     let window = AppWindow::new()?;
 
     let cfg = config::load(&config_path).unwrap_or_default();
+    let initial_integrations = cfg.integrations.clone();
     window.set_cfg_address(cfg.address.clone().into());
     window.set_cfg_adapter(cfg.adapter.clone().into());
     window.set_cfg_verbose(cfg.verbose);
@@ -233,6 +234,14 @@ fn main() -> anyhow::Result<()> {
         let rt_handle = rt.handle().clone();
         window.on_save_config(move || {
             let Some(w) = weak.upgrade() else { return };
+            let integrations = match config::load(&cfg_path2) {
+                Ok(latest) => latest.integrations,
+                Err(_error) if !cfg_path2.exists() => initial_integrations.clone(),
+                Err(error) => {
+                    w.set_save_status(format!("Error: {error}").into());
+                    return;
+                }
+            };
             let new_cfg = config::Config {
                 address: w.get_cfg_address().to_string(),
                 adapter: w.get_cfg_adapter().to_string(),
@@ -241,7 +250,7 @@ fn main() -> anyhow::Result<()> {
                     let s = w.get_cfg_db().to_string();
                     if s.is_empty() { None } else { Some(s) }
                 },
-                integrations: cfg.integrations.clone(),
+                integrations,
             };
             match config::save(&cfg_path2, &new_cfg) {
                 Err(e) => { w.set_save_status(format!("Error: {e}").into()); }
