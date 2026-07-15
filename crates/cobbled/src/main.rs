@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
+    let (wellness_sync_tx, wellness_sync_rx) = watch::channel(0_u64);
     let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
 
     // Channel for forwarding watch music-control actions to the MPRIS monitor.
@@ -122,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.address.clone(),
         cfg.adapter.clone(),
         cfg.integrations.intervals_icu.clone(),
+        wellness_sync_tx,
         config_path.clone(),
         event_tx,
         app_db.clone(),
@@ -158,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
             db,
             daemon.integration_config_changed(),
             wellness_revision_rx,
+            wellness_sync_rx,
             wellness_shutdown_rx,
         ))
     });

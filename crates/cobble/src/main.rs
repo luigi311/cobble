@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use cobble_client::{CobbleClient, StatusEvent};
+use cobble_client::{CobbleClient, StatusEvent, VarDict};
 use slint::{ModelRc, VecModel};
 use tracing::warn;
 
@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
     window.set_cfg_intervals_enabled(cfg.integrations.intervals_icu.enabled);
     window.set_cfg_intervals_athlete_id(cfg.integrations.intervals_icu.athlete_id.clone().into());
     window.set_cfg_intervals_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
+    window.set_cfg_intervals_status("Loading sync status…".into());
 
     let effective_db_path = cfg
         .db
@@ -73,6 +74,8 @@ fn main() -> anyhow::Result<()> {
     // running". Load-bearing — do not remove.
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let _rt_guard = rt.enter();
+
+    refresh_wellness_status(window.as_weak(), rt.handle());
 
     {
         let weak = window.as_weak();
@@ -295,6 +298,45 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Wellness sync control ───────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let rt_handle = rt.handle().clone();
+        window.on_sync_wellness(move || {
+            let Some(w) = weak.upgrade() else { return };
+            w.set_cfg_intervals_status("Sync requested…".into());
+            w.set_cfg_intervals_status_error(false);
+            let weak2 = weak.clone();
+            rt_handle.spawn(async move {
+                let result = match CobbleClient::new().await {
+                    Err(error) => Err(error.to_string()),
+                    Ok(client) => match client.sync_wellness().await {
+                        Err(error) => Err(error.to_string()),
+                        Ok(()) => {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            client
+                                .get_wellness_sync_status()
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
+                    },
+                };
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak2.upgrade() {
+                        match result {
+                            Ok(status) => apply_wellness_status(&w, &status),
+                            Err(error) => {
+                                w.set_cfg_intervals_status(format!("Error: {error}").into());
+                                w.set_cfg_intervals_status_error(true);
+                            }
+                        }
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
     // ── Scan for Pebble watches ─────────────────────────────────────────────
     {
         let weak = window.as_weak();
@@ -421,6 +463,82 @@ where
             .ok();
         }
     });
+}
+
+fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
+    let rt = rt.clone();
+    rt.spawn(async move {
+        let result = match CobbleClient::new().await {
+            Err(error) => Err(error.to_string()),
+            Ok(client) => client
+                .get_wellness_sync_status()
+                .await
+                .map_err(|error| error.to_string()),
+        };
+        slint::invoke_from_event_loop(move || {
+            if let Some(w) = weak.upgrade() {
+                match result {
+                    Ok(status) => apply_wellness_status(&w, &status),
+                    Err(error) => {
+                        w.set_cfg_intervals_status(format!("Error: {error}").into());
+                        w.set_cfg_intervals_status_error(true);
+                    }
+                }
+            }
+        })
+        .ok();
+    });
+}
+
+fn apply_wellness_status(w: &AppWindow, status: &VarDict) {
+    let enabled = wellness_status_bool(status, "enabled");
+    let valid = wellness_status_bool(status, "valid");
+    let message = if !enabled {
+        "Wellness sync disabled.".to_string()
+    } else if !valid {
+        "Invalid Intervals.icu configuration.".to_string()
+    } else {
+        let last_error = wellness_status_string(status, "last_error");
+        if !last_error.is_empty() {
+            format!("Last error: {last_error}")
+        } else {
+            let last_success = wellness_status_string(status, "last_success");
+            if last_success.is_empty() {
+                "No successful sync yet.".to_string()
+            } else {
+                let pending = wellness_status_u64(status, "pending_dates");
+                if pending == 0 {
+                    format!("Last sync: {last_success}")
+                } else {
+                    format!("Last sync: {last_success}; {pending} pending")
+                }
+            }
+        }
+    };
+    w.set_cfg_intervals_status(message.into());
+    w.set_cfg_intervals_status_error(enabled && !valid || (enabled && !wellness_status_string(status, "last_error").is_empty()));
+}
+
+fn wellness_status_string(status: &VarDict, key: &str) -> String {
+    status
+        .get(key)
+        .and_then(|value| <&str>::try_from(value).ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn wellness_status_bool(status: &VarDict, key: &str) -> bool {
+    status
+        .get(key)
+        .and_then(|value| bool::try_from(value).ok())
+        .unwrap_or(false)
+}
+
+fn wellness_status_u64(status: &VarDict, key: &str) -> u64 {
+    status
+        .get(key)
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
 }
 
 /// Apply a status event to the window's properties (runs on the UI thread).

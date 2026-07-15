@@ -8,12 +8,14 @@ use anyhow::Context;
 use chrono::NaiveDate;
 use libpebble_ble::endpoints::datalog::tag as datalog_tag;
 use libpebble_ble::DatalogData;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
 
 use crate::schema;
 use crate::time::DateRange;
-use crate::types::{DailyWellness, IpLocation, WellnessExportState};
+use crate::types::{
+    DailyWellness, IpLocation, WellnessExportState, WellnessExportStatus,
+};
 
 // Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
@@ -128,6 +130,62 @@ impl AppDb {
             });
         }
         Ok(states)
+    }
+
+    /// Return an aggregate status snapshot for one provider/account pair.
+    /// Error text is already sanitized when it enters the ledger.
+    pub fn fetch_wellness_export_status(
+        &self,
+        provider: &str,
+        account_id: &str,
+    ) -> anyhow::Result<WellnessExportStatus> {
+        let (exported_dates, pending_dates, last_success_at) = self.conn.query_row(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN payload_hash IS NOT NULL THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(
+                     CASE WHEN last_success_at IS NULL OR last_error IS NOT NULL
+                          THEN 1 ELSE 0 END
+                 ), 0),
+                 MAX(last_success_at)
+             FROM wellness_export_state
+             WHERE provider = ?1 AND account_id = ?2",
+            params![provider, account_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+        let latest_error = self
+            .conn
+            .query_row(
+                "SELECT last_error, last_attempt_at
+                 FROM wellness_export_state
+                 WHERE provider = ?1 AND account_id = ?2 AND last_error IS NOT NULL
+                 ORDER BY last_attempt_at DESC
+                 LIMIT 1",
+                params![provider, account_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let (last_error, last_error_at) = latest_error
+            .map(|(error, attempted_at)| (Some(error), attempted_at))
+            .unwrap_or((None, None));
+        Ok(WellnessExportStatus {
+            exported_dates,
+            pending_dates,
+            last_success_at,
+            last_error,
+            last_error_at,
+        })
     }
 
     /// Record one successfully uploaded batch atomically.

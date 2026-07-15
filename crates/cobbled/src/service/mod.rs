@@ -34,6 +34,8 @@
 //!     Forget()  remove the Bluetooth bond (unpair); re-pairs on next reconnect
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
 //!     ReprocessHealthData()
+//!     SyncWellness()
+//!     GetWellnessSyncStatus() -> a{sv}
 //!
 //!   Signals
 //!     AppMessageReceived(s uuid, a{i(sv)} data)
@@ -62,7 +64,7 @@ use libpebble_ble::{
     WatchVersionInfo, WeatherType,
 };
 
-use cobble_db::AppDb;
+use cobble_db::{AppDb, WellnessExportStatus};
 use cobble_config::IntervalsIcuConfig;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
@@ -149,6 +151,38 @@ fn watch_color_to_map(c: &WatchColorInfo) -> HashMap<String, OwnedValue> {
     ])
 }
 
+fn wellness_status_to_dbus_map(
+    config: &IntervalsIcuConfig,
+    status: WellnessExportStatus,
+) -> HashMap<String, OwnedValue> {
+    let format_timestamp = |timestamp: Option<i64>| {
+        timestamp
+            .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+            .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_default()
+    };
+    HashMap::from([
+        ("enabled".into(), dbus_val(config.enabled)),
+        ("configured".into(), dbus_val(config.is_configured())),
+        ("valid".into(), dbus_val(config.validate().is_ok())),
+        ("athlete_id".into(), dbus_val(config.athlete_id.clone())),
+        ("exported_dates".into(), dbus_val(status.exported_dates as u64)),
+        ("pending_dates".into(), dbus_val(status.pending_dates as u64)),
+        (
+            "last_success".into(),
+            dbus_val(format_timestamp(status.last_success_at)),
+        ),
+        (
+            "last_error".into(),
+            dbus_val(status.last_error.unwrap_or_default()),
+        ),
+        (
+            "last_error_at".into(),
+            dbus_val(format_timestamp(status.last_error_at)),
+        ),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // CobbleDaemon
 // ---------------------------------------------------------------------------
@@ -162,6 +196,8 @@ pub struct CobbleDaemon {
     /// Latest integration configuration; changes wake the exporter without
     /// being treated as BLE connection parameter changes.
     integration_config: watch::Sender<IntervalsIcuConfig>,
+    /// Coalesced manual sync requests for the wellness exporter.
+    wellness_sync_tx: watch::Sender<u64>,
     /// Notifies subscribers when the watch connects or disconnects.
     connection_tx: watch::Sender<bool>,
     /// Forwards watch music-control actions to the MPRIS monitor.
@@ -176,6 +212,7 @@ impl CobbleDaemon {
         address: String,
         adapter: String,
         integration_config: IntervalsIcuConfig,
+        wellness_sync_tx: watch::Sender<u64>,
         config_path: PathBuf,
         event_tx: mpsc::UnboundedSender<DaemonEvent>,
         db: Option<Arc<Mutex<AppDb>>>,
@@ -206,6 +243,7 @@ impl CobbleDaemon {
             })),
             config_revision,
             integration_config,
+            wellness_sync_tx,
             music_action_tx,
             phone_action_tx,
             connection_tx,
@@ -518,6 +556,50 @@ impl CobbleDaemon {
 
     fn ping(&self) -> bool {
         true
+    }
+
+    /// Request one serialized wellness reconciliation run.
+    fn sync_wellness(&self) -> Result<(), DaemonError> {
+        let config = self.integration_config.subscribe().borrow().clone();
+        if !config.enabled {
+            return Err(DaemonError::Failed(
+                "Intervals.icu wellness sync is disabled".into(),
+            ));
+        }
+        config
+            .validate()
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        if self.state.lock().unwrap().db.is_none() {
+            return Err(DaemonError::Failed("app database is not available".into()));
+        }
+        self.wellness_sync_tx.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+        Ok(())
+    }
+
+    /// Return the durable wellness export status for the current account.
+    /// Error text comes from the sanitized export ledger and never includes
+    /// credentials or response bodies.
+    async fn get_wellness_sync_status(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let config = self.integration_config.subscribe().borrow().clone();
+        let account_id = config.athlete_id.clone();
+        let db = self
+            .state
+            .lock()
+            .unwrap()
+            .db
+            .clone()
+            .ok_or_else(|| DaemonError::Failed("app database is not available".into()))?;
+        let status = tokio::task::spawn_blocking(move || {
+            db.lock()
+                .unwrap()
+                .fetch_wellness_export_status("intervals_icu", &account_id)
+        })
+        .await
+        .map_err(|error| DaemonError::Failed(error.to_string()))?
+        .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        Ok(wellness_status_to_dbus_map(&config, status))
     }
 
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>, DaemonError> {
@@ -1040,6 +1122,7 @@ mod tests {
             "watch-address".into(),
             "hci0".into(),
             initial,
+            watch::channel(0).0,
             path.clone(),
             event_tx,
             None,

@@ -36,6 +36,7 @@ type PendingBatch<'a> = (
 pub(crate) enum WellnessWake {
     Startup,
     HealthData,
+    Manual,
     ConfigChanged,
     Timer,
 }
@@ -63,6 +64,7 @@ pub(crate) async fn run(
     db: Arc<Mutex<AppDb>>,
     mut integration_rx: watch::Receiver<IntervalsIcuConfig>,
     mut health_rx: watch::Receiver<u64>,
+    mut manual_sync_rx: watch::Receiver<u64>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut config = integration_rx.borrow().clone();
@@ -75,6 +77,7 @@ pub(crate) async fn run(
     );
     let mut pending_wake = None;
     let mut health_rx_open = true;
+    let mut manual_sync_rx_open = true;
 
     let mut timer = tokio::time::interval(RECONCILIATION_INTERVAL);
     timer.tick().await; // startup wake already covers the immediate run
@@ -130,6 +133,22 @@ pub(crate) async fn run(
                     active.is_some(),
                     &mut pending_wake,
                     WellnessWake::HealthData,
+                ) {
+                    active = start_reconciliation(
+                        &db,
+                        &config,
+                        reason,
+                        &authentication_blocked_config,
+                    );
+                }
+            }
+            changed = manual_sync_rx.changed(), if manual_sync_rx_open => {
+                if changed.is_err() {
+                    manual_sync_rx_open = false;
+                } else if let Some(reason) = queue_or_start_wake(
+                    active.is_some(),
+                    &mut pending_wake,
+                    WellnessWake::Manual,
                 ) {
                     active = start_reconciliation(
                         &db,

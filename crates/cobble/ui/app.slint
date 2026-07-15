@@ -53,6 +53,8 @@ export component AppWindow inherits Window {
     in-out property <bool>   cfg-intervals-enabled: false;
     in-out property <string> cfg-intervals-athlete-id;
     in-out property <string> cfg-intervals-api-key;
+    in property <string> cfg-intervals-status;
+    in property <bool> cfg-intervals-status-error: false;
     in property <string> save-status: "";
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
@@ -65,6 +67,7 @@ export component AppWindow inherits Window {
 
     // ── Callbacks ──
     callback save-config();
+    callback sync-wellness();
     callback scan-watches();
     callback refresh-data();
     callback refresh-device();
@@ -434,6 +437,20 @@ export component AppWindow inherits Window {
                         value <=> root.cfg-intervals-api-key;
                         placeholder: "API key";
                         input-type: InputType.password;
+                    }
+                    HorizontalLayout {
+                        height: 52px; spacing: 8px;
+                        Rectangle {
+                            width: 112px; border-radius: 8px; background: Palette.surface;
+                            Text { text: "Sync Now"; color: Palette.accent; font-size: 14px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea { clicked => { root.sync-wellness(); } }
+                        }
+                        Text {
+                            text: root.cfg-intervals-status;
+                            color: root.cfg-intervals-status-error ? Palette.red : Palette.muted;
+                            font-size: 12px; vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
                     }
                     Rectangle {
                         height: 52px; border-radius: 10px; background: Palette.accent;

@@ -133,6 +133,18 @@ pub struct WellnessExportState {
     pub last_error: Option<String>,
 }
 
+/// Aggregated durable status for one provider/account wellness export.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WellnessExportStatus {
+    /// Dates with a successful payload hash in the export ledger.
+    pub exported_dates: i64,
+    /// Dates with no successful export yet or with a pending recorded error.
+    pub pending_dates: i64,
+    pub last_success_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<i64>,
+}
+
 /// Everything the steps chart needs, computed in one call so the bars and the
 /// header labels always agree on bucketing.
 pub struct StepsChart {
