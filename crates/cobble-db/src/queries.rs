@@ -698,6 +698,7 @@ pub fn load_sleep_avg_label_for_range(
 
 const HEART_RATE_MIN_BPM: i64 = 30;
 const HEART_RATE_MAX_BPM: i64 = 220;
+const HEART_RATE_UTC_OFFSET_SPREAD_SECS: i64 = 26 * 60 * 60;
 
 #[derive(Debug, Clone, Copy)]
 struct HeartSample {
@@ -713,14 +714,20 @@ fn fetch_heart_samples(conn: &Connection, range: DateRange) -> anyhow::Result<Ve
     let mut stmt = conn.prepare(
         "SELECT start_ts, utc_offset, heart_rate_bpm
          FROM health_activity_minutes
-         WHERE start_ts >= ?1 - 43200
-           AND start_ts <= ?2 + 43200
-           AND heart_rate_bpm BETWEEN ?3 AND ?4
+         WHERE start_ts >= ?1 - ?3
+           AND start_ts <= ?2 + ?3
+           AND heart_rate_bpm BETWEEN ?4 AND ?5
          ORDER BY start_ts ASC",
     )?;
     let mut samples = Vec::new();
     for row in stmt.query_map(
-        params![utc_start, utc_end, HEART_RATE_MIN_BPM, HEART_RATE_MAX_BPM],
+        params![
+            utc_start,
+            utc_end,
+            HEART_RATE_UTC_OFFSET_SPREAD_SECS,
+            HEART_RATE_MIN_BPM,
+            HEART_RATE_MAX_BPM
+        ],
         |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -1698,6 +1705,29 @@ mod tests {
         assert_eq!(trend.points[13].average_bpm, Some(120.0));
         assert_eq!(trend.points[0].resting_bpm, Some(63.0));
         assert_eq!(trend.points[23].resting_bpm, Some(63.0));
+    }
+
+    #[test]
+    fn heart_samples_include_large_row_offset_differences() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let row_tz = 10 * 3600; // UTC+10, 14 hours from the watch's UTC-4.
+        let local_start = local(jul4, 0, 30);
+        insert_minute_at(
+            &conn,
+            local_start - row_tz,
+            row_tz,
+            0,
+            Some(88),
+        );
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_heart_stats(&conn, 0, offset).unwrap();
+        assert_eq!(stats.average_label, "88 bpm");
+        assert_eq!(stats.samples_label, "1 readings");
+
+        let trend = load_heart_trend(&conn, 0, offset).unwrap();
+        assert_eq!(trend.points[0].average_bpm, Some(88.0));
     }
 
     #[test]

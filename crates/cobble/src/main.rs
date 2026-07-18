@@ -878,12 +878,36 @@ fn bar_date_range(start: i64, end: i64) -> Option<cobble_db::DateRange> {
     (start <= end).then_some(cobble_db::DateRange { start, end })
 }
 
+fn clear_heart_data(window: &AppWindow) {
+    window.set_heart_stats(HeartStats {
+        average_label: "—".into(),
+        resting_label: "—".into(),
+        sleeping_label: "—".into(),
+        lowest_label: "—".into(),
+        highest_label: "—".into(),
+        samples_label: "—".into(),
+    });
+    window.set_heart_average_path("".into());
+    window.set_heart_resting_path("".into());
+    window.set_heart_trend_max_label("".into());
+    window.set_heart_trend_mid_label("".into());
+    window.set_heart_trend_min_label("".into());
+    window.set_heart_trend_has_data(false);
+    window.set_heart_trend_points(ModelRc::new(VecModel::from(
+        Vec::<HeartTrendPoint>::new(),
+    )));
+}
+
 fn reload_heart_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
-        Err(e) => warn!("cannot open DB: {e}"),
+        Err(e) => {
+            clear_heart_data(window);
+            warn!("cannot open DB: {e}");
+        }
         Ok(conn) => {
             let stats = match cobble_db::load_heart_stats(&conn, period, offset) {
                 Err(e) => {
+                    clear_heart_data(window);
                     warn!("load heart stats failed: {e}");
                     return;
                 }
@@ -891,6 +915,7 @@ fn reload_heart_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset
             };
             let trend = match cobble_db::load_heart_trend(&conn, period, offset) {
                 Err(e) => {
+                    clear_heart_data(window);
                     warn!("load heart trend failed: {e}");
                     return;
                 }
@@ -949,7 +974,8 @@ fn heart_trend_path(
     let point_count = points.len();
     let span = (max_bpm - min_bpm).max(1.0);
     let mut path = String::new();
-    let mut connected = false;
+    let mut previous: Option<(f32, f32)> = None;
+    const MARKER_HALF_WIDTH: f32 = 0.8;
 
     for (index, point) in points.iter().enumerate() {
         let value = if resting {
@@ -958,21 +984,26 @@ fn heart_trend_path(
             point.average_bpm
         };
         let Some(value) = value else {
-            connected = false;
+            previous = None;
             continue;
         };
         let x = if point_count <= 1 {
             50.0
         } else {
-            index as f32 * 100.0 / (point_count - 1) as f32
+            (index as f32 + 0.5) * 100.0 / point_count as f32
         };
         let y = ((max_bpm - value) / span * 100.0).clamp(0.0, 100.0);
-        if connected {
-            path.push_str(&format!(" L {x:.2} {y:.2}"));
-        } else {
-            path.push_str(&format!("M {x:.2} {y:.2}"));
-            connected = true;
+        if let Some((previous_x, previous_y)) = previous {
+            path.push_str(&format!("M {previous_x:.2} {previous_y:.2} L {x:.2} {y:.2}"));
         }
+        let marker_start = (x - MARKER_HALF_WIDTH).max(0.0);
+        let marker_end = (x + MARKER_HALF_WIDTH).min(100.0);
+        if path.is_empty() {
+            path.push_str(&format!("M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+        } else {
+            path.push_str(&format!(" M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+        }
+        previous = Some((x, y));
     }
     path
 }
