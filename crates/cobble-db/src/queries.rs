@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use chrono::{DateTime, Datelike, NaiveDate};
+use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use rusqlite::{Connection, params};
 
 use crate::time::{self, *};
@@ -692,6 +692,262 @@ pub fn load_sleep_avg_label_for_range(
 ) -> anyhow::Result<String> {
     let nights = fetch_sleep_nights(conn, range)?;
     Ok(sleep_labels(&nights, 1).1)
+}
+
+// ─── Heart-rate stats ────────────────────────────────────────────────────────
+
+const HEART_RATE_MIN_BPM: i64 = 30;
+const HEART_RATE_MAX_BPM: i64 = 220;
+
+#[derive(Debug, Clone, Copy)]
+struct HeartSample {
+    local_date: NaiveDate,
+    local_hour: u32,
+    bpm: u16,
+}
+
+/// Valid heart-rate samples in a watch-local date range. The SQL bounds only
+/// narrow the scan; each row's own UTC offset decides its exact local date.
+fn fetch_heart_samples(conn: &Connection, range: DateRange) -> anyhow::Result<Vec<HeartSample>> {
+    let (utc_start, utc_end) = range.utc_bounds();
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, utc_offset, heart_rate_bpm
+         FROM health_activity_minutes
+         WHERE start_ts >= ?1 - 43200
+           AND start_ts <= ?2 + 43200
+           AND heart_rate_bpm BETWEEN ?3 AND ?4
+         ORDER BY start_ts ASC",
+    )?;
+    let mut samples = Vec::new();
+    for row in stmt.query_map(
+        params![utc_start, utc_end, HEART_RATE_MIN_BPM, HEART_RATE_MAX_BPM],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )? {
+        let (start_ts, utc_offset, bpm) = row?;
+        let Some(timestamp) = DateTime::from_timestamp(start_ts + utc_offset, 0) else {
+            continue;
+        };
+        let local_date = timestamp.date_naive();
+        if range.contains(local_date) {
+            samples.push(HeartSample {
+                local_date,
+                local_hour: timestamp.hour(),
+                bpm: bpm as u16,
+            });
+        }
+    }
+    Ok(samples)
+}
+
+fn average_bpm<I>(values: I) -> Option<f64>
+where
+    I: IntoIterator<Item = f64>,
+{
+    let (sum, count) = values
+        .into_iter()
+        .fold((0.0, 0u64), |(sum, count), value| (sum + value, count + 1));
+    (count > 0).then_some(sum / count as f64)
+}
+
+fn bpm_label(value: Option<f64>) -> String {
+    value
+        .map(|bpm| format!("{} bpm", bpm.round() as i64))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn mean_bpm<I>(values: I) -> Option<f32>
+where
+    I: IntoIterator<Item = f32>,
+{
+    average_bpm(values.into_iter().map(f64::from)).map(|bpm| bpm as f32)
+}
+
+fn daily_heart_trend_points(
+    samples: &[HeartSample],
+    wellness: &[DailyWellness],
+    range: DateRange,
+) -> Vec<HeartTrendPointData> {
+    let mut totals = BTreeMap::<NaiveDate, (f64, u32)>::new();
+    for sample in samples {
+        let (sum, count) = totals.entry(sample.local_date).or_default();
+        *sum += f64::from(sample.bpm);
+        *count += 1;
+    }
+    let resting = wellness
+        .iter()
+        .filter_map(|day| day.resting_hr.map(|bpm| (day.date, f32::from(bpm))))
+        .collect::<BTreeMap<_, _>>();
+
+    range
+        .days()
+        .map(|date| {
+            let average_bpm = totals
+                .get(&date)
+                .map(|(sum, count)| (*sum / f64::from(*count)) as f32);
+            HeartTrendPointData {
+                label: date.format("%a").to_string(),
+                average_bpm,
+                resting_bpm: resting.get(&date).copied(),
+            }
+        })
+        .collect()
+}
+
+fn hourly_heart_trend_points(
+    samples: &[HeartSample],
+    wellness: &[DailyWellness],
+    day: NaiveDate,
+) -> Vec<HeartTrendPointData> {
+    let mut totals = [(0.0f64, 0u32); 24];
+    for sample in samples.iter().filter(|sample| sample.local_date == day) {
+        let (sum, count) = &mut totals[sample.local_hour as usize];
+        *sum += f64::from(sample.bpm);
+        *count += 1;
+    }
+    let resting = wellness
+        .iter()
+        .find(|entry| entry.date == day)
+        .and_then(|entry| entry.resting_hr)
+        .map(f32::from);
+
+    (0..24)
+        .map(|hour| {
+            let (sum, count) = totals[hour];
+            let average_bpm = (count > 0).then_some((sum / f64::from(count)) as f32);
+            let label = match hour {
+                0 => "12a",
+                6 => "6a",
+                12 => "12p",
+                18 => "6p",
+                _ => "",
+            };
+            HeartTrendPointData {
+                label: label.to_string(),
+                average_bpm,
+                // Resting HR is a daily overnight estimate, so show it as a
+                // reference line across the selected day.
+                resting_bpm: resting,
+            }
+        })
+        .collect()
+}
+
+fn weekly_heart_trend_points(
+    samples: &[HeartSample],
+    wellness: &[DailyWellness],
+    range: DateRange,
+) -> Vec<HeartTrendPointData> {
+    week_buckets(range)
+        .into_iter()
+        .enumerate()
+        .map(|(index, span)| {
+            let average_bpm = mean_bpm(
+                samples
+                    .iter()
+                    .filter(|sample| span.contains(sample.local_date))
+                    .map(|sample| f32::from(sample.bpm)),
+            );
+            let resting_bpm = mean_bpm(
+                wellness
+                    .iter()
+                    .filter(|day| span.contains(day.date))
+                    .filter_map(|day| day.resting_hr.map(f32::from)),
+            );
+            HeartTrendPointData {
+                label: format!("W{}", index + 1),
+                average_bpm,
+                resting_bpm,
+            }
+        })
+        .collect()
+}
+
+fn heart_trend_scale(points: &[HeartTrendPointData]) -> (f32, f32) {
+    let mut min_bpm = f32::INFINITY;
+    let mut max_bpm = f32::NEG_INFINITY;
+    for value in points
+        .iter()
+        .flat_map(|point| [point.average_bpm, point.resting_bpm])
+        .flatten()
+    {
+        min_bpm = min_bpm.min(value);
+        max_bpm = max_bpm.max(value);
+    }
+
+    if !min_bpm.is_finite() || !max_bpm.is_finite() {
+        return (40.0, 180.0);
+    }
+
+    let min_bpm = ((min_bpm - 5.0).max(0.0) / 10.0).floor() * 10.0;
+    let mut max_bpm = ((max_bpm + 5.0) / 10.0).ceil() * 10.0;
+    if max_bpm <= min_bpm {
+        max_bpm = min_bpm + 10.0;
+    }
+    (min_bpm, max_bpm)
+}
+
+/// Build average and resting heart-rate trend points for the active period.
+pub fn load_heart_trend(
+    conn: &Connection,
+    period: i32,
+    offset: i32,
+) -> anyhow::Result<HeartTrend> {
+    let range = range_for(period, offset);
+    let samples = fetch_heart_samples(conn, range)?;
+    let wellness = fetch_daily_wellness(conn, range)?;
+    let points = match period {
+        0 => hourly_heart_trend_points(&samples, &wellness, range.start),
+        2 => weekly_heart_trend_points(&samples, &wellness, range),
+        _ => daily_heart_trend_points(&samples, &wellness, range),
+    };
+    let (min_bpm, max_bpm) = heart_trend_scale(&points);
+    Ok(HeartTrend {
+        points,
+        min_bpm,
+        max_bpm,
+    })
+}
+
+/// Compute key heart-rate metrics for one navigated period.
+pub fn load_heart_stats(
+    conn: &Connection,
+    period: i32,
+    offset: i32,
+) -> anyhow::Result<HeartStats> {
+    let range = range_for(period, offset);
+    let samples = fetch_heart_samples(conn, range)?;
+    let wellness = fetch_daily_wellness(conn, range)?;
+    let resting: Vec<f64> = wellness
+        .iter()
+        .filter_map(|day| day.resting_hr.map(f64::from))
+        .collect();
+    let sleeping: Vec<f64> = wellness
+        .iter()
+        .filter_map(|day| day.avg_sleeping_hr.map(f64::from))
+        .collect();
+
+    let lowest = samples.iter().map(|sample| sample.bpm).min().map(f64::from);
+    let highest = samples.iter().map(|sample| sample.bpm).max().map(f64::from);
+    Ok(HeartStats {
+        average_label: bpm_label(average_bpm(
+            samples.iter().map(|sample| f64::from(sample.bpm)),
+        )),
+        resting_label: bpm_label(average_bpm(resting)),
+        sleeping_label: bpm_label(average_bpm(sleeping)),
+        lowest_label: bpm_label(lowest),
+        highest_label: bpm_label(highest),
+        samples_label: if samples.is_empty() {
+            "—".to_string()
+        } else {
+            format!("{} readings", format_number(samples.len() as i64))
+        },
+    })
 }
 
 // ─── Activity sessions ───────────────────────────────────────────────────────
@@ -1402,6 +1658,46 @@ mod tests {
         assert_eq!(wellness[0].steps, Some(0));
         assert_eq!(wellness[0].avg_sleeping_hr, Some(55.0));
         assert_eq!(wellness[0].resting_hr, None);
+    }
+
+    #[test]
+    fn heart_stats_aggregate_available_samples() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let sleep_start_utc = local(d(2026, 7, 3), 23, 0) - TZ;
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+
+        for (minute, bpm) in [(0, 60), (10, 62), (20, 64), (30, 66)] {
+            insert_minute_at(
+                &conn,
+                sleep_start_utc + minute * 60,
+                TZ,
+                0,
+                Some(bpm),
+            );
+        }
+        insert_minute_at(&conn, local(jul4, 12, 0) - TZ, TZ, 0, Some(100));
+        insert_minute_at(&conn, local(jul4, 13, 0) - TZ, TZ, 0, Some(120));
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let stats = load_heart_stats(&conn, 0, offset).unwrap();
+        // Overall samples follow their own watch-local calendar dates; the
+        // overnight samples belong to Jul 3 while the sleep-derived metrics
+        // below are keyed to the Jul 4 wake date.
+        assert_eq!(stats.average_label, "110 bpm");
+        assert_eq!(stats.resting_label, "63 bpm");
+        assert_eq!(stats.sleeping_label, "63 bpm");
+        assert_eq!(stats.lowest_label, "100 bpm");
+        assert_eq!(stats.highest_label, "120 bpm");
+        assert_eq!(stats.samples_label, "2 readings");
+
+        let trend = load_heart_trend(&conn, 0, offset).unwrap();
+        assert_eq!(trend.points.len(), 24);
+        assert_eq!(trend.points[12].label, "12p");
+        assert_eq!(trend.points[12].average_bpm, Some(100.0));
+        assert_eq!(trend.points[13].average_bpm, Some(120.0));
+        assert_eq!(trend.points[0].resting_bpm, Some(63.0));
+        assert_eq!(trend.points[23].resting_bpm, Some(63.0));
     }
 
     #[test]

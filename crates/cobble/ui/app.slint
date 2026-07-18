@@ -5,9 +5,9 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats } from "types.slint";
+import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
 import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl } from "widgets.slint";
-import { StepsChart, SleepChart, SessionList, SleepStatsPanel } from "charts.slint";
+import { StepsChart, SleepChart, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
     title: "Pebble";
@@ -45,6 +45,16 @@ export component AppWindow inherits Window {
     in property <bool> sleep-delta-positive: true;
     in property <SleepStats> sleep-stats;
 
+    // ── Heart tab data ──
+    in property <HeartStats> heart-stats;
+    in property <[HeartTrendPoint]> heart-trend-points;
+    in property <string> heart-average-path;
+    in property <string> heart-resting-path;
+    in property <string> heart-trend-max-label;
+    in property <string> heart-trend-mid-label;
+    in property <string> heart-trend-min-label;
+    in property <bool> heart-trend-has-data: false;
+
     // ── Config ──
     in-out property <string> cfg-address;
     in-out property <string> cfg-adapter: "hci0";
@@ -71,6 +81,8 @@ export component AppWindow inherits Window {
     in property <bool>   workout-can-forward: false;
     in property <string> sleep-period-label: "This Week";
     in property <bool>   sleep-can-forward: false;
+    in property <string> heart-period-label: "This Week";
+    in property <bool>   heart-can-forward: false;
 
     // ── Callbacks ──
     callback save-config();
@@ -92,6 +104,9 @@ export component AppWindow inherits Window {
     callback sleep-period-changed(int);
     callback sleep-go-back();
     callback sleep-go-forward();
+    callback heart-period-changed(int);
+    callback heart-go-back();
+    callback heart-go-forward();
     callback bar-tapped(int, int);
     callback sleep-bar-tapped(int, int);
 
@@ -102,6 +117,7 @@ export component AppWindow inherits Window {
     property <bool> confirm-recovery: false;
     property <int> workout-period: 1;
     property <int> sleep-period-val: 1;
+    property <int> heart-period: 1;
     property <int> sel-bar-start: -1;
     property <int> sel-sleep-bar-start: -1;
 
@@ -113,7 +129,7 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding-left: 20px; padding-right: 20px;
                 Text {
-                    text: root.active-tab == 0 ? "Pebble" : root.active-tab == 1 ? "Steps" : root.active-tab == 2 ? "Sleep" : "Settings";
+                    text: root.active-tab == 0 ? "Pebble" : root.active-tab == 1 ? "Steps" : root.active-tab == 2 ? "Sleep" : root.active-tab == 3 ? "Heart" : "Settings";
                     color: Palette.text; font-size: 20px; font-weight: 700; vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
@@ -297,9 +313,36 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // ── Heart tab ───────────────────────────────────────────────────
+            if active-tab == 3: VerticalLayout {
+
+                PeriodControl {
+                    period: root.heart-period;
+                    period-label: root.heart-period-label;
+                    can-forward: root.heart-can-forward;
+                    period-changed(p) => {
+                        root.heart-period = p;
+                        root.heart-period-changed(p);
+                    }
+                    go-back => { root.heart-go-back(); }
+                    go-forward => { root.heart-go-forward(); }
+                }
+
+                HeartStatsPanel {
+                    stats: root.heart-stats;
+                    trend-model: root.heart-trend-points;
+                    average-path: root.heart-average-path;
+                    resting-path: root.heart-resting-path;
+                    trend-max-label: root.heart-trend-max-label;
+                    trend-mid-label: root.heart-trend-mid-label;
+                    trend-min-label: root.heart-trend-min-label;
+                    trend-has-data: root.heart-trend-has-data;
+                }
+            }
+
             // ── Settings tab ─────────────────────────────────────────────────
             // settings-page 0 = category menu, 1 = Config detail.
-            if active-tab == 3 && root.settings-page == 0: Flickable {
+            if active-tab == 4 && root.settings-page == 0: Flickable {
                 viewport-height: settings-menu.preferred-height;
                 settings-menu := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
@@ -339,7 +382,7 @@ export component AppWindow inherits Window {
             }
 
             // ── Settings ▸ Config ─────────────────────────────────────────────
-            if active-tab == 3 && root.settings-page == 1: Flickable {
+            if active-tab == 4 && root.settings-page == 1: Flickable {
                 viewport-height: config-page.preferred-height;
                 config-page := VerticalLayout {
                     padding: 20px; spacing: 16px; alignment: start;
@@ -479,7 +522,7 @@ export component AppWindow inherits Window {
             }
 
             // ── Settings ▸ Device Actions ─────────────────────────────────────
-            if active-tab == 3 && root.settings-page == 2: Flickable {
+            if active-tab == 4 && root.settings-page == 2: Flickable {
                 viewport-height: actions-page.preferred-height;
                 actions-page := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
@@ -569,7 +612,16 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     VerticalLayout {
                         alignment: center; spacing: 2px; padding: 6px;
-                        Text { text: "♥"; font-size: 20px; horizontal-alignment: center; color: active-tab == 1 ? Palette.accent : Palette.muted; }
+                        Rectangle {
+                            horizontal-stretch: 1; height: 20px;
+                            Rectangle {
+                                x: (parent.width - 24px) / 2;
+                                width: 24px; height: 20px;
+                                Rectangle { x: 1px; y: 12px; width: 6px; height: 8px; border-radius: 1px; background: active-tab == 1 ? Palette.accent : Palette.muted; }
+                                Rectangle { x: 9px; y: 7px; width: 6px; height: 13px; border-radius: 1px; background: active-tab == 1 ? Palette.accent : Palette.muted; }
+                                Rectangle { x: 17px; y: 2px; width: 6px; height: 18px; border-radius: 1px; background: active-tab == 1 ? Palette.accent : Palette.muted; }
+                            }
+                        }
                         Text { text: "Workout"; font-size: 11px; horizontal-alignment: center; color: active-tab == 1 ? Palette.accent : Palette.muted; }
                     }
                     TouchArea { clicked => { active-tab = 1; } }
@@ -587,10 +639,19 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     VerticalLayout {
                         alignment: center; spacing: 2px; padding: 6px;
-                        Text { text: "⚙"; font-size: 20px; horizontal-alignment: center; color: active-tab == 3 ? Palette.accent : Palette.muted; }
-                        Text { text: "Settings"; font-size: 11px; horizontal-alignment: center; color: active-tab == 3 ? Palette.accent : Palette.muted; }
+                        Text { text: "♥"; font-size: 20px; horizontal-alignment: center; color: active-tab == 3 ? Palette.accent : Palette.muted; }
+                        Text { text: "Heart"; font-size: 11px; horizontal-alignment: center; color: active-tab == 3 ? Palette.accent : Palette.muted; }
                     }
-                    TouchArea { clicked => { active-tab = 3; settings-page = 0; confirm-factory = false; confirm-recovery = false; action-status = ""; action-error = false; } }
+                    TouchArea { clicked => { active-tab = 3; } }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        alignment: center; spacing: 2px; padding: 6px;
+                        Text { text: "⚙"; font-size: 20px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
+                        Text { text: "Settings"; font-size: 11px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
+                    }
+                    TouchArea { clicked => { active-tab = 4; settings-page = 0; confirm-factory = false; confirm-recovery = false; action-status = ""; action-error = false; } }
                 }
             }
         }

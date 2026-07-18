@@ -187,3 +187,36 @@ pub struct SleepStats {
     /// Lowest sleep duration label, e.g. "5h 45m"
     pub lowest_dur: String,
 }
+
+/// Key heart-rate metrics for one navigated date range.
+#[derive(Debug, Clone)]
+pub struct HeartStats {
+    /// Average of all valid per-minute heart-rate samples.
+    pub average_label: String,
+    /// Average of the qualifying overnight resting-HR estimates.
+    pub resting_label: String,
+    /// Average heart rate while asleep, when sleep data has matching samples.
+    pub sleeping_label: String,
+    /// Lowest valid per-minute heart-rate sample.
+    pub lowest_label: String,
+    /// Highest valid per-minute heart-rate sample.
+    pub highest_label: String,
+    /// Number of valid per-minute heart-rate samples in the range.
+    pub samples_label: String,
+}
+
+/// One point in the heart-rate trend for the active period filter.
+#[derive(Debug, Clone)]
+pub struct HeartTrendPointData {
+    pub label: String,
+    pub average_bpm: Option<f32>,
+    pub resting_bpm: Option<f32>,
+}
+
+/// Heart-rate trend points and the shared vertical chart scale.
+#[derive(Debug, Clone)]
+pub struct HeartTrend {
+    pub points: Vec<HeartTrendPointData>,
+    pub min_bpm: f32,
+    pub max_bpm: f32,
+}
