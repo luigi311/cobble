@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Cobble
+Comment=Manage your Pebble smartwatch
+Exec=cobble
+Terminal=false
+Categories=Utility;
+Keywords=Pebble;watch;Bluetooth;health;
