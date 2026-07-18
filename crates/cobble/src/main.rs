@@ -207,6 +207,26 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Sleep: bar tapped ────────────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let db2 = effective_db_path.clone();
+        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        window.on_sleep_bar_tapped(move |s, e| {
+            if let Some(w) = weak.upgrade() {
+                if s < 0 {
+                    // Tapping the selected bar again clears the selection and
+                    // restores stats for the whole period.
+                    reload_sleep_stats(&w, &db2, ps.get(), os.get());
+                } else if let Some(range) = sleep_bar_range(s as i64, e as i64) {
+                    reload_sleep_stats_for_range(&w, &db2, range);
+                } else {
+                    warn!("cannot determine date range for sleep bar {s}–{e}");
+                }
+            }
+        });
+    }
+
     // ── Sleep: go back ───────────────────────────────────────────────────────
     {
         let weak = window.as_weak();
@@ -700,9 +720,17 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
 }
 
 fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+    reload_sleep_stats_for_range(window, db_path, cobble_db::range_for(period, offset));
+}
+
+fn reload_sleep_stats_for_range(
+    window: &AppWindow,
+    db_path: &PathBuf,
+    range: cobble_db::DateRange,
+) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_sleep_stats(&conn, period, offset) {
+        Ok(conn) => match cobble_db::load_sleep_stats_for_range(&conn, range) {
             Err(e) => warn!("load sleep stats failed: {e}"),
             Ok(stats) => {
                 window.set_sleep_stats(SleepStats {
@@ -718,6 +746,15 @@ fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset
             }
         },
     }
+}
+
+/// Convert the UTC bounds carried by a chart bar back into its watch-local
+/// calendar range. Day bars cover one date; month-view week bars cover the
+/// (possibly partial) ISO week span represented by that bar.
+fn sleep_bar_range(start: i64, end: i64) -> Option<cobble_db::DateRange> {
+    let start = cobble_db::watch_local_date(start)?;
+    let end = cobble_db::watch_local_date(end)?;
+    (start <= end).then_some(cobble_db::DateRange { start, end })
 }
 
 // ─── Conversion ───────────────────────────────────────────────────────────────
