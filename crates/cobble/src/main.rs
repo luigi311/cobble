@@ -188,6 +188,15 @@ fn main() -> anyhow::Result<()> {
             brw.set(range);
             if let Some(w) = weak.upgrade() {
                 reload_workout_sessions(&w, &db2, pw.get(), ow.get(), range);
+                if s < 0 {
+                    reload_workout_avg_label(&w, &db2, pw.get(), ow.get());
+                } else if pw.get() > 0 {
+                    let Some(range) = bar_date_range(s as i64, e as i64) else {
+                        warn!("cannot determine date range for workout bar {s}–{e}");
+                        return;
+                    };
+                    reload_workout_avg_label_for_range(&w, &db2, range);
+                }
             }
         });
     }
@@ -203,6 +212,32 @@ fn main() -> anyhow::Result<()> {
                 update_sleep_nav(&w, p, 0);
                 reload_sleep_chart(&w, &db2, p, 0);
                 reload_sleep_stats(&w, &db2, p, 0);
+            }
+        });
+    }
+
+    // ── Sleep: bar tapped ────────────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let db2 = effective_db_path.clone();
+        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        window.on_sleep_bar_tapped(move |s, e| {
+            if let Some(w) = weak.upgrade() {
+                if s < 0 {
+                    // Tapping the selected bar again clears the selection and
+                    // restores stats for the whole period.
+                    reload_sleep_avg_label(&w, &db2, ps.get(), os.get());
+                    reload_sleep_stats(&w, &db2, ps.get(), os.get());
+                } else {
+                    let Some(range) = bar_date_range(s as i64, e as i64) else {
+                        warn!("cannot determine date range for sleep bar {s}–{e}");
+                        return;
+                    };
+                    if ps.get() > 0 {
+                        reload_sleep_avg_label_for_range(&w, &db2, range);
+                    }
+                    reload_sleep_stats_for_range(&w, &db2, range);
+                }
             }
         });
     }
@@ -649,6 +684,30 @@ fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offs
     }
 }
 
+fn reload_workout_avg_label(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => warn!("cannot open DB: {e}"),
+        Ok(conn) => match cobble_db::load_steps_chart(&conn, period, offset) {
+            Err(e) => warn!("load steps chart failed: {e}"),
+            Ok(chart) => window.set_steps_avg_label(chart.avg_label.into()),
+        },
+    }
+}
+
+fn reload_workout_avg_label_for_range(
+    window: &AppWindow,
+    db_path: &PathBuf,
+    range: cobble_db::DateRange,
+) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => warn!("cannot open DB: {e}"),
+        Ok(conn) => match cobble_db::load_steps_avg_label_for_range(&conn, range) {
+            Err(e) => warn!("load selected steps average failed: {e}"),
+            Ok(label) => window.set_steps_avg_label(label.into()),
+        },
+    }
+}
+
 fn reload_workout_sessions(
     window: &AppWindow,
     db_path: &PathBuf,
@@ -699,10 +758,42 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
     }
 }
 
-fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+fn reload_sleep_avg_label(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_sleep_stats(&conn, period, offset) {
+        Ok(conn) => match cobble_db::load_sleep_chart(&conn, period, offset) {
+            Err(e) => warn!("load sleep chart failed: {e}"),
+            Ok(chart) => window.set_sleep_avg_label(chart.avg_label.into()),
+        },
+    }
+}
+
+fn reload_sleep_avg_label_for_range(
+    window: &AppWindow,
+    db_path: &PathBuf,
+    range: cobble_db::DateRange,
+) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => warn!("cannot open DB: {e}"),
+        Ok(conn) => match cobble_db::load_sleep_avg_label_for_range(&conn, range) {
+            Err(e) => warn!("load selected sleep average failed: {e}"),
+            Ok(label) => window.set_sleep_avg_label(label.into()),
+        },
+    }
+}
+
+fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+    reload_sleep_stats_for_range(window, db_path, cobble_db::range_for(period, offset));
+}
+
+fn reload_sleep_stats_for_range(
+    window: &AppWindow,
+    db_path: &PathBuf,
+    range: cobble_db::DateRange,
+) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => warn!("cannot open DB: {e}"),
+        Ok(conn) => match cobble_db::load_sleep_stats_for_range(&conn, range) {
             Err(e) => warn!("load sleep stats failed: {e}"),
             Ok(stats) => {
                 window.set_sleep_stats(SleepStats {
@@ -718,6 +809,15 @@ fn reload_sleep_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset
             }
         },
     }
+}
+
+/// Convert the UTC bounds carried by a chart bar back into its watch-local
+/// calendar range. Day bars cover one date; month-view week bars cover the
+/// (possibly partial) ISO week span represented by that bar.
+fn bar_date_range(start: i64, end: i64) -> Option<cobble_db::DateRange> {
+    let start = cobble_db::watch_local_date(start)?;
+    let end = cobble_db::watch_local_date(end)?;
+    (start <= end).then_some(cobble_db::DateRange { start, end })
 }
 
 // ─── Conversion ───────────────────────────────────────────────────────────────

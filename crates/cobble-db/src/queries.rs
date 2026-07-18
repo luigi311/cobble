@@ -525,6 +525,15 @@ fn steps_labels(
     (label.clone(), label)
 }
 
+/// Average steps per elapsed day for a selected chart-bar range.
+pub fn load_steps_avg_label_for_range(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<String> {
+    let by_day = fetch_steps_by_day(conn, range)?;
+    Ok(steps_labels(&by_day, range, 1).1)
+}
+
 // ─── Sleep chart ─────────────────────────────────────────────────────────────
 
 pub fn load_sleep_chart(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepChart> {
@@ -674,6 +683,15 @@ fn sleep_labels(nights: &[Night], period: i32) -> (String, String) {
         };
         (summary, format!("AVG {} / night", format_duration(avg)))
     }
+}
+
+/// Average sleep per night for a selected chart-bar range.
+pub fn load_sleep_avg_label_for_range(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<String> {
+    let nights = fetch_sleep_nights(conn, range)?;
+    Ok(sleep_labels(&nights, 1).1)
 }
 
 // ─── Activity sessions ───────────────────────────────────────────────────────
@@ -912,7 +930,16 @@ pub fn fetch_daily_resting_hr(
 
 /// Compute key statistics from sleep data for the current period.
 pub fn load_sleep_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<SleepStats> {
-    let range = range_for(period, offset);
+    load_sleep_stats_for_range(conn, range_for(period, offset))
+}
+
+/// Compute key statistics from sleep data inside an explicit watch-local date
+/// range. This is used when a chart bar is selected, so the stats can describe
+/// one day or one month-view week instead of the whole navigated period.
+pub fn load_sleep_stats_for_range(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<SleepStats> {
     let nights = fetch_sleep_nights(conn, range)?;
 
     if nights.is_empty() {
@@ -1497,6 +1524,75 @@ mod tests {
         assert_eq!(stats.avg_wakeup, "7:00 AM");
         assert_eq!(stats.highest_dur, "7h 0m");
         assert_eq!(stats.lowest_dur, "7h 0m");
+    }
+
+    #[test]
+    fn sleep_stats_explicit_range_scopes_selected_bar() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+        insert_session(&conn, 1, local(jul4, 22, 0), 6 * 3600);
+        insert_session(&conn, 1, local(jul5, 21, 0), 10 * 3600);
+
+        let selected_day = load_sleep_stats_for_range(&conn, DateRange::day(jul5)).unwrap();
+        assert_eq!(selected_day.highest_dur, "6h 0m");
+        assert_eq!(selected_day.lowest_dur, "6h 0m");
+        assert_eq!(selected_day.avg_bedtime, "10:00 PM");
+        assert_eq!(
+            load_sleep_avg_label_for_range(&conn, DateRange::day(jul5)).unwrap(),
+            "AVG 6h 0m / night"
+        );
+
+        // This represents a month-view bar whose week span covers Jul 4–5;
+        // the neighboring night's data must not leak into its key stats.
+        let selected_week = load_sleep_stats_for_range(
+            &conn,
+            DateRange {
+                start: jul4,
+                end: jul5,
+            },
+        )
+        .unwrap();
+        assert_eq!(selected_week.highest_dur, "8h 0m");
+        assert_eq!(selected_week.lowest_dur, "6h 0m");
+        assert_eq!(
+            load_sleep_avg_label_for_range(
+                &conn,
+                DateRange {
+                    start: jul4,
+                    end: jul5,
+                },
+            )
+            .unwrap(),
+            "AVG 7h 0m / night"
+        );
+    }
+
+    #[test]
+    fn steps_avg_label_explicit_range_scopes_selected_bar() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+        insert_minute(&conn, local(jul4, 12, 0), 100);
+        insert_minute(&conn, local(jul5, 12, 0), 300);
+
+        assert_eq!(
+            load_steps_avg_label_for_range(&conn, DateRange::day(jul5)).unwrap(),
+            "avg 300 / day"
+        );
+        assert_eq!(
+            load_steps_avg_label_for_range(
+                &conn,
+                DateRange {
+                    start: jul4,
+                    end: jul5,
+                },
+            )
+            .unwrap(),
+            "avg 200 / day"
+        );
     }
 
     #[test]

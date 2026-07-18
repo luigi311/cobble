@@ -52,6 +52,11 @@ pub fn watch_today() -> NaiveDate {
         .unwrap_or_default()
 }
 
+/// Convert a UTC epoch timestamp into its watch-local calendar date.
+pub fn watch_local_date(timestamp: i64) -> Option<NaiveDate> {
+    DateTime::from_timestamp(timestamp + watch_offset(), 0).map(|dt| dt.date_naive())
+}
+
 /// Real UTC timestamp of a watch-local wall-clock time (local = UTC + offset).
 pub(crate) fn local_ts(date: NaiveDate, h: u32, m: u32, s: u32) -> i64 {
     date.and_hms_opt(h, m, s)

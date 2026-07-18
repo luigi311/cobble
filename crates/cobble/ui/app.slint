@@ -93,6 +93,7 @@ export component AppWindow inherits Window {
     callback sleep-go-back();
     callback sleep-go-forward();
     callback bar-tapped(int, int);
+    callback sleep-bar-tapped(int, int);
 
     // ── Internal state ──
     property <int> active-tab: 0;
@@ -288,6 +289,7 @@ export component AppWindow inherits Window {
                     delta-label: root.sleep-delta-label;
                     delta-positive: root.sleep-delta-positive;
                     selected-bar-start <=> root.sel-sleep-bar-start;
+                    bar-tapped(s, e) => { root.sleep-bar-tapped(s, e); }
                 }
 
                 SleepStatsPanel {
