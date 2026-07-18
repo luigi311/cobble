@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::endpoints::app_message::AppMessageValue;
-use crate::endpoints::blob_db::BlobDB2Incoming;
+use crate::endpoints::blob_db::{BlobDB2Incoming, BlobDBStatus};
 use crate::endpoints::datalog::{DatalogData, DatalogSession};
 use crate::endpoints::music::MusicAction;
 use crate::endpoints::phone_control::PhoneAction;
@@ -95,6 +95,12 @@ pub(crate) struct PebbleInner {
     pub(crate) pending_order: VecDeque<u8>,
     /// BlobDB2 token → future resolved when watch sends the matching response
     pub(crate) blobdb2_pending: HashMap<u16, oneshot::Sender<BlobDB2Incoming>>,
+    /// Regular BlobDB token → status returned by the watch.
+    pub(crate) blobdb_pending: HashMap<u16, oneshot::Sender<BlobDBStatus>>,
+    /// Latest raw records observed through BlobDB2, keyed by wire DB and key.
+    pub(crate) observed_preferences: HashMap<(u8, String), Vec<u8>>,
+    /// Monotonic notification of BlobDB2 SyncDone messages: `(generation, db)`.
+    pub(crate) sync_done_tx: tokio::sync::watch::Sender<(u64, u8)>,
     /// Futures awaiting a WatchVersionResponse (endpoint 16). All are resolved
     /// when the next response arrives.
     pub(crate) watch_version_pending: Vec<oneshot::Sender<WatchVersionInfo>>,
@@ -112,6 +118,7 @@ pub(crate) struct PebbleInner {
 
 impl PebbleInner {
     pub(crate) fn new() -> Self {
+        let (sync_done_tx, _) = tokio::sync::watch::channel((0, 0));
         Self {
             app_message_handlers: Vec::new(),
             ack_handlers: Vec::new(),
@@ -128,6 +135,9 @@ impl PebbleInner {
             pending: HashMap::new(),
             pending_order: VecDeque::new(),
             blobdb2_pending: HashMap::new(),
+            blobdb_pending: HashMap::new(),
+            observed_preferences: HashMap::new(),
+            sync_done_tx,
             watch_version_pending: Vec::new(),
             watch_color_pending: Vec::new(),
             txn: 0,

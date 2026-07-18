@@ -1,0 +1,17 @@
+# Canonical synthetic fixtures. These are not physical-watch captures.
+# Source checkout: /home/luigi311/Git/mobileapp
+# Source revision: 1399c4b73dc993697a37ce5dcdf9f81180602405
+# Source file: libpebble3/src/commonMain/kotlin/io/rebble/libpebblecommon/database/entity/WatchPrefEntity.kt
+# Legacy variant source revision: 152714b5658363ecd268eca3517a4941d52b51b9
+# key model normalized-value wire-hex
+clock24h standard bool:true 01
+lightDynamicIntensity standard bool:true 01
+langEnglish standard bool:false 00
+lightTimeoutMs standard number:5000 88130000
+timelineQuickViewBeforeTimeMin standard number:10 0a00
+lightPreset standard number:2 02
+lightDynamicMode standard number:3 03
+language standard number:9 09
+textStyle standard number:2 02
+textStyle emery number:2 03
+textStyle gabbro number:0 01

@@ -19,7 +19,7 @@ use std::{
 
 use chrono::Local;
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{Mutex as AsyncMutex, oneshot, watch},
     time::timeout,
 };
 use tracing::{debug, warn};
@@ -34,7 +34,8 @@ use crate::{
         blob_db::{
             build_blobdb2_mark_all_dirty,
             build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_str_insert, build_notification,
-            build_weather_blob, build_weather_prefs_blob, BlobDBId, NotificationCategory, WeatherType,
+            build_weather_blob, build_weather_prefs_blob, BlobDB2Incoming, BlobDBId, BlobDBStatus,
+            NotificationCategory, WeatherType,
         },
         datalog::build_report_sessions,
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
@@ -78,6 +79,15 @@ pub struct Pebble {
     inner: Arc<Mutex<PebbleInner>>,
     connected_tx: Arc<watch::Sender<bool>>,
     connected_rx: watch::Receiver<bool>,
+    preference_operation: Arc<AsyncMutex<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceWriteConfirmation {
+    /// The watch accepted the BlobDB write; legacy watches cannot be refreshed.
+    Accepted,
+    /// The watch accepted the write and returned the exact bytes during readback.
+    ReadBack,
 }
 
 impl Pebble {
@@ -89,6 +99,7 @@ impl Pebble {
             inner: Arc::new(Mutex::new(PebbleInner::new())),
             connected_tx: Arc::new(tx),
             connected_rx: rx,
+            preference_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -615,6 +626,164 @@ impl Pebble {
         self.fetch_health_data()
     }
 
+    /// Write one known device preference using official libpebble database
+    /// routing, wait for the watch's BlobDB status, then verify readback when
+    /// BlobDB2 synchronization is available.
+    pub async fn write_preference_confirmed(
+        &self,
+        key: &str,
+        value: &[u8],
+    ) -> Result<PreferenceWriteConfirmation, PebbleError> {
+        use crate::endpoints::blob_db::outgoing_preference_database;
+
+        let _operation = self.preference_operation.lock().await;
+        let db = outgoing_preference_database(key);
+        self.write_blobdb_record(db, key, value).await?;
+
+        if self.inner.lock().unwrap().blob_db_version < 1 {
+            return Ok(PreferenceWriteConfirmation::Accepted);
+        }
+
+        self.refresh_watch_preferences_unlocked().await?;
+        let readback = self
+            .inner
+            .lock()
+            .unwrap()
+            .observed_preferences
+            .get(&(BlobDBId::WatchPrefs as u8, key.to_owned()))
+            .cloned();
+        match readback {
+            Some(raw) if raw == value => Ok(PreferenceWriteConfirmation::ReadBack),
+            Some(raw) => Err(PebbleError::Other(format!(
+                "preference {key} readback mismatch: wrote {} bytes, received {} bytes",
+                value.len(), raw.len()
+            ))),
+            None => Err(PebbleError::Other(format!(
+                "preference {key} was not returned during readback"
+            ))),
+        }
+    }
+
+    async fn write_blobdb_record(
+        &self,
+        db: BlobDBId,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let token = rand_u16();
+        let payload = build_blobdb_str_insert(db, key, value, token)
+            .map_err(|error| PebbleError::Other(error.into()))?;
+        let (sender, receiver) = oneshot::channel();
+        self.inner.lock().unwrap().blobdb_pending.insert(token, sender);
+        if let Err(error) = self.send_pebble(Endpoint::BlobDb, &payload) {
+            self.inner.lock().unwrap().blobdb_pending.remove(&token);
+            return Err(error);
+        }
+        let mut connected = self.connected_rx.clone();
+        let status = match timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                response = receiver => response.map_err(|_| PebbleError::Other("BlobDB response channel closed".into())),
+                _ = connected.changed() => Err(PebbleError::NotConnected),
+            }
+        }).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                self.inner.lock().unwrap().blobdb_pending.remove(&token);
+                return Err(error);
+            }
+            Err(_) => {
+                self.inner.lock().unwrap().blobdb_pending.remove(&token);
+                return Err(PebbleError::Timeout(format!("BlobDB write for {key}")));
+            }
+        };
+        if status == BlobDBStatus::Success {
+            Ok(())
+        } else {
+            Err(PebbleError::Other(format!(
+                "watch rejected preference {key}: {status:?}"
+            )))
+        }
+    }
+
+    /// Request a full WatchPrefs refresh and wait for both command acceptance
+    /// and the matching database's SyncDone notification.
+    pub async fn refresh_watch_preferences(&self) -> Result<(), PebbleError> {
+        let _operation = self.preference_operation.lock().await;
+        self.refresh_watch_preferences_unlocked().await
+    }
+
+    async fn refresh_watch_preferences_unlocked(&self) -> Result<(), PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        if self.inner.lock().unwrap().blob_db_version < 1 {
+            return Err(PebbleError::Other(
+                "watch does not support BlobDB2 WatchPrefs refresh".into(),
+            ));
+        }
+
+        let token = rand_u16();
+        let mut sync_done = self.inner.lock().unwrap().sync_done_tx.subscribe();
+        let baseline_generation = sync_done.borrow().0;
+        let (sender, receiver) = oneshot::channel();
+        self.inner.lock().unwrap().blobdb2_pending.insert(token, sender);
+        if let Err(error) = self.send_pebble(
+            Endpoint::BlobDbV2,
+            &build_blobdb2_mark_all_dirty(token, BlobDBId::WatchPrefs),
+        ) {
+            self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+            return Err(error);
+        }
+        let mut connected = self.connected_rx.clone();
+        let response = match timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                response = receiver => response.map_err(|_| PebbleError::Other("BlobDB2 response channel closed".into())),
+                _ = connected.changed() => Err(PebbleError::NotConnected),
+            }
+        }).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+                return Err(error);
+            }
+            Err(_) => {
+                self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+                return Err(PebbleError::Timeout("BlobDB2 MarkAllDirty".into()));
+            }
+        };
+        match response {
+            BlobDB2Incoming::MarkAllDirtyResponse { status, .. }
+                if status == BlobDBStatus::Success as u8 => {}
+            BlobDB2Incoming::MarkAllDirtyResponse { status, .. } => {
+                let status = BlobDBStatus::from_u8(status)
+                    .map_or_else(|| format!("unknown status {status}"), |status| format!("{status:?}"));
+                return Err(PebbleError::Other(format!("WatchPrefs refresh rejected: {status}")));
+            }
+            other => return Err(PebbleError::Other(format!("unexpected BlobDB2 response: {other:?}"))),
+        }
+
+        let mut connected = self.connected_rx.clone();
+        match timeout(Duration::from_secs(30), async {
+            loop {
+                let (generation, db) = *sync_done.borrow_and_update();
+                if generation > baseline_generation && db == BlobDBId::WatchPrefs as u8 {
+                    return Ok::<(), PebbleError>(());
+                }
+                tokio::select! {
+                    changed = sync_done.changed() => changed.map_err(|_| PebbleError::Other("WatchPrefs sync channel closed".into()))?,
+                    _ = connected.changed() => return Err(PebbleError::NotConnected),
+                }
+            }
+        }).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(PebbleError::Timeout("WatchPrefs SyncDone".into())),
+        }
+    }
+
     /// Ask the watch to flush pending health records via DataLog sessions.
     pub fn fetch_health_data(&self) -> Result<(), PebbleError> {
         if !self.is_connected() {
@@ -647,10 +816,7 @@ impl Pebble {
             ));
         }
         debug!("requesting WatchPrefs BlobDB2 re-sync (MarkAllDirty)");
-        self.send_pebble(
-            Endpoint::BlobDbV2,
-            &build_blobdb2_mark_all_dirty(rand_u16(), BlobDBId::WatchPrefs),
-        )
+        self.refresh_watch_preferences().await
     }
 
     fn send_pebble(&self, endpoint: Endpoint, payload: &[u8]) -> Result<(), PebbleError> {

@@ -67,6 +67,26 @@ pub enum BlobDBId {
     WatchPrefs = 12,
 }
 
+/// Official libpebble routing: health settings are written through the legacy
+/// HealthParams database even when modern watches report them via WatchPrefs.
+pub fn outgoing_preference_database(key: &str) -> BlobDBId {
+    if is_health_preference(key) { BlobDBId::HealthParams } else { BlobDBId::WatchPrefs }
+}
+
+/// Normalize incoming WatchPrefs health records into the logical HealthParams
+/// store, matching official libpebble's `effectiveDatabaseFor` behavior.
+pub fn logical_incoming_database(db: u8, key: &str) -> u8 {
+    if db == BlobDBId::WatchPrefs as u8 && is_health_preference(key) {
+        BlobDBId::HealthParams as u8
+    } else {
+        db
+    }
+}
+
+pub fn is_health_preference(key: &str) -> bool {
+    matches!(key, "activityPreferences" | "unitsDistance" | "hrmPreferences" | "heartRatePreferences")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BlobDBStatus {
@@ -545,5 +565,30 @@ pub fn parse_blobdb2_incoming(payload: &[u8]) -> Option<BlobDB2Incoming> {
             Some(BlobDB2Incoming::StartSyncResponse { token, status: rest[0] })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod preference_routing_tests {
+    use super::*;
+
+    #[test]
+    fn health_writes_use_health_params_and_modern_reads_normalize_to_it() {
+        for key in ["activityPreferences", "unitsDistance", "hrmPreferences", "heartRatePreferences"] {
+            assert_eq!(outgoing_preference_database(key), BlobDBId::HealthParams);
+            assert_eq!(
+                logical_incoming_database(BlobDBId::WatchPrefs as u8, key),
+                BlobDBId::HealthParams as u8
+            );
+        }
+    }
+
+    #[test]
+    fn general_preferences_remain_in_watch_prefs() {
+        assert_eq!(outgoing_preference_database("clock24h"), BlobDBId::WatchPrefs);
+        assert_eq!(
+            logical_incoming_database(BlobDBId::WatchPrefs as u8, "clock24h"),
+            BlobDBId::WatchPrefs as u8
+        );
     }
 }

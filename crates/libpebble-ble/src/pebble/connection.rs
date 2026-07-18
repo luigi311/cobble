@@ -15,8 +15,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::{dispatch, Pebble};
 use crate::endpoints::blob_db::{
-    build_blobdb2_mark_all_dirty, build_blobdb2_version,
-    BlobDB2Incoming, BlobDBId, BlobDBStatus,
+    build_blobdb2_version, BlobDB2Incoming, BlobDBStatus,
 };
 use crate::endpoints::Endpoint;
 use crate::error::PebbleError;
@@ -199,11 +198,10 @@ impl Pebble {
         let blob_db_version = self.negotiate_blobdb2_version().await;
         self.inner.lock().unwrap().blob_db_version = blob_db_version;
         if blob_db_version >= 1 {
-            let _ = self.send_pebble(
-                Endpoint::BlobDbV2,
-                &build_blobdb2_mark_all_dirty(dispatch::rand_u16(), BlobDBId::WatchPrefs),
-            );
-            debug!("BlobDB2 v{blob_db_version}: MarkAllDirty sent for WatchPrefs");
+            match self.refresh_watch_preferences().await {
+                Ok(()) => debug!("BlobDB2 v{blob_db_version}: WatchPrefs sync complete"),
+                Err(error) => warn!("initial WatchPrefs sync failed: {error}"),
+            }
         }
 
         // 9. Monitor device events for disconnect, with a keepalive poll fallback.

@@ -1,0 +1,12 @@
+# Canonical synthetic fixtures. These are not physical-watch captures.
+# Source checkout: /home/luigi311/Git/mobileapp
+# Source revision: 1399c4b73dc993697a37ce5dcdf9f81180602405
+# Source file: libpebble3/src/commonMain/kotlin/io/rebble/libpebblecommon/database/entity/HealthSettings.kt
+# record firmware/value wire-hex
+activityPreferences defaults a406581b0000002300
+unitsDistance metric 00
+unitsDistance imperial 01
+hrmPreferences pre-4.9.146 01
+hrmPreferences 4.9.146..4.9.149 0101
+hrmPreferences 4.9.150+ 010101
+heartRatePreferences defaults 4664be829aac

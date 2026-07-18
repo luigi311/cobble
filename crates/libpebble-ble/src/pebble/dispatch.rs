@@ -145,10 +145,16 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
         }
         Some(Endpoint::BlobDb) => {
             if let Some((token, status)) = parse_blobdb_response(payload) {
-                match BlobDBStatus::from_u8(status) {
+                let parsed = BlobDBStatus::from_u8(status);
+                match parsed {
                     Some(BlobDBStatus::Success) => debug!("BlobDB token={token} -> Success"),
                     Some(s) => warn!("BlobDB token={token} -> {s:?}"),
                     None => debug!("BlobDB token={token} -> unknown status {status}"),
+                }
+                if let Some(status) = parsed
+                    && let Some(sender) = inner.lock().unwrap().blobdb_pending.remove(&token)
+                {
+                    let _ = sender.send(status);
                 }
             }
         }
@@ -415,7 +421,11 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
                 build_blobdb2_write_response(w.token, BlobDBStatus::Success)
             };
             blobdb2_send(inner, resp);
-            let handlers: Vec<_> = inner.lock().unwrap().watch_pref_handlers.clone();
+            let handlers: Vec<_> = {
+                let mut state = inner.lock().unwrap();
+                state.observed_preferences.insert((w.db, key.clone()), w.value.clone());
+                state.watch_pref_handlers.clone()
+            };
             for h in handlers {
                 h(w.db, key.clone(), w.value.clone());
             }
@@ -423,6 +433,10 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
         BlobDB2Incoming::SyncDone { token, db } => {
             debug!("BlobDB2 SyncDone db={db}");
             blobdb2_send(inner, build_blobdb2_syncdone_response(token, BlobDBStatus::Success));
+            inner.lock().unwrap().sync_done_tx.send_modify(|(generation, completed_db)| {
+                *generation = generation.wrapping_add(1);
+                *completed_db = db;
+            });
         }
         other => {
             if let Some(token) = other.response_token() {
