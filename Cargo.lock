@@ -779,17 +779,14 @@ dependencies = [
 
 [[package]]
 name = "cobble"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cobble-client",
- "cobble-config",
  "cobble-db",
- "serde",
  "slint",
  "slint-build",
  "tokio",
- "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -833,12 +830,13 @@ dependencies = [
 
 [[package]]
 name = "cobbled"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "cobble-config",
+ "cobble-contracts",
  "cobble-db",
  "fastrand",
  "futures",

@@ -55,7 +55,7 @@ export component AppWindow inherits Window {
     in property <string> heart-trend-min-label;
     in property <bool> heart-trend-has-data: false;
 
-    // ── Config ──
+    // ── Daemon Config ──
     in-out property <string> cfg-address;
     in-out property <string> cfg-adapter: "hci0";
     in-out property <bool>   cfg-verbose: false;
@@ -73,6 +73,7 @@ export component AppWindow inherits Window {
     in property <string> cfg-intervals-status;
     in property <bool> cfg-intervals-status-error: false;
     in property <string> save-status: "";
+    in property <bool> save-status-error: false;
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
 
@@ -112,7 +113,7 @@ export component AppWindow inherits Window {
 
     // ── Internal state ──
     property <int> active-tab: 0;
-    property <int> settings-page: 0;   // 0 = category list, 1 = config, 2 = device actions
+    property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions
     property <bool> confirm-factory: false;
     property <bool> confirm-recovery: false;
     property <int> workout-period: 1;
@@ -341,7 +342,7 @@ export component AppWindow inherits Window {
             }
 
             // ── Settings tab ─────────────────────────────────────────────────
-            // settings-page 0 = category menu, 1 = Config detail.
+            // settings-page 0 = category menu, 1 = Daemon Config detail.
             if active-tab == 4 && root.settings-page == 0: Flickable {
                 viewport-height: settings-menu.preferred-height;
                 settings-menu := VerticalLayout {
@@ -369,7 +370,7 @@ export component AppWindow inherits Window {
 
                     // Category list
                     SettingsRow {
-                        label: "Config";
+                        label: "Daemon Config";
                         sublabel: "Watch address, BLE adapter, logging, database";
                         clicked => { root.settings-page = 1; }
                     }
@@ -381,7 +382,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Settings ▸ Config ─────────────────────────────────────────────
+            // ── Settings ▸ Daemon Config ──────────────────────────────────────
             if active-tab == 4 && root.settings-page == 1: Flickable {
                 viewport-height: config-page.preferred-height;
                 config-page := VerticalLayout {
@@ -395,7 +396,7 @@ export component AppWindow inherits Window {
                             Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
                             TouchArea { clicked => { root.settings-page = 0; } }
                         }
-                        Text { text: "Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                        Text { text: "Daemon Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
                     }
 
                     // Watch Address: scan button + device list
@@ -510,12 +511,12 @@ export component AppWindow inherits Window {
                     }
                     Rectangle {
                         height: 52px; border-radius: 10px; background: Palette.accent;
-                        Text { text: "Save & Apply"; color: white; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "Save Configuration"; color: white; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         TouchArea { clicked => { root.save-config(); } }
                     }
                     if root.save-status != "": Text {
                         text: root.save-status;
-                        color: root.save-status == "Saved." ? Palette.green : Palette.red;
+                        color: root.save-status-error ? Palette.red : Palette.green;
                         font-size: 13px; horizontal-alignment: center;
                     }
                 }

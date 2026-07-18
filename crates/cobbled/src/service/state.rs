@@ -10,6 +10,7 @@ use libpebble_ble::{
 };
 
 use cobble_db::AppDb;
+use cobble_config::Config;
 use tokio::sync::mpsc;
 use zbus::zvariant::{OwnedValue, Value};
 
@@ -40,6 +41,7 @@ pub enum DaemonEvent {
     HealthHeartRate(HeartRatePreferences),
     HealthUnits(bool),
     WatchSetting { key: String, value: WatchPrefValue },
+    DaemonConfigChanged(u64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +106,10 @@ pub(crate) struct DaemonState {
     pub(crate) address: String,
     pub(crate) adapter: String,
     pub(crate) config_path: PathBuf,
+    pub(crate) config: Config,
+    pub(crate) config_error: Option<String>,
+    pub(crate) active_database_path: PathBuf,
+    pub(crate) active_verbose: bool,
     pub(crate) pebble: Option<Arc<Pebble>>,
     pub(crate) connected: bool,
     pub(crate) stopping: bool,

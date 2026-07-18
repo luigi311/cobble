@@ -19,7 +19,7 @@
 //! For signal subscriptions, obtain a [`CobbleDaemonProxy`] via
 //! [`CobbleClient::proxy`] and call the generated `receive_*()` methods.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub use cobble_contracts::*;
 use zbus::{Connection, proxy};
@@ -34,6 +34,93 @@ pub type WireDict = HashMap<i32, (String, OwnedValue)>;
 
 /// Self-describing `a{sv}` map (watch version/color/health-profile/settings).
 pub type VarDict = HashMap<String, OwnedValue>;
+
+fn wire_value(value: impl Into<zvariant::Value<'static>>) -> Result<OwnedValue> {
+    OwnedValue::try_from(value.into()).map_err(Error::Variant)
+}
+
+fn required_string(map: &VarDict, key: &str) -> Result<String> {
+    map.get(key)
+        .and_then(|value| <&str>::try_from(value).ok())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_bool(map: &VarDict, key: &str) -> Result<bool> {
+    map.get(key)
+        .and_then(|value| bool::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_u16(map: &VarDict, key: &str) -> Result<u16> {
+    map.get(key)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_u64(map: &VarDict, key: &str) -> Result<u64> {
+    map.get(key)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn decode_daemon_config(map: &VarDict) -> Result<DaemonConfigSnapshot> {
+    let api_version = required_u16(map, "api_version")?;
+    if api_version != CONFIG_API_VERSION {
+        return Err(Error::Failure(format!(
+            "unsupported daemon-config API version {api_version}"
+        )));
+    }
+    let database_path = required_string(map, "database_path")?;
+    Ok(DaemonConfigSnapshot {
+        api_version,
+        revision: required_u64(map, "revision")?,
+        config_path: required_string(map, "config_path")?,
+        active_database_path: required_string(map, "active_database_path")?,
+        resolved_database_path: required_string(map, "resolved_database_path")?,
+        active_verbose: required_bool(map, "active_verbose")?,
+        error: map.get("error_message").and_then(|value| <&str>::try_from(value).ok()).map(|message| ConfigError {
+            kind: ConfigErrorKind::InvalidData,
+            field: None,
+            message: message.to_owned(),
+        }),
+        config: DaemonConfig {
+            address: required_string(map, "address")?,
+            adapter: required_string(map, "adapter")?,
+            verbose: required_bool(map, "verbose")?,
+            database_path: (!database_path.is_empty()).then_some(database_path),
+            intervals_icu: IntervalsIcuConfig {
+                enabled: required_bool(map, "intervals_enabled")?,
+                athlete_id: required_string(map, "intervals_athlete_id")?,
+                api_key_configured: required_bool(map, "intervals_api_key_configured")?,
+            },
+        },
+    })
+}
+
+fn encode_daemon_config_patch(patch: DaemonConfigPatch) -> Result<VarDict> {
+    let mut wire = VarDict::new();
+    if let Some(value) = patch.address { wire.insert("address".into(), wire_value(value)?); }
+    if let Some(value) = patch.adapter { wire.insert("adapter".into(), wire_value(value)?); }
+    if let Some(value) = patch.verbose { wire.insert("verbose".into(), wire_value(value)?); }
+    if let Some(value) = patch.database_path {
+        wire.insert("database_path".into(), wire_value(value.unwrap_or_default())?);
+    }
+    if let Some(intervals) = patch.intervals_icu {
+        if let Some(value) = intervals.enabled { wire.insert("intervals_enabled".into(), wire_value(value)?); }
+        if let Some(value) = intervals.athlete_id { wire.insert("intervals_athlete_id".into(), wire_value(value)?); }
+        match intervals.api_key {
+            Some(SecretPatch::Replace(value)) => {
+                wire.insert("intervals_api_key_replace".into(), wire_value(value)?);
+            }
+            Some(SecretPatch::Clear) => {
+                wire.insert("intervals_api_key_clear".into(), wire_value(true)?);
+            }
+            None => {}
+        }
+    }
+    Ok(wire)
+}
 
 /// Extract a string field from an `a{sv}` map, or `""` if absent/not a string.
 fn var_str(map: &VarDict, key: &str) -> String {
@@ -69,6 +156,8 @@ pub enum StatusEvent {
     Battery(i16),
     /// Fresh watch identity info (emitted after the link comes up).
     WatchInfo(WatchInfo),
+    /// The effective daemon configuration or its on-disk error changed.
+    DaemonConfigChanged(u64),
 }
 
 /// Typed zbus proxy for `org.cobble.Daemon`.
@@ -112,6 +201,11 @@ pub trait CobbleDaemon {
     async fn notify(&self, title: &str, body: &str, subtitle: &str) -> Result<u32>;
     async fn ping(&self) -> Result<bool>;
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>>;
+    async fn get_daemon_config(&self) -> Result<VarDict>;
+    async fn update_daemon_config(&self, expected_revision: u64, patch: VarDict) -> Result<VarDict>;
+
+    #[zbus(signal)]
+    fn daemon_config_changed(&self, revision: u64) -> Result<()>;
 
     // ---- Health ----
 
@@ -337,6 +431,39 @@ impl CobbleClient {
 
     pub async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>> {
         self.proxy().await?.scan(timeout_secs).await
+    }
+
+    pub async fn get_daemon_config(&self) -> Result<DaemonConfigSnapshot> {
+        let map = self.proxy().await?.get_daemon_config().await?;
+        decode_daemon_config(&map)
+    }
+
+    pub async fn update_daemon_config(
+        &self,
+        patch: DaemonConfigPatch,
+    ) -> Result<DaemonConfigUpdate> {
+        let expected_revision = patch.expected_revision;
+        let wire = encode_daemon_config_patch(patch)?;
+        let map = self
+            .proxy()
+            .await?
+            .update_daemon_config(expected_revision, wire)
+            .await?;
+        let snapshot = decode_daemon_config(&map)?;
+        let mut fields = BTreeMap::new();
+        for (key, value) in &map {
+            let Some(field) = key.strip_prefix("apply.") else { continue };
+            let disposition = match <&str>::try_from(value).ok() {
+                Some("applied_live") => ApplyDisposition::AppliedLive,
+                Some("reconnecting") => ApplyDisposition::Reconnecting,
+                Some("gui_data_source_reopen_required") => ApplyDisposition::GuiDataSourceReopenRequired,
+                Some("daemon_restart_required") => ApplyDisposition::DaemonRestartRequired,
+                Some("daemon_and_gui_restart_required") => ApplyDisposition::DaemonAndGuiRestartRequired,
+                _ => continue,
+            };
+            fields.insert(field.to_owned(), disposition);
+        }
+        Ok(DaemonConfigUpdate { snapshot, fields })
     }
 
     // ---- Health ----
@@ -572,7 +699,14 @@ impl CobbleClient {
             .await?
             .filter_map(|s| async move { s.args().ok().map(|a| StatusEvent::Battery(a.level)) })
             .boxed();
-        let mut events = select_all([owner, conn, batt]);
+        let config = proxy
+            .receive_daemon_config_changed()
+            .await?
+            .filter_map(|s| async move {
+                s.args().ok().map(|a| StatusEvent::DaemonConfigChanged(a.revision))
+            })
+            .boxed();
+        let mut events = select_all([owner, conn, batt, config]);
 
         while let Some(ev) = events.next().await {
             on_event(ev.clone());

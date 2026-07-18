@@ -45,20 +45,6 @@ struct Cli {
     verbose: u8,
 }
 
-fn default_db_path() -> anyhow::Result<PathBuf> {
-    let base = if let Some(p) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        PathBuf::from(p)
-    } else if let Some(p) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        PathBuf::from(p).join(".local/share")
-    } else {
-        anyhow::bail!(
-            "neither XDG_DATA_HOME nor HOME is set; \
-             set db in config to specify the app database path explicitly"
-        );
-    };
-    Ok(base.join("cobbled/cobbled.db"))
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -94,10 +80,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.redacted_intervals_icu()
     );
 
-    let db_path = match cfg.db {
-        Some(p) => PathBuf::from(p),
-        None => default_db_path()?,
-    };
+    let db_path = config::resolved_db_path(&cfg)?;
     let app_db: Option<Arc<Mutex<AppDb>>> = match AppDb::open(&db_path) {
         Ok(db) => {
             info!("app DB opened at {}", db_path.display());
@@ -123,13 +106,13 @@ async fn main() -> anyhow::Result<()> {
     let (phone_action_tx, phone_action_rx) = mpsc::unbounded_channel();
 
     let daemon = CobbleDaemon::new(
-        cfg.address.clone(),
-        cfg.adapter.clone(),
-        cfg.integrations.intervals_icu.clone(),
+        cfg.clone(),
         wellness_sync_tx,
         wellness_running.clone(),
         wellness_status_revision.clone(),
         config_path.clone(),
+        db_path.clone(),
+        cfg.verbose,
         event_tx,
         app_db.clone(),
         music_action_tx,

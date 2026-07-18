@@ -120,8 +120,28 @@ impl fmt::Debug for IntervalsIcuConfig {
 }
 
 impl Config {
-    /// Validate all integration settings without exposing credentials.
+    /// Validate daemon-owned settings without exposing credentials.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.address.is_empty()
+            && (self.address.split(':').count() != 6
+                || self
+                    .address
+                    .split(':')
+                    .any(|octet| octet.len() != 2 || !octet.chars().all(|c| c.is_ascii_hexdigit())))
+        {
+            anyhow::bail!("watch address must be empty or a six-octet Bluetooth address");
+        }
+        if self.adapter.is_empty()
+            || !self
+                .adapter
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            anyhow::bail!("adapter must contain only letters, digits, '_' or '-'");
+        }
+        if self.db.as_deref().is_some_and(|path| path.is_empty() || path.contains('\0')) {
+            anyhow::bail!("database path must be non-empty and contain no NUL bytes");
+        }
         self.integrations.intervals_icu.validate()
     }
 

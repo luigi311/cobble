@@ -1,11 +1,13 @@
-mod config;
-
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cobble_client::{CobbleClient, StatusEvent, VarDict};
+use cobble_client::{
+    ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, IntervalsIcuPatch,
+    SecretPatch, StatusEvent, VarDict,
+};
 use slint::{ModelRc, VecModel};
 use tracing::warn;
 
@@ -14,13 +16,10 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config_path = config::default_config_path().unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".config/cobbled/config.toml")
-    });
-    let db_path = config::default_db_path().unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".local/share/cobbled/cobbled.db")
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let initial_snapshot = rt.block_on(async {
+        let client = CobbleClient::new().await.ok()?;
+        client.get_daemon_config().await.ok()
     });
 
     let window = AppWindow::new()?;
@@ -29,30 +28,21 @@ fn main() -> anyhow::Result<()> {
     // window yet. Set the desktop ID in between so Phosh can associate them.
     slint::set_xdg_app_id("cobble")?;
 
-    let cfg = config::load(&config_path).unwrap_or_default();
-    let initial_integrations = cfg.integrations.clone();
-    let intervals_baseline = Rc::new(RefCell::new(
-        cfg.integrations.intervals_icu.clone(),
-    ));
-    window.set_cfg_address(cfg.address.clone().into());
-    window.set_cfg_adapter(cfg.adapter.clone().into());
-    window.set_cfg_verbose(cfg.verbose);
-    window.set_cfg_db(cfg.db.clone().unwrap_or_default().into());
-    window.set_cfg_intervals_enabled(cfg.integrations.intervals_icu.enabled);
-    window.set_cfg_intervals_athlete_id(cfg.integrations.intervals_icu.athlete_id.clone().into());
-    window.set_cfg_intervals_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
-    window.set_cfg_intervals_applied_enabled(cfg.integrations.intervals_icu.enabled);
-    window.set_cfg_intervals_applied_athlete_id(
-        cfg.integrations.intervals_icu.athlete_id.clone().into(),
-    );
-    window.set_cfg_intervals_applied_api_key(cfg.integrations.intervals_icu.api_key.clone().into());
+    let config_baseline: Arc<Mutex<Option<DaemonConfigSnapshot>>> =
+        Arc::new(Mutex::new(initial_snapshot.clone()));
+    if let Some(snapshot) = &initial_snapshot {
+        apply_daemon_config(&window, snapshot);
+    } else {
+        window.set_save_status("Daemon unavailable; configuration could not be loaded.".into());
+    }
+    window.set_cfg_intervals_api_key("".into());
+    window.set_cfg_intervals_applied_api_key("".into());
     window.set_cfg_intervals_status("Loading sync status…".into());
 
-    let effective_db_path = cfg
-        .db
+    let effective_db_path = initial_snapshot
         .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| db_path.clone());
+        .map(|snapshot| PathBuf::from(&snapshot.active_database_path))
+        .unwrap_or_default();
 
     // Derive the watch timezone offset from synced data so all times/labels
     // render in the watch's local zone, independent of the host's system tz.
@@ -89,20 +79,41 @@ fn main() -> anyhow::Result<()> {
     // needs an ambient Tokio runtime when it creates its connection/executor
     // tasks; without this guard those code paths panic with "there is no reactor
     // running". Load-bearing — do not remove.
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let _rt_guard = rt.enter();
 
     refresh_wellness_status(window.as_weak(), rt.handle());
 
     {
         let weak = window.as_weak();
+        let config_baseline = config_baseline.clone();
         rt.spawn(async move {
             loop {
                 // Stream daemon/watch status via D-Bus signals (no polling).
                 if let Ok(client) = CobbleClient::new().await {
                     let weak2 = weak.clone();
+                    let baseline = config_baseline.clone();
                     let _ = client
                         .watch_status(move |ev| {
+                            if matches!(ev, StatusEvent::DaemonConfigChanged(_)) {
+                                let weak_config = weak2.clone();
+                                let baseline = baseline.clone();
+                                tokio::spawn(async move {
+                                    let snapshot = match CobbleClient::new().await {
+                                        Ok(client) => client.get_daemon_config().await.ok(),
+                                        Err(_) => None,
+                                    };
+                                    slint::invoke_from_event_loop(move || {
+                                        let (Some(window), Some(snapshot)) =
+                                            (weak_config.upgrade(), snapshot)
+                                        else {
+                                            return;
+                                        };
+                                        apply_daemon_config(&window, &snapshot);
+                                        *baseline.lock().unwrap() = Some(snapshot);
+                                    })
+                                    .ok();
+                                });
+                            }
                             let weak3 = weak2.clone();
                             slint::invoke_from_event_loop(move || {
                                 if let Some(w) = weak3.upgrade() {
@@ -336,73 +347,82 @@ fn main() -> anyhow::Result<()> {
     // ── Save config ──────────────────────────────────────────────────────────
     {
         let weak = window.as_weak();
-        let cfg_path2 = config_path.clone();
         let rt_handle = rt.handle().clone();
-        let intervals_baseline = intervals_baseline.clone();
+        let config_baseline = config_baseline.clone();
         window.on_save_config(move || {
             let Some(w) = weak.upgrade() else { return };
-            let mut integrations = match config::load(&cfg_path2) {
-                Ok(latest) => latest.integrations,
-                Err(_error) if !cfg_path2.exists() => initial_integrations.clone(),
-                Err(error) => {
-                    w.set_save_status(format!("Error: {error}").into());
-                    return;
-                }
+            let Some(baseline) = config_baseline.lock().unwrap().clone() else {
+                w.set_save_status("Error: daemon configuration is unavailable".into());
+                return;
             };
-            let intervals = &mut integrations.intervals_icu;
-            let edited_intervals = config::IntervalsIcuConfig {
-                enabled: w.get_cfg_intervals_enabled(),
-                athlete_id: w.get_cfg_intervals_athlete_id().to_string(),
-                api_key: w.get_cfg_intervals_api_key().to_string(),
+            let edited_database = w.get_cfg_db().to_string();
+            let edited_api_key = w.get_cfg_intervals_api_key().to_string();
+            let patch = DaemonConfigPatch {
+                expected_revision: baseline.revision,
+                address: (w.get_cfg_address().as_str() != baseline.config.address)
+                    .then(|| w.get_cfg_address().to_string()),
+                adapter: (w.get_cfg_adapter().as_str() != baseline.config.adapter)
+                    .then(|| w.get_cfg_adapter().to_string()),
+                verbose: (w.get_cfg_verbose() != baseline.config.verbose)
+                    .then(|| w.get_cfg_verbose()),
+                database_path: (edited_database != baseline.config.database_path.clone().unwrap_or_default())
+                    .then(|| if edited_database.is_empty() { None } else { Some(edited_database) }),
+                intervals_icu: Some(IntervalsIcuPatch {
+                    enabled: (w.get_cfg_intervals_enabled() != baseline.config.intervals_icu.enabled)
+                        .then(|| w.get_cfg_intervals_enabled()),
+                    athlete_id: (w.get_cfg_intervals_athlete_id().as_str()
+                        != baseline.config.intervals_icu.athlete_id)
+                        .then(|| w.get_cfg_intervals_athlete_id().to_string()),
+                    api_key: (!edited_api_key.is_empty())
+                        .then_some(SecretPatch::Replace(edited_api_key)),
+                }),
             };
-            config::merge_intervals_edits(
-                intervals,
-                &intervals_baseline.borrow(),
-                &edited_intervals,
-            );
-            let new_cfg = config::Config {
-                address: w.get_cfg_address().to_string(),
-                adapter: w.get_cfg_adapter().to_string(),
-                verbose: w.get_cfg_verbose(),
-                db: {
-                    let s = w.get_cfg_db().to_string();
-                    if s.is_empty() { None } else { Some(s) }
-                },
-                integrations,
-            };
-            match config::save(&cfg_path2, &new_cfg) {
-                Err(e) => { w.set_save_status(format!("Error: {e}").into()); }
-                Ok(()) => {
-                    let written_intervals = new_cfg.integrations.intervals_icu.clone();
-                    *intervals_baseline.borrow_mut() = written_intervals.clone();
-                    w.set_cfg_intervals_enabled(written_intervals.enabled);
-                    w.set_cfg_intervals_athlete_id(written_intervals.athlete_id.clone().into());
-                    w.set_cfg_intervals_api_key(written_intervals.api_key.clone().into());
-                    w.set_cfg_intervals_applied_enabled(written_intervals.enabled);
-                    w.set_cfg_intervals_applied_athlete_id(
-                        written_intervals.athlete_id.into(),
-                    );
-                    w.set_cfg_intervals_applied_api_key(written_intervals.api_key.into());
-                    w.set_save_status("Saved.".into());
-                    let weak2 = weak.clone();
-                    rt_handle.spawn(async move {
-                        match CobbleClient::new().await {
-                            Err(e) => warn!("ReloadConfig: {e}"),
-                            Ok(client) => {
-                                if !client.is_running().await {
-                                    warn!("ReloadConfig: daemon is not running");
-                                } else if let Err(e) = client.reload_config().await {
-                                    warn!("ReloadConfig: {e}");
-                                }
-                            }
+            w.set_save_status("Saving…".into());
+            let weak2 = weak.clone();
+            let baseline2 = config_baseline.clone();
+            rt_handle.spawn(async move {
+                let result = async {
+                    let client = CobbleClient::new().await?;
+                    client.update_daemon_config(patch).await
+                }.await;
+                slint::invoke_from_event_loop(move || {
+                    let Some(window) = weak2.upgrade() else { return };
+                    match result {
+                        Ok(update) => {
+                            apply_daemon_config(&window, &update.snapshot);
+                            window.set_cfg_intervals_api_key("".into());
+                            window.set_cfg_intervals_applied_api_key("".into());
+                            *baseline2.lock().unwrap() = Some(update.snapshot);
+                            let database_restart = update.fields.values().any(|value| {
+                                *value == ApplyDisposition::DaemonAndGuiRestartRequired
+                            });
+                            let daemon_restart = update.fields.values().any(|value| {
+                                *value == ApplyDisposition::DaemonRestartRequired
+                            });
+                            let reconnecting = update.fields.values().any(|value| {
+                                *value == ApplyDisposition::Reconnecting
+                            });
+                            let status = if database_restart && daemon_restart {
+                                "Saved. Restart cobbled and Cobble to use the new database and logging setting."
+                            } else if database_restart {
+                                "Saved. Restart cobbled and Cobble to use the new database."
+                            } else if daemon_restart {
+                                "Saved. Restart cobbled to apply the logging setting."
+                            } else if reconnecting {
+                                "Saved. Reconnecting with the new watch connection settings."
+                            } else {
+                                "Saved and applied by cobbled."
+                            };
+                            window.set_save_status_error(false);
+                            window.set_save_status(status.into());
                         }
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ww) = weak2.upgrade() { ww.set_save_status("".into()); }
-                        }).ok();
-                    });
-                }
-            }
+                        Err(error) => {
+                            window.set_save_status_error(true);
+                            window.set_save_status(format!("Error: {error}").into());
+                        }
+                    }
+                }).ok();
+            });
         });
     }
 
@@ -691,6 +711,39 @@ fn apply_status(w: &AppWindow, ev: StatusEvent) {
             w.set_wi_bt(info.bt_address.into());
             w.set_wi_language(info.language.into());
         }
+        StatusEvent::DaemonConfigChanged(_) => {}
+    }
+}
+
+fn apply_daemon_config(w: &AppWindow, snapshot: &DaemonConfigSnapshot) {
+    let config = &snapshot.config;
+    w.set_cfg_address(config.address.clone().into());
+    w.set_cfg_adapter(config.adapter.clone().into());
+    w.set_cfg_verbose(config.verbose);
+    w.set_cfg_db(config.database_path.clone().unwrap_or_default().into());
+    w.set_cfg_intervals_enabled(config.intervals_icu.enabled);
+    w.set_cfg_intervals_athlete_id(config.intervals_icu.athlete_id.clone().into());
+    w.set_cfg_intervals_applied_enabled(config.intervals_icu.enabled);
+    w.set_cfg_intervals_applied_athlete_id(config.intervals_icu.athlete_id.clone().into());
+    if let Some(error) = &snapshot.error {
+        w.set_save_status_error(true);
+        w.set_save_status(format!("Config file error: {}", error.message).into());
+    } else if snapshot.active_database_path != snapshot.resolved_database_path
+        && snapshot.active_verbose != snapshot.config.verbose
+    {
+        w.set_save_status_error(false);
+        w.set_save_status(
+            "Configuration changed. Restart cobbled and Cobble to use the new database and logging setting."
+                .into(),
+        );
+    } else if snapshot.active_database_path != snapshot.resolved_database_path {
+        w.set_save_status_error(false);
+        w.set_save_status(
+            "Configuration changed. Restart cobbled and Cobble to use the new database.".into(),
+        );
+    } else if snapshot.active_verbose != snapshot.config.verbose {
+        w.set_save_status_error(false);
+        w.set_save_status("Configuration changed. Restart cobbled to apply logging.".into());
     }
 }
 

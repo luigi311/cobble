@@ -1,7 +1,11 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use tracing::{debug, warn};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub use cobble_config::Config;
 
@@ -21,6 +25,21 @@ pub fn default_config_path() -> anyhow::Result<PathBuf> {
     Ok(base.join("cobbled/config.toml"))
 }
 
+pub fn default_db_path() -> anyhow::Result<PathBuf> {
+    let base = if let Some(p) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        PathBuf::from(p)
+    } else if let Some(p) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        PathBuf::from(p).join(".local/share")
+    } else {
+        anyhow::bail!("neither XDG_DATA_HOME nor HOME is set; set db explicitly")
+    };
+    Ok(base.join("cobbled/cobbled.db"))
+}
+
+pub fn resolved_db_path(config: &Config) -> anyhow::Result<PathBuf> {
+    config.db.as_deref().map(PathBuf::from).map(Ok).unwrap_or_else(default_db_path)
+}
+
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -35,6 +54,37 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
         }
         Err(e) => Err(e).with_context(|| format!("read config file {}", path.display())),
     }
+}
+
+pub fn save(path: &Path, config: &Config) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create config directory {}", parent.display()))?;
+    }
+    let text = toml::to_string_pretty(config).context("serialize config")?;
+    let file_name = path.file_name().ok_or_else(|| anyhow::anyhow!("config path has no filename"))?;
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temporary = path.parent().unwrap_or_else(|| Path::new(".")).join(format!(
+        ".{}.tmp-{}-{unique}", file_name.to_string_lossy(), std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let result = (|| {
+        let mut file = options.open(&temporary)
+            .with_context(|| format!("open temporary config {}", temporary.display()))?;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("replace config {}", path.display()))
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
 }
 
 /// Log invalid integration settings after the caller has initialized tracing.

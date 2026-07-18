@@ -16,8 +16,14 @@ pub struct DaemonConfigSnapshot {
     pub api_version: u16,
     pub revision: Revision,
     pub config_path: String,
+    /// Database currently open by the daemon and GUI data source.
+    pub active_database_path: String,
     pub resolved_database_path: String,
+    /// Verbose setting loaded when the running daemon process started.
+    pub active_verbose: bool,
     pub config: DaemonConfig,
+    /// On-disk read/parse error; `config` remains the last applied snapshot.
+    pub error: Option<ConfigError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +73,7 @@ pub enum ApplyDisposition {
     Reconnecting,
     GuiDataSourceReopenRequired,
     DaemonRestartRequired,
+    DaemonAndGuiRestartRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

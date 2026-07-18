@@ -66,8 +66,9 @@ use libpebble_ble::{
 };
 
 use cobble_db::{AppDb, DateRange, WellnessExportStatus};
-use cobble_config::IntervalsIcuConfig;
-use tokio::sync::{mpsc, watch};
+use cobble_config::{Config, IntervalsIcuConfig};
+use cobble_contracts::CONFIG_API_VERSION;
+use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
 use tracing::{debug, warn};
 use zbus::{
     interface,
@@ -78,6 +79,52 @@ use zbus::{
 
 use crate::codec::{decode_wire_dict, encode_wire_dict, WireDict};
 use crate::notification::app_name_to_category;
+
+fn daemon_config_map(
+    config: &Config,
+    config_path: &std::path::Path,
+    revision: u64,
+    error: Option<&str>,
+    active_database_path: &std::path::Path,
+    active_verbose: bool,
+) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+    let resolved_db = crate::config::resolved_db_path(config)
+        .map_err(|error| DaemonError::Failed(error.to_string()))?;
+    let mut result = HashMap::from([
+        ("api_version".into(), dbus_val(CONFIG_API_VERSION)),
+        ("revision".into(), dbus_val(revision)),
+        ("config_path".into(), dbus_val(config_path.display().to_string())),
+        ("active_database_path".into(), dbus_val(active_database_path.display().to_string())),
+        ("resolved_database_path".into(), dbus_val(resolved_db.display().to_string())),
+        ("active_verbose".into(), dbus_val(active_verbose)),
+        ("address".into(), dbus_val(config.address.clone())),
+        ("adapter".into(), dbus_val(config.adapter.clone())),
+        ("verbose".into(), dbus_val(config.verbose)),
+        ("database_path".into(), dbus_val(config.db.clone().unwrap_or_default())),
+        ("intervals_enabled".into(), dbus_val(config.integrations.intervals_icu.enabled)),
+        ("intervals_athlete_id".into(), dbus_val(config.integrations.intervals_icu.athlete_id.clone())),
+        ("intervals_api_key_configured".into(), dbus_val(!config.integrations.intervals_icu.api_key.is_empty())),
+    ]);
+    if let Some(message) = error {
+        result.insert("error_kind".into(), dbus_val("invalid_data"));
+        result.insert("error_message".into(), dbus_val(message.to_owned()));
+    }
+    Ok(result)
+}
+
+fn patch_string(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<String>, DaemonError> {
+    patch.get(key).map(|value| {
+        <&str>::try_from(value).map(str::to_owned)
+            .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a string")))
+    }).transpose()
+}
+
+fn patch_bool(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<bool>, DaemonError> {
+    patch.get(key).map(|value| {
+        bool::try_from(value)
+            .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a boolean")))
+    }).transpose()
+}
 
 mod state;
 pub(crate) use state::{
@@ -219,31 +266,36 @@ pub struct CobbleDaemon {
     music_action_tx: mpsc::UnboundedSender<String>,
     /// Forwards watch phone actions to the call monitor.
     phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
+    config_operation: Arc<AsyncMutex<()>>,
 }
 
 impl CobbleDaemon {
 
     pub fn new(
-        address: String,
-        adapter: String,
-        integration_config: IntervalsIcuConfig,
+        config: Config,
         wellness_sync_tx: watch::Sender<u64>,
         wellness_running: Arc<AtomicBool>,
         wellness_status_revision: Arc<AtomicU64>,
         config_path: PathBuf,
+        active_database_path: PathBuf,
+        active_verbose: bool,
         event_tx: mpsc::UnboundedSender<DaemonEvent>,
         db: Option<Arc<Mutex<AppDb>>>,
         music_action_tx: mpsc::UnboundedSender<String>,
         phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
     ) -> Self {
         let (config_revision, _) = watch::channel(0);
-        let (integration_config, _) = watch::channel(integration_config);
+        let (integration_config, _) = watch::channel(config.integrations.intervals_icu.clone());
         let (connection_tx, _) = watch::channel(false);
         Self {
             state: Arc::new(Mutex::new(DaemonState {
-                address,
-                adapter,
+                address: config.address.clone(),
+                adapter: config.adapter.clone(),
                 config_path,
+                config,
+                config_error: None,
+                active_database_path,
+                active_verbose,
                 pebble: None,
                 connected: false,
                 stopping: false,
@@ -267,6 +319,7 @@ impl CobbleDaemon {
             music_action_tx,
             phone_action_tx,
             connection_tx,
+            config_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -503,6 +556,64 @@ impl CobbleDaemon {
             });
         }
     }
+
+    fn publish_config_revision(&self) {
+        self.config_revision.send_modify(|revision| *revision += 1);
+        let revision = *self.config_revision.borrow();
+        let event_tx = self.state.lock().unwrap().event_tx.clone();
+        let _ = event_tx.send(DaemonEvent::DaemonConfigChanged(revision));
+    }
+
+    fn record_config_error(&self, message: String) {
+        let changed = {
+            let mut state = self.state.lock().unwrap();
+            if state.config_error.as_deref() == Some(message.as_str()) {
+                false
+            } else {
+                state.config_error = Some(message);
+                true
+            }
+        };
+        if changed {
+            self.publish_config_revision();
+        }
+    }
+
+    async fn apply_loaded_config(&self, new_cfg: Config) {
+        let (previous, cleared_error) = {
+            let mut state = self.state.lock().unwrap();
+            let previous = state.config.clone();
+            let cleared_error = state.config_error.take().is_some();
+            (previous, cleared_error)
+        };
+        if previous == new_cfg {
+            if cleared_error {
+                self.publish_config_revision();
+            }
+            return;
+        }
+        debug!(
+            "reload_config: adapter={}, address{}, intervals_icu={:?}",
+            new_cfg.adapter,
+            if new_cfg.address.is_empty() { " (none)" } else { " set" },
+            new_cfg.redacted_intervals_icu(),
+        );
+        let pebble_to_disconnect = {
+            let mut state = self.state.lock().unwrap();
+            let changed = state.address != new_cfg.address || state.adapter != new_cfg.adapter;
+            state.address = new_cfg.address.clone();
+            state.adapter = new_cfg.adapter.clone();
+            state.config = new_cfg.clone();
+            if changed { state.pebble.clone() } else { None }
+        };
+        let integration_config = new_cfg.integrations.intervals_icu.clone();
+        let integration_changed = self.integration_config.send_if_modified(|current| {
+            if *current == integration_config { false } else { *current = integration_config.clone(); true }
+        });
+        if integration_changed { self.wellness_status_revision.fetch_add(1, Ordering::SeqCst); }
+        if let Some(pebble) = pebble_to_disconnect { let _ = pebble.disconnect().await; }
+        self.publish_config_revision();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +783,122 @@ impl CobbleDaemon {
         Pebble::scan(&adapter, timeout_secs)
             .await
             .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Return the running daemon's effective, redacted configuration snapshot.
+    fn get_daemon_config(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let state = self.state.lock().unwrap();
+        daemon_config_map(
+            &state.config,
+            &state.config_path,
+            *self.config_revision.borrow(),
+            state.config_error.as_deref(),
+            &state.active_database_path,
+            state.active_verbose,
+        )
+    }
+
+    /// Merge a versioned patch into the running daemon's latest configuration,
+    /// atomically persist its effective file, and return the applied snapshot.
+    async fn update_daemon_config(
+        &self,
+        expected_revision: u64,
+        patch: HashMap<String, OwnedValue>,
+    ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let _operation = self.config_operation.lock().await;
+        const PATCH_FIELDS: &[&str] = &[
+            "address",
+            "adapter",
+            "verbose",
+            "database_path",
+            "intervals_enabled",
+            "intervals_athlete_id",
+            "intervals_api_key_clear",
+            "intervals_api_key_replace",
+        ];
+        if let Some(key) = patch.keys().find(|key| !PATCH_FIELDS.contains(&key.as_str())) {
+            return Err(DaemonError::Failed(format!("unsupported patch field {key}")));
+        }
+        if patch_bool(&patch, "intervals_api_key_clear")? == Some(true)
+            && patch.contains_key("intervals_api_key_replace")
+        {
+            return Err(DaemonError::Failed(
+                "intervals API key cannot be cleared and replaced in one update".into(),
+            ));
+        }
+        let path = self.state.lock().unwrap().config_path.clone();
+        let latest = match crate::config::load(&path) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = error.to_string();
+                self.record_config_error(message.clone());
+                return Err(DaemonError::Failed(format!(
+                    "on-disk config is invalid; correct it and reload before updating: {message}"
+                )));
+            }
+        };
+        if let Err(error) = latest.validate() {
+            let message = error.to_string();
+            self.record_config_error(message.clone());
+            return Err(DaemonError::Failed(format!(
+                "on-disk config is invalid; correct it and reload before updating: {message}"
+            )));
+        }
+        self.apply_loaded_config(latest).await;
+
+        let actual_revision = *self.config_revision.borrow();
+        if expected_revision != actual_revision {
+            return Err(DaemonError::Failed(format!(
+                "revision conflict: expected {expected_revision}, current {actual_revision}"
+            )));
+        }
+        let mut config = {
+            let state = self.state.lock().unwrap();
+            state.config.clone()
+        };
+        let original = config.clone();
+        if let Some(value) = patch_string(&patch, "address")? { config.address = value; }
+        if let Some(value) = patch_string(&patch, "adapter")? { config.adapter = value; }
+        if let Some(value) = patch_bool(&patch, "verbose")? { config.verbose = value; }
+        if let Some(value) = patch_string(&patch, "database_path")? {
+            config.db = if value.is_empty() { None } else { Some(value) };
+        }
+        if let Some(value) = patch_bool(&patch, "intervals_enabled")? {
+            config.integrations.intervals_icu.enabled = value;
+        }
+        if let Some(value) = patch_string(&patch, "intervals_athlete_id")? {
+            config.integrations.intervals_icu.athlete_id = value;
+        }
+        if patch_bool(&patch, "intervals_api_key_clear")? == Some(true) {
+            config.integrations.intervals_icu.api_key.clear();
+        }
+        if let Some(value) = patch_string(&patch, "intervals_api_key_replace")? {
+            config.integrations.intervals_icu.api_key = value;
+        }
+        config.validate().map_err(|error| DaemonError::Failed(error.to_string()))?;
+
+        if config != original {
+            crate::config::save(&path, &config)
+                .map_err(|error| DaemonError::Failed(error.to_string()))?;
+            self.apply_loaded_config(config.clone()).await;
+        }
+        let revision = *self.config_revision.borrow();
+        let state = self.state.lock().unwrap();
+        let mut result = daemon_config_map(
+            &config,
+            &path,
+            revision,
+            None,
+            &state.active_database_path,
+            state.active_verbose,
+        )?;
+        drop(state);
+        if original.address != config.address { result.insert("apply.address".into(), dbus_val("reconnecting")); }
+        if original.adapter != config.adapter { result.insert("apply.adapter".into(), dbus_val("reconnecting")); }
+        if original.verbose != config.verbose { result.insert("apply.verbose".into(), dbus_val("daemon_restart_required")); }
+        if original.db != config.db { result.insert("apply.database_path".into(), dbus_val("daemon_and_gui_restart_required")); }
+        if original.integrations != config.integrations { result.insert("apply.intervals_icu".into(), dbus_val("applied_live")); }
+        Ok(result)
     }
 
     /// Write health user profile to the watch and trigger a DataLog sync.
@@ -1004,56 +1231,35 @@ impl CobbleDaemon {
     /// If address or adapter changed, disconnects the current session so the
     /// supervisor reconnects with the new parameters on the next cycle.
     pub(crate) async fn reload_config(&self) -> Result<(), DaemonError> {
+        let _operation = self.config_operation.lock().await;
         let config_path = self.state.lock().unwrap().config_path.clone();
 
-        let new_cfg = crate::config::load(&config_path)
-            .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        crate::config::warn_if_invalid(&config_path, &new_cfg);
-
-        debug!(
-            "reload_config: adapter={}, address{}, intervals_icu={:?}",
-            new_cfg.adapter,
-            if new_cfg.address.is_empty() { " (none)" } else { " set" },
-            new_cfg.redacted_intervals_icu(),
-        );
-
-        // Read state.pebble in the same lock scope as the config update so
-        // we always disconnect the handle that was live when the new params
-        // were applied — no window for the supervisor to slip in a new
-        // connection that we'd then miss.
-        let pebble_to_disconnect = {
-            let mut state = self.state.lock().unwrap();
-            let changed =
-                state.address != new_cfg.address || state.adapter != new_cfg.adapter;
-            state.address = new_cfg.address;
-            state.adapter = new_cfg.adapter;
-            if changed { state.pebble.clone() } else { None }
-        };
-
-        let integration_config = new_cfg.integrations.intervals_icu.clone();
-        let integration_changed = self.integration_config.send_if_modified(|current| {
-            if *current == integration_config {
-                false
-            } else {
-                *current = integration_config.clone();
-                true
+        let new_cfg = match crate::config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = error.to_string();
+                self.record_config_error(message.clone());
+                return Err(DaemonError::Failed(message));
             }
-        });
-        if integration_changed {
-            self.wellness_status_revision.fetch_add(1, Ordering::SeqCst);
+        };
+        crate::config::warn_if_invalid(&config_path, &new_cfg);
+        if let Err(error) = new_cfg.validate() {
+            let message = error.to_string();
+            self.record_config_error(message.clone());
+            return Err(DaemonError::Failed(message));
         }
 
-        if let Some(pebble) = pebble_to_disconnect {
-            let _ = pebble.disconnect().await;
-        }
-
-        // Bump the revision so any waiting supervisor wakes up.
-        self.config_revision.send_modify(|r| *r += 1);
-
+        self.apply_loaded_config(new_cfg).await;
         Ok(())
     }
 
     // ---- Signals ----
+
+    #[zbus(signal)]
+    pub async fn daemon_config_changed(
+        signal_emitter: &SignalEmitter<'_>,
+        revision: u64,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn app_message_received(
@@ -1169,7 +1375,7 @@ mod tests {
             api_key: String::new(),
         };
         let updated = crate::config::Config {
-            address: "watch-address".into(),
+            address: "E6:94:0A:D4:D5:DC".into(),
             adapter: "hci0".into(),
             verbose: false,
             db: None,
@@ -1187,13 +1393,18 @@ mod tests {
         let (music_tx, _) = mpsc::unbounded_channel();
         let (phone_tx, _) = mpsc::unbounded_channel();
         let daemon = CobbleDaemon::new(
-            "watch-address".into(),
-            "hci0".into(),
-            initial,
+            Config {
+                address: "E6:94:0A:D4:D5:DC".into(),
+                adapter: "hci0".into(),
+                integrations: cobble_config::Integrations { intervals_icu: initial },
+                ..Config::default()
+            },
             watch::channel(0).0,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU64::new(0)),
             path.clone(),
+            path.clone(),
+            false,
             event_tx,
             None,
             music_tx,
@@ -1209,9 +1420,95 @@ mod tests {
         assert!(revision_rx.has_changed().unwrap());
         assert_eq!(
             daemon.current_connection_params(),
-            ("watch-address".into(), "hci0".into())
+            ("E6:94:0A:D4:D5:DC".into(), "hci0".into())
         );
         assert!(!*daemon.watch_connection().borrow());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_config_update_is_revisioned_persisted_and_redacted() {
+        let path = test_path();
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            Config::default(),
+            watch::channel(0).0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            path.clone(),
+            path.clone(),
+            false,
+            event_tx,
+            None,
+            music_tx,
+            phone_tx,
+        );
+        let patch = HashMap::from([
+            ("adapter".into(), dbus_val("hci7")),
+            ("database_path".into(), dbus_val("/tmp/new-cobbled.db")),
+            ("intervals_api_key_replace".into(), dbus_val("test-secret")),
+        ]);
+        let snapshot = daemon.update_daemon_config(0, patch).await.unwrap();
+        assert_eq!(u64::try_from(snapshot.get("revision").unwrap()).unwrap(), 1);
+        assert!(bool::try_from(snapshot.get("intervals_api_key_configured").unwrap()).unwrap());
+        assert!(!format!("{snapshot:?}").contains("test-secret"));
+        assert_eq!(
+            <&str>::try_from(snapshot.get("active_database_path").unwrap()).unwrap(),
+            path.to_string_lossy()
+        );
+        assert_eq!(
+            <&str>::try_from(snapshot.get("apply.database_path").unwrap()).unwrap(),
+            "daemon_and_gui_restart_required"
+        );
+        let persisted = crate::config::load(&path).unwrap();
+        assert_eq!(persisted.adapter, "hci7");
+        assert_eq!(persisted.db.as_deref(), Some("/tmp/new-cobbled.db"));
+        assert_eq!(persisted.integrations.intervals_icu.api_key, "test-secret");
+        assert!(daemon.update_daemon_config(0, HashMap::new()).await.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_config_preserves_applied_snapshot_when_disk_becomes_invalid() {
+        let path = test_path();
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            Config::default(),
+            watch::channel(0).0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            path.clone(),
+            path.clone(),
+            false,
+            event_tx,
+            None,
+            music_tx,
+            phone_tx,
+        );
+
+        daemon
+            .update_daemon_config(
+                0,
+                HashMap::from([("adapter".into(), dbus_val("hci7"))]),
+            )
+            .await
+            .unwrap();
+        std::fs::write(&path, "adapter = [not valid TOML").unwrap();
+
+        assert!(daemon.update_daemon_config(1, HashMap::new()).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "adapter = [not valid TOML");
+        let snapshot = daemon.get_daemon_config().unwrap();
+        assert_eq!(<&str>::try_from(snapshot.get("adapter").unwrap()).unwrap(), "hci7");
+        assert_eq!(
+            <&str>::try_from(snapshot.get("error_kind").unwrap()).unwrap(),
+            "invalid_data"
+        );
+        assert_eq!(u64::try_from(snapshot.get("revision").unwrap()).unwrap(), 2);
 
         std::fs::remove_file(path).unwrap();
     }
@@ -1248,17 +1545,24 @@ mod tests {
         let (music_tx, _) = mpsc::unbounded_channel();
         let (phone_tx, _) = mpsc::unbounded_channel();
         let daemon = CobbleDaemon::new(
-            "watch-address".into(),
-            "hci0".into(),
-            IntervalsIcuConfig {
-                enabled: true,
-                athlete_id: "i123456".into(),
-                api_key: "test-only-value".into(),
+            Config {
+                address: "watch-address".into(),
+                adapter: "hci0".into(),
+                integrations: cobble_config::Integrations {
+                    intervals_icu: IntervalsIcuConfig {
+                        enabled: true,
+                        athlete_id: "i123456".into(),
+                        api_key: "test-only-value".into(),
+                    },
+                },
+                ..Config::default()
             },
             sync_tx,
             running.clone(),
             Arc::new(AtomicU64::new(0)),
             test_path(),
+            db_path.clone(),
+            false,
             event_tx,
             Some(db),
             music_tx,
@@ -1302,6 +1606,9 @@ pub async fn run_signal_emitter(
         };
         let emitter = iface.signal_emitter();
         match event {
+            DaemonEvent::DaemonConfigChanged(revision) => {
+                let _ = CobbleDaemon::daemon_config_changed(emitter, revision).await;
+            }
             DaemonEvent::ConnectionChanged(c) => {
                 let _ = CobbleDaemon::connection_changed(emitter, c).await;
                 let _ = iface.get().await.connected_changed(iface.signal_emitter()).await;
