@@ -62,18 +62,23 @@ fn main() -> anyhow::Result<()> {
     let bar_range_w     = Rc::new(Cell::new((-1i64, -1i64)));
     let period_sleep    = Rc::new(Cell::new(1i32));
     let offset_sleep    = Rc::new(Cell::new(0i32));
+    let period_heart    = Rc::new(Cell::new(1i32));
+    let offset_heart    = Rc::new(Cell::new(0i32));
 
     // ── Set initial period labels ────────────────────────────────────────────
     window.set_workout_period_label(cobble_db::period_label(1, 0).into());
     window.set_workout_can_forward(false);
     window.set_sleep_period_label(cobble_db::period_label(1, 0).into());
     window.set_sleep_can_forward(false);
+    window.set_heart_period_label(cobble_db::period_label(1, 0).into());
+    window.set_heart_can_forward(false);
 
     // ── Initial data load ────────────────────────────────────────────────────
     reload_workout_chart(&window, &effective_db_path, 1, 0);
     reload_workout_sessions(&window, &effective_db_path, 1, 0, (-1, -1));
     reload_sleep_chart(&window, &effective_db_path, 1, 0);
     reload_sleep_stats(&window, &effective_db_path, 1, 0);
+    reload_heart_stats(&window, &effective_db_path, 1, 0);
 
     // ── Background tokio runtime ─────────────────────────────────────────────
     // Enter the runtime context on the main thread. zbus (via cobble-client)
@@ -116,6 +121,7 @@ fn main() -> anyhow::Result<()> {
         let db2  = effective_db_path.clone();
         let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
         let ps = period_sleep.clone();  let os = offset_sleep.clone();
+        let ph = period_heart.clone();  let oh = offset_heart.clone();
         window.on_refresh_data(move || {
             if let Ok(conn) = cobble_db::connect_readonly(&db2) {
                 cobble_db::set_watch_offset(cobble_db::watch_tz_offset(&conn));
@@ -125,6 +131,7 @@ fn main() -> anyhow::Result<()> {
                 reload_workout_sessions(&w, &db2, pw.get(), ow.get(), brw.get());
                 reload_sleep_chart(&w, &db2, ps.get(), os.get());
                 reload_sleep_stats(&w, &db2, ps.get(), os.get());
+                reload_heart_stats(&w, &db2, ph.get(), oh.get());
             }
         });
     }
@@ -272,6 +279,52 @@ fn main() -> anyhow::Result<()> {
                 update_sleep_nav(&w, p, new_off);
                 reload_sleep_chart(&w, &db2, p, new_off);
                 reload_sleep_stats(&w, &db2, p, new_off);
+            }
+        });
+    }
+
+    // ── Heart: period changed ───────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let db2 = effective_db_path.clone();
+        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        window.on_heart_period_changed(move |p| {
+            ph.set(p); oh.set(0);
+            if let Some(w) = weak.upgrade() {
+                update_heart_nav(&w, p, 0);
+                reload_heart_stats(&w, &db2, p, 0);
+            }
+        });
+    }
+
+    // ── Heart: go back ───────────────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let db2 = effective_db_path.clone();
+        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        window.on_heart_go_back(move || {
+            let new_off = oh.get() + 1;
+            oh.set(new_off);
+            let p = ph.get();
+            if let Some(w) = weak.upgrade() {
+                update_heart_nav(&w, p, new_off);
+                reload_heart_stats(&w, &db2, p, new_off);
+            }
+        });
+    }
+
+    // ── Heart: go forward ────────────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let db2 = effective_db_path.clone();
+        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        window.on_heart_go_forward(move || {
+            let new_off = (oh.get() - 1).max(0);
+            oh.set(new_off);
+            let p = ph.get();
+            if let Some(w) = weak.upgrade() {
+                update_heart_nav(&w, p, new_off);
+                reload_heart_stats(&w, &db2, p, new_off);
             }
         });
     }
@@ -659,6 +712,11 @@ fn update_sleep_nav(w: &AppWindow, period: i32, offset: i32) {
     w.set_sleep_can_forward(offset > 0);
 }
 
+fn update_heart_nav(w: &AppWindow, period: i32, offset: i32) {
+    w.set_heart_period_label(cobble_db::period_label(period, offset).into());
+    w.set_heart_can_forward(offset > 0);
+}
+
 // ─── Workout helpers ──────────────────────────────────────────────────────────
 
 fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
@@ -818,6 +876,136 @@ fn bar_date_range(start: i64, end: i64) -> Option<cobble_db::DateRange> {
     let start = cobble_db::watch_local_date(start)?;
     let end = cobble_db::watch_local_date(end)?;
     (start <= end).then_some(cobble_db::DateRange { start, end })
+}
+
+fn clear_heart_data(window: &AppWindow) {
+    window.set_heart_stats(HeartStats {
+        average_label: "—".into(),
+        resting_label: "—".into(),
+        sleeping_label: "—".into(),
+        lowest_label: "—".into(),
+        highest_label: "—".into(),
+        samples_label: "—".into(),
+    });
+    window.set_heart_average_path("".into());
+    window.set_heart_resting_path("".into());
+    window.set_heart_trend_max_label("".into());
+    window.set_heart_trend_mid_label("".into());
+    window.set_heart_trend_min_label("".into());
+    window.set_heart_trend_has_data(false);
+    window.set_heart_trend_points(ModelRc::new(VecModel::from(
+        Vec::<HeartTrendPoint>::new(),
+    )));
+}
+
+fn reload_heart_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => {
+            clear_heart_data(window);
+            warn!("cannot open DB: {e}");
+        }
+        Ok(conn) => {
+            let stats = match cobble_db::load_heart_stats(&conn, period, offset) {
+                Err(e) => {
+                    clear_heart_data(window);
+                    warn!("load heart stats failed: {e}");
+                    return;
+                }
+                Ok(stats) => stats,
+            };
+            let trend = match cobble_db::load_heart_trend(&conn, period, offset) {
+                Err(e) => {
+                    clear_heart_data(window);
+                    warn!("load heart trend failed: {e}");
+                    return;
+                }
+                Ok(trend) => trend,
+            };
+
+            window.set_heart_stats(HeartStats {
+                average_label: stats.average_label.into(),
+                resting_label: stats.resting_label.into(),
+                sleeping_label: stats.sleeping_label.into(),
+                lowest_label: stats.lowest_label.into(),
+                highest_label: stats.highest_label.into(),
+                samples_label: stats.samples_label.into(),
+            });
+            apply_heart_trend(window, trend);
+        }
+    }
+}
+
+fn apply_heart_trend(window: &AppWindow, trend: cobble_db::HeartTrend) {
+    let min_bpm = trend.min_bpm;
+    let max_bpm = trend.max_bpm;
+
+    let points: Vec<HeartTrendPoint> = trend
+        .points
+        .iter()
+        .map(|point| HeartTrendPoint { label: point.label.clone().into() })
+        .collect();
+
+    window.set_heart_average_path(
+        heart_trend_path(&trend.points, min_bpm, max_bpm, false).into(),
+    );
+    window.set_heart_resting_path(
+        heart_trend_path(&trend.points, min_bpm, max_bpm, true).into(),
+    );
+    window.set_heart_trend_max_label(format!("{} bpm", max_bpm.round() as i32).into());
+    window.set_heart_trend_mid_label(
+        format!("{} bpm", ((min_bpm + max_bpm) / 2.0).round() as i32).into(),
+    );
+    window.set_heart_trend_min_label(format!("{} bpm", min_bpm.round() as i32).into());
+    window.set_heart_trend_has_data(
+        trend
+            .points
+            .iter()
+            .any(|point| point.average_bpm.is_some() || point.resting_bpm.is_some()),
+    );
+    window.set_heart_trend_points(ModelRc::new(VecModel::from(points)));
+}
+
+fn heart_trend_path(
+    points: &[cobble_db::HeartTrendPointData],
+    min_bpm: f32,
+    max_bpm: f32,
+    resting: bool,
+) -> String {
+    let point_count = points.len();
+    let span = (max_bpm - min_bpm).max(1.0);
+    let mut path = String::new();
+    let mut previous: Option<(f32, f32)> = None;
+    const MARKER_HALF_WIDTH: f32 = 0.8;
+
+    for (index, point) in points.iter().enumerate() {
+        let value = if resting {
+            point.resting_bpm
+        } else {
+            point.average_bpm
+        };
+        let Some(value) = value else {
+            previous = None;
+            continue;
+        };
+        let x = if point_count <= 1 {
+            50.0
+        } else {
+            (index as f32 + 0.5) * 100.0 / point_count as f32
+        };
+        let y = ((max_bpm - value) / span * 100.0).clamp(0.0, 100.0);
+        if let Some((previous_x, previous_y)) = previous {
+            path.push_str(&format!("M {previous_x:.2} {previous_y:.2} L {x:.2} {y:.2}"));
+        }
+        let marker_start = (x - MARKER_HALF_WIDTH).max(0.0);
+        let marker_end = (x + MARKER_HALF_WIDTH).min(100.0);
+        if path.is_empty() {
+            path.push_str(&format!("M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+        } else {
+            path.push_str(&format!(" M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+        }
+        previous = Some((x, y));
+    }
+    path
 }
 
 // ─── Conversion ───────────────────────────────────────────────────────────────

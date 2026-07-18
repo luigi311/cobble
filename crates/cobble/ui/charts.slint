@@ -1,7 +1,7 @@
 // Health-data chart and list components.
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, SleepStats } from "types.slint";
+import { DaySteps, SleepBar, HealthSession, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
 
 // ─── Step bar chart ──────────────────────────────────────────────────────────
 
@@ -291,6 +291,191 @@ export component SleepStatsPanel inherits VerticalLayout {
                         padding: 10px; spacing: 4px;
                         Text { text: "Shortest Night"; color: Palette.muted; font-size: 11px; }
                         Text { text: root.stats.lowest-dur; color: Palette.orange; font-size: 16px; font-weight: 600; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── Heart-rate trend chart ──────────────────────────────────────────────────
+
+export component HeartTrendChart inherits VerticalLayout {
+    in property <[HeartTrendPoint]> model;
+    in property <string> average-path;
+    in property <string> resting-path;
+    in property <string> max-label;
+    in property <string> mid-label;
+    in property <string> min-label;
+    in property <bool> has-data: false;
+
+    Rectangle {
+        background: Palette.surface; border-radius: 12px; height: 260px; clip: true;
+        VerticalLayout {
+            padding: 14px; spacing: 8px;
+
+            HorizontalLayout {
+                height: 22px;
+                Text { text: "Heart Rate Trend"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle { width: 14px; height: 2px; background: Palette.red; y: 5px; }
+                        Text { text: "Average"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle { width: 14px; height: 2px; background: Palette.accent; y: 5px; }
+                        Text { text: "Resting"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                    }
+                }
+            }
+
+            if root.has-data: VerticalLayout {
+                vertical-stretch: 1; spacing: 4px;
+                HorizontalLayout {
+                    height: 158px;
+                    VerticalLayout {
+                        width: 38px;
+                        Text { text: root.max-label; color: Palette.muted; font-size: 9px; vertical-alignment: top; }
+                        Rectangle { vertical-stretch: 1; }
+                        Text { text: root.mid-label; color: Palette.muted; font-size: 9px; vertical-alignment: center; }
+                        Rectangle { vertical-stretch: 1; }
+                        Text { text: root.min-label; color: Palette.muted; font-size: 9px; vertical-alignment: bottom; }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1; clip: true;
+                        // Three quiet guide lines keep the shared BPM scale easy to read.
+                        Path {
+                            width: parent.width; height: parent.height;
+                            commands: "M 0 0 L 100 0 M 0 50 L 100 50 M 0 100 L 100 100";
+                            viewbox-width: 100; viewbox-height: 100;
+                            fill: #00000000; stroke: #6a6a9040; stroke-width: 1px;
+                        }
+                        if root.average-path != "": Path {
+                            width: parent.width; height: parent.height;
+                            commands: root.average-path;
+                            viewbox-width: 100; viewbox-height: 100;
+                            fill: #00000000; stroke: Palette.red; stroke-width: 2px;
+                            stroke-line-cap: round; stroke-line-join: round;
+                        }
+                        if root.resting-path != "": Path {
+                            width: parent.width; height: parent.height;
+                            commands: root.resting-path;
+                            viewbox-width: 100; viewbox-height: 100;
+                            fill: #00000000; stroke: Palette.accent; stroke-width: 2px;
+                            stroke-line-cap: round; stroke-line-join: round;
+                        }
+
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 38px;
+                    for point in root.model: Text {
+                        text: point.label; color: Palette.muted; font-size: 9px;
+                        horizontal-stretch: 1; horizontal-alignment: center;
+                    }
+                }
+            }
+            if !root.has-data: Rectangle {
+                vertical-stretch: 1;
+                Text { text: "No heart-rate trend data for this period"; color: Palette.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+    }
+}
+
+// ─── Heart-rate stats panel ──────────────────────────────────────────────────
+
+export component HeartStatsPanel inherits VerticalLayout {
+    in property <HeartStats> stats;
+    in property <[HeartTrendPoint]> trend-model;
+    in property <string> average-path;
+    in property <string> resting-path;
+    in property <string> trend-max-label;
+    in property <string> trend-mid-label;
+    in property <string> trend-min-label;
+    in property <bool> trend-has-data: false;
+
+    vertical-stretch: 1;
+    padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 16px;
+    spacing: 10px;
+
+    HeartTrendChart {
+        model: root.trend-model;
+        average-path: root.average-path;
+        resting-path: root.resting-path;
+        max-label: root.trend-max-label;
+        mid-label: root.trend-mid-label;
+        min-label: root.trend-min-label;
+        has-data: root.trend-has-data;
+    }
+
+    HorizontalLayout {
+        Text { text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    Rectangle {
+        background: Palette.surface; border-radius: 12px;
+        VerticalLayout {
+            padding: 14px; spacing: 10px;
+
+            // Row 1: overall average across the full width
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #401e2a; border-radius: 8px;
+                VerticalLayout {
+                    padding: 10px; spacing: 4px;
+                    Text { text: "Avg Heart Rate"; color: Palette.muted; font-size: 11px; }
+                    Text { text: root.stats.average-label; color: Palette.red; font-size: 18px; font-weight: 700; }
+                }
+            }
+
+            // Row 2: resting average | sleeping average
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Avg Resting HR"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.resting-label; color: Palette.accent; font-size: 18px; font-weight: 700; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Avg Sleeping HR"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.sleeping-label; color: Palette.deep-sleep; font-size: 18px; font-weight: 700; }
+                    }
+                }
+            }
+
+            // Row 3: lowest sample | highest sample
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Lowest HR"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.lowest-label; color: Palette.green; font-size: 18px; font-weight: 700; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #1e1e40; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px;
+                        Text { text: "Highest HR"; color: Palette.muted; font-size: 11px; }
+                        Text { text: root.stats.highest-label; color: Palette.orange; font-size: 18px; font-weight: 700; }
                     }
                 }
             }
