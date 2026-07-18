@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/libpebble-ble",
+    "crates/cobble-contracts",
     "crates/cobble-config",
     "crates/cobble-db",
     "crates/cobbled",

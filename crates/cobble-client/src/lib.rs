@@ -21,7 +21,8 @@
 
 use std::collections::HashMap;
 
-use zbus::{proxy, Connection};
+pub use cobble_contracts::*;
+use zbus::{Connection, proxy};
 pub use zbus::{Error, Result};
 pub use zvariant::OwnedValue;
 

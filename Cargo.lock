@@ -796,8 +796,9 @@ dependencies = [
 
 [[package]]
 name = "cobble-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "cobble-contracts",
  "futures-util",
  "zbus",
  "zvariant",
@@ -810,6 +811,13 @@ dependencies = [
  "anyhow",
  "serde",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "cobble-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
