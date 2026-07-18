@@ -14,6 +14,10 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
+    // Match data/cobble.desktop so Phosh can associate the first Wayland
+    // toplevel with its launcher and application icon.
+    slint::set_xdg_app_id("cobble")?;
+
     let config_path = config::default_config_path().unwrap_or_else(|_| {
         PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join(".config/cobbled/config.toml")
