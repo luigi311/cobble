@@ -82,12 +82,47 @@ pub struct Pebble {
     preference_operation: Arc<AsyncMutex<()>>,
 }
 
+#[cfg(test)]
+mod connection_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_connected_notification_is_not_a_disconnect() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let mut cloned = rx.clone();
+        let mut waiting = Box::pin(wait_for_disconnected(&mut cloned));
+
+        assert!(timeout(Duration::from_millis(10), &mut waiting).await.is_err());
+        tx.send(false).unwrap();
+        assert!(timeout(Duration::from_millis(100), &mut waiting).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn closed_connection_channel_is_a_disconnect() {
+        let (tx, mut rx) = watch::channel(true);
+        drop(tx);
+        assert!(timeout(Duration::from_millis(100), wait_for_disconnected(&mut rx)).await.is_ok());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferenceWriteConfirmation {
     /// The watch accepted the BlobDB write; legacy watches cannot be refreshed.
     Accepted,
     /// The watch accepted the write and returned the exact bytes during readback.
     ReadBack,
+}
+
+async fn wait_for_disconnected(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if !*rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 impl Pebble {
@@ -162,14 +197,7 @@ impl Pebble {
 
     pub async fn wait_disconnected(&self) {
         let mut rx = self.connected_rx.clone();
-        loop {
-            if !*rx.borrow() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
+        wait_for_disconnected(&mut rx).await;
     }
 
     // ---- connect / disconnect ----
@@ -691,7 +719,7 @@ impl Pebble {
         let status = match timeout(Duration::from_secs(10), async {
             tokio::select! {
                 response = receiver => response.map_err(|_| PebbleError::Other("BlobDB response channel closed".into())),
-                _ = connected.changed() => Err(PebbleError::NotConnected),
+                _ = wait_for_disconnected(&mut connected) => Err(PebbleError::NotConnected),
             }
         }).await {
             Ok(Ok(status)) => status,
@@ -746,7 +774,7 @@ impl Pebble {
         let response = match timeout(Duration::from_secs(10), async {
             tokio::select! {
                 response = receiver => response.map_err(|_| PebbleError::Other("BlobDB2 response channel closed".into())),
-                _ = connected.changed() => Err(PebbleError::NotConnected),
+                _ = wait_for_disconnected(&mut connected) => Err(PebbleError::NotConnected),
             }
         }).await {
             Ok(Ok(response)) => response,
@@ -779,7 +807,7 @@ impl Pebble {
                 }
                 tokio::select! {
                     changed = sync_done.changed() => changed.map_err(|_| PebbleError::Other("WatchPrefs sync channel closed".into()))?,
-                    _ = connected.changed() => return Err(PebbleError::NotConnected),
+                    _ = wait_for_disconnected(&mut connected) => return Err(PebbleError::NotConnected),
                 }
             }
         }).await {
