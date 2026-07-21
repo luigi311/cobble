@@ -1,13 +1,13 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cobble_client::{
-    ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigSnapshot,
-    DeviceConfigState, DistanceUnits, FieldAvailability, IntervalsIcuPatch, PreferenceValue,
-    SecretPatch, StatusEvent, VarDict,
+    ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigPatch,
+    DeviceConfigSnapshot, DeviceConfigState, DistanceUnits, FieldAvailability, HealthConfigPatch,
+    HrmMeasurementInterval, IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
 };
 use slint::{ModelRc, VecModel};
 use tracing::warn;
@@ -31,6 +31,8 @@ fn main() -> anyhow::Result<()> {
 
     let config_baseline: Arc<Mutex<Option<DaemonConfigSnapshot>>> =
         Arc::new(Mutex::new(initial_snapshot.clone()));
+    let device_revision = Arc::new(Mutex::new(0u64));
+    let device_baseline: Arc<Mutex<Option<DeviceConfigSnapshot>>> = Arc::new(Mutex::new(None));
     if let Some(snapshot) = &initial_snapshot {
         apply_daemon_config(&window, snapshot);
     } else {
@@ -94,12 +96,16 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let config_baseline = config_baseline.clone();
+        let device_revision = device_revision.clone();
+        let device_baseline = device_baseline.clone();
         rt.spawn(async move {
             loop {
                 // Stream daemon/watch status via D-Bus signals (no polling).
                 if let Ok(client) = CobbleClient::new().await {
                     let weak2 = weak.clone();
                     let baseline = config_baseline.clone();
+                    let device_revision = device_revision.clone();
+                    let device_baseline = device_baseline.clone();
                     let _ = client
                         .watch_status(move |ev| {
                             if matches!(ev, StatusEvent::DaemonConfigChanged(_)) {
@@ -124,6 +130,8 @@ fn main() -> anyhow::Result<()> {
                             }
                             if matches!(ev, StatusEvent::DeviceConfigChanged { .. }) {
                                 let weak_config = weak2.clone();
+                                let device_revision = device_revision.clone();
+                                let device_baseline = device_baseline.clone();
                                 tokio::spawn(async move {
                                     let snapshot = match CobbleClient::new().await {
                                         Ok(client) => client.get_device_config().await.ok(),
@@ -135,7 +143,11 @@ fn main() -> anyhow::Result<()> {
                                         else {
                                             return;
                                         };
-                                        apply_device_config(&window, &snapshot);
+                                        if !window.get_dc_dirty() && !window.get_dc_applying() {
+                                            *device_revision.lock().unwrap() = snapshot.revision;
+                                            apply_device_config(&window, &snapshot);
+                                            *device_baseline.lock().unwrap() = Some(snapshot);
+                                        }
                                     })
                                     .ok();
                                 });
@@ -160,6 +172,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let rt_handle = rt.handle().clone();
+        let device_revision = device_revision.clone();
+        let device_baseline = device_baseline.clone();
         window.on_refresh_device_config(move || {
             let Some(window) = weak.upgrade() else { return };
             if !window.get_watch_connected() {
@@ -172,6 +186,8 @@ fn main() -> anyhow::Result<()> {
             window.set_dc_status_error(false);
             window.set_dc_status("Reading settings from the watch…".into());
             let weak2 = weak.clone();
+            let device_revision = device_revision.clone();
+            let device_baseline = device_baseline.clone();
             rt_handle.spawn(async move {
                 let result = async {
                     let client = CobbleClient::new().await?;
@@ -182,7 +198,11 @@ fn main() -> anyhow::Result<()> {
                     let Some(window) = weak2.upgrade() else { return };
                     window.set_dc_loading(false);
                     match result {
-                        Ok(snapshot) => apply_device_config(&window, &snapshot),
+                        Ok(snapshot) => {
+                            *device_revision.lock().unwrap() = snapshot.revision;
+                            apply_device_config(&window, &snapshot);
+                            *device_baseline.lock().unwrap() = Some(snapshot);
+                        }
                         Err(error) => {
                             window.set_dc_state("error".into());
                             window.set_dc_status_error(true);
@@ -192,6 +212,104 @@ fn main() -> anyhow::Result<()> {
                 })
                 .ok();
             });
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_device_health_changed(move || {
+            if let Some(window) = weak.upgrade() { update_health_display(&window); }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        let revision = device_revision.clone();
+        let baseline = device_baseline.clone();
+        let rt_handle = rt.handle().clone();
+        window.on_apply_device_config(move || {
+            let Some(window) = weak.upgrade() else { return };
+            if !window.get_watch_connected() || window.get_dc_applying() { return; }
+            let current = baseline.lock().unwrap().clone();
+            let Some(original) = current.and_then(|snapshot| snapshot.health.value) else { return };
+            let staged_units = if window.get_dc_units_index() == 0 { DistanceUnits::Metric } else { DistanceUnits::Imperial };
+            let staged_interval = match window.get_dc_hrm_interval_index() {
+                    0 => HrmMeasurementInterval::TenMinutes,
+                    1 => HrmMeasurementInterval::ThirtyMinutes,
+                    2 => HrmMeasurementInterval::OneHour,
+                    _ => HrmMeasurementInterval::Off,
+                };
+            let original_hrm = original.hrm.value.as_ref();
+            let patch = HealthConfigPatch {
+                height_mm: (original.height_mm != window.get_dc_height_mm() as u16).then_some(window.get_dc_height_mm() as u16),
+                weight_dag: (original.weight_dag != window.get_dc_weight_dag() as u16).then_some(window.get_dc_weight_dag() as u16),
+                tracking_enabled: (original.tracking_enabled != window.get_dc_tracking_value()).then_some(window.get_dc_tracking_value()),
+                activity_insights_enabled: (original.activity_insights_enabled != window.get_dc_activity_insights_value()).then_some(window.get_dc_activity_insights_value()),
+                sleep_insights_enabled: (original.sleep_insights_enabled != window.get_dc_sleep_insights_value()).then_some(window.get_dc_sleep_insights_value()),
+                age: (original.age != window.get_dc_age_value() as u8).then_some(window.get_dc_age_value() as u8),
+                gender: (original.gender != window.get_dc_gender_index() as u8).then_some(window.get_dc_gender_index() as u8),
+                distance_units: (window.get_dc_units_available() && original.distance_units.value != Some(staged_units)).then_some(staged_units),
+                hrm_enabled: original_hrm.filter(|value| value.enabled != window.get_dc_hrm_enabled_value()).map(|_| window.get_dc_hrm_enabled_value()),
+                hrm_measurement_interval: original_hrm.filter(|value| window.get_dc_hrm_interval_available() && value.measurement_interval != Some(staged_interval)).map(|_| staged_interval),
+                hrm_during_activity: original_hrm.filter(|value| window.get_dc_hrm_during_activity_available() && value.during_activity != Some(window.get_dc_hrm_during_activity_value())).map(|_| window.get_dc_hrm_during_activity_value()),
+                heart_rate_thresholds: None,
+            };
+            window.set_dc_applying(true);
+            window.set_dc_status_error(false);
+            window.set_dc_status("Applying health settings…".into());
+            let expected_revision = *revision.lock().unwrap();
+            let weak2 = weak.clone();
+            let revision2 = revision.clone();
+            let baseline2 = baseline.clone();
+            rt_handle.spawn(async move {
+                let result = async {
+                    let client = CobbleClient::new().await?;
+                    client.update_device_config(DeviceConfigPatch {
+                        expected_revision,
+                        health: Some(patch),
+                        preferences: Default::default(),
+                    }).await
+                }.await;
+                slint::invoke_from_event_loop(move || {
+                    let Some(window) = weak2.upgrade() else { return };
+                    window.set_dc_applying(false);
+                    match result {
+                        Ok(snapshot) => {
+                            *revision2.lock().unwrap() = snapshot.revision;
+                            *baseline2.lock().unwrap() = Some(snapshot.clone());
+                            if snapshot.state == DeviceConfigState::Error {
+                                window.set_dc_status_error(true);
+                                window.set_dc_status(snapshot.error.as_ref().map_or_else(
+                                    || "Apply failed; the watch state was refreshed.".to_string(),
+                                    |error| format!("Apply failed: {}", error.message),
+                                ).into());
+                            } else {
+                                let read_back = snapshot.capabilities.blob_db_version >= 1;
+                                apply_device_config(&window, &snapshot);
+                                window.set_dc_status(if read_back {
+                                    "Health settings applied and read back from the watch."
+                                } else {
+                                    "Health settings accepted; this watch cannot confirm complete readback."
+                                }.into());
+                            }
+                        }
+                        Err(error) => {
+                            window.set_dc_status_error(true);
+                            window.set_dc_status(format!("Apply failed: {error}").into());
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        let baseline = device_baseline.clone();
+        window.on_discard_device_config(move || {
+            if let (Some(window), Some(snapshot)) = (weak.upgrade(), baseline.lock().unwrap().clone()) {
+                apply_device_config(&window, &snapshot);
+            }
         });
     }
 
@@ -857,6 +975,32 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_dc_last_read(snapshot.last_read_at_ms.map(|value| value.to_string()).unwrap_or_default().into());
 
     if let Some(health) = &snapshot.health.value {
+        w.set_dc_health_available(true);
+        w.set_dc_height_mm(health.height_mm as i32);
+        w.set_dc_weight_dag(health.weight_dag as i32);
+        w.set_dc_age_value(health.age as i32);
+        w.set_dc_gender_index(health.gender.min(2) as i32);
+        w.set_dc_tracking_value(health.tracking_enabled);
+        w.set_dc_activity_insights_value(health.activity_insights_enabled);
+        w.set_dc_sleep_insights_value(health.sleep_insights_enabled);
+        w.set_dc_units_available(health.distance_units.availability == FieldAvailability::Available);
+        w.set_dc_units_index(i32::from(matches!(health.distance_units.value, Some(DistanceUnits::Imperial))));
+        let hrm = health.hrm.value.as_ref();
+        w.set_dc_hrm_available(hrm.is_some());
+        w.set_dc_hrm_enabled_value(hrm.is_some_and(|value| value.enabled));
+        w.set_dc_hrm_interval_available(hrm.and_then(|value| value.measurement_interval).is_some());
+        w.set_dc_hrm_interval_index(hrm.and_then(|value| value.measurement_interval).map_or(0, |value| match value {
+            HrmMeasurementInterval::TenMinutes => 0,
+            HrmMeasurementInterval::ThirtyMinutes => 1,
+            HrmMeasurementInterval::OneHour => 2,
+            HrmMeasurementInterval::Off => 3,
+            HrmMeasurementInterval::Unknown(_) => 0,
+        }));
+        w.set_dc_hrm_during_activity_available(hrm.and_then(|value| value.during_activity).is_some());
+        w.set_dc_hrm_during_activity_value(hrm.and_then(|value| value.during_activity).unwrap_or(false));
+        w.set_dc_thresholds_available(
+            health.heart_rate_thresholds.availability == FieldAvailability::Available,
+        );
         w.set_dc_height(format!("{} mm", health.height_mm).into());
         w.set_dc_weight(format!("{} dag", health.weight_dag).into());
         w.set_dc_age(health.age.to_string().into());
@@ -879,7 +1023,14 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
             || availability_label(health.hrm.availability),
             |hrm| if hrm.enabled { "Enabled" } else { "Disabled" },
         ).into());
+        update_health_display(w);
     } else {
+        w.set_dc_health_available(false);
+        w.set_dc_units_available(false);
+        w.set_dc_hrm_available(false);
+        w.set_dc_hrm_interval_available(false);
+        w.set_dc_hrm_during_activity_available(false);
+        w.set_dc_thresholds_available(false);
         w.set_dc_height("".into());
         w.set_dc_weight("".into());
         w.set_dc_age("".into());
@@ -889,6 +1040,7 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_units("".into());
         w.set_dc_hrm("".into());
     }
+    w.set_dc_dirty(false);
 
     let mut entries = Vec::new();
     let mut previous_group = String::new();
@@ -913,6 +1065,18 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_dc_preferences(ModelRc::new(VecModel::from(entries)));
 }
 
+fn update_health_display(w: &AppWindow) {
+    let height_mm = w.get_dc_height_mm() as f64;
+    let weight_dag = w.get_dc_weight_dag() as f64;
+    if w.get_dc_units_index() == 0 {
+        w.set_dc_height_display(format!("{:.1} cm", height_mm / 10.0).into());
+        w.set_dc_weight_display(format!("{:.2} kg", weight_dag / 100.0).into());
+    } else {
+        w.set_dc_height_display(format!("{:.1} in", height_mm / 25.4).into());
+        w.set_dc_weight_display(format!("{:.1} lb", weight_dag / 45.359_237).into());
+    }
+}
+
 fn clear_device_config(w: &AppWindow) {
     w.set_dc_state("disconnected".into());
     w.set_dc_loading(false);
@@ -920,6 +1084,14 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_status("Connect a watch to inspect its settings.".into());
     w.set_dc_watch_id("".into());
     w.set_dc_height("".into());
+    w.set_dc_health_available(false);
+    w.set_dc_units_available(false);
+    w.set_dc_hrm_available(false);
+    w.set_dc_hrm_interval_available(false);
+    w.set_dc_hrm_during_activity_available(false);
+    w.set_dc_thresholds_available(false);
+    w.set_dc_dirty(false);
+    w.set_dc_applying(false);
     w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));
 }
 

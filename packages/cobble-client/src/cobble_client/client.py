@@ -16,7 +16,12 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 
 from ._codec import decode_data_dict, encode_data_dict
-from ._device_config import DeviceConfigSnapshot, DeviceConfigState, decode_device_config
+from ._device_config import (
+    DeviceConfigSnapshot,
+    DeviceConfigState,
+    HealthConfigPatch,
+    decode_device_config,
+)
 
 BUS_NAME = "org.cobble.Daemon"
 OBJECT_PATH = "/org/cobble/Daemon"
@@ -339,6 +344,46 @@ class CobbleClient:
         self._require_iface()
         try:
             raw = await self._iface.call_refresh_device_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def update_device_config(
+        self, expected_revision: int, patch: HealthConfigPatch
+    ) -> DeviceConfigSnapshot:
+        """Apply only the supplied health fields and return reconciled watch state."""
+        self._require_iface()
+        wire: dict[str, Variant] = {}
+        fields = {
+            "health.height_mm": ("q", patch.height_mm),
+            "health.weight_dag": ("q", patch.weight_dag),
+            "health.tracking_enabled": ("b", patch.tracking_enabled),
+            "health.activity_insights_enabled": ("b", patch.activity_insights_enabled),
+            "health.sleep_insights_enabled": ("b", patch.sleep_insights_enabled),
+            "health.age": ("y", patch.age),
+            "health.gender": ("y", patch.gender),
+            "health.hrm.enabled": ("b", patch.hrm_enabled),
+            "health.hrm.measurement_interval": ("y", patch.hrm_measurement_interval),
+            "health.hrm.during_activity": ("b", patch.hrm_during_activity),
+        }
+        for key, (signature, value) in fields.items():
+            if value is not None:
+                wire[key] = Variant(signature, value)
+        if patch.distance_units is not None:
+            units = {"metric": 0, "imperial": 1}
+            if patch.distance_units not in units:
+                raise ValueError("distance_units must be 'metric' or 'imperial'")
+            wire["health.distance_units"] = Variant("y", units[patch.distance_units])
+        if patch.heart_rate_thresholds is not None:
+            value = patch.heart_rate_thresholds
+            for key, threshold in {
+                "resting": value.resting, "elevated": value.elevated,
+                "maximum": value.maximum, "zone1": value.zone_1,
+                "zone2": value.zone_2, "zone3": value.zone_3,
+            }.items():
+                wire[f"health.thresholds.{key}"] = Variant("y", threshold)
+        try:
+            raw = await self._iface.call_update_device_config(expected_revision, wire)
         except DBusError as e:
             raise self._translate(e) from e
         return decode_device_config({k: _unwrap(v) for k, v in raw.items()})

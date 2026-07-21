@@ -6,7 +6,7 @@
 
 import { Palette } from "theme.slint";
 import { DaySteps, SleepBar, HealthSession, WatchDevice, DeviceConfigEntry, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
-import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl, ErrorBanner, LoadingBanner } from "widgets.slint";
+import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl, ErrorBanner, LoadingBanner, EnumSetting, NumericSetting } from "widgets.slint";
 import { StepsChart, SleepChart, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
@@ -77,7 +77,7 @@ export component AppWindow inherits Window {
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
 
-    // ── Device Config (read-only in Phase 2) ──
+    // ── Device Config staged health editor ──
     in property <string> dc-state: "disconnected";
     in property <string> dc-status: "Connect a watch to inspect its settings.";
     in property <bool> dc-status-error: false;
@@ -95,6 +95,27 @@ export component AppWindow inherits Window {
     in property <string> dc-units;
     in property <string> dc-hrm;
     in property <[DeviceConfigEntry]> dc-preferences;
+    in-out property <int> dc-height-mm;
+    in-out property <int> dc-weight-dag;
+    in-out property <int> dc-age-value;
+    in-out property <int> dc-gender-index;
+    in-out property <bool> dc-tracking-value;
+    in-out property <bool> dc-activity-insights-value;
+    in-out property <bool> dc-sleep-insights-value;
+    in-out property <int> dc-units-index;
+    in-out property <bool> dc-hrm-enabled-value;
+    in-out property <int> dc-hrm-interval-index;
+    in-out property <bool> dc-hrm-during-activity-value;
+    in property <bool> dc-health-available: false;
+    in property <bool> dc-units-available: false;
+    in property <bool> dc-hrm-available: false;
+    in property <bool> dc-hrm-interval-available: false;
+    in property <bool> dc-hrm-during-activity-available: false;
+    in property <bool> dc-thresholds-available: false;
+    in property <string> dc-height-display;
+    in property <string> dc-weight-display;
+    in-out property <bool> dc-dirty: false;
+    in-out property <bool> dc-applying: false;
 
     // ── Period navigation ──
     in property <string> workout-period-label: "This Week";
@@ -111,6 +132,9 @@ export component AppWindow inherits Window {
     callback refresh-data();
     callback refresh-device();
     callback refresh-device-config();
+    callback device-health-changed();
+    callback apply-device-config();
+    callback discard-device-config();
     // Device actions (Settings ▸ Device Actions)
     callback reboot-watch();
     callback reset-into-recovery();
@@ -608,15 +632,81 @@ export component AppWindow inherits Window {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout {
                             padding: 14px; spacing: 8px;
-                            InfoRow { label: "Height"; value: root.dc-height; }
-                            InfoRow { label: "Weight"; value: root.dc-weight; }
-                            InfoRow { label: "Age"; value: root.dc-age; }
-                            InfoRow { label: "Sex"; value: root.dc-sex; }
-                            InfoRow { label: "Tracking"; value: root.dc-tracking; }
-                            InfoRow { label: "Insights"; value: root.dc-insights; }
-                            InfoRow { label: "Distance units"; value: root.dc-units; }
-                            InfoRow { label: "Heart-rate monitor"; value: root.dc-hrm; }
+                            EnumSetting {
+                                label: "Distance units"; options: ["Metric", "Imperial"];
+                                selected-index <=> root.dc-units-index;
+                                enabled: root.dc-units-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Height"; value <=> root.dc-height-mm; minimum: 1000; maximum: 2200;
+                                step: root.dc-units-index == 0 ? 5 : 25; display-value: root.dc-height-display;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Weight"; value <=> root.dc-weight-dag; minimum: 3000; maximum: 20000;
+                                step: root.dc-units-index == 0 ? 10 : 45; display-value: root.dc-weight-display;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Age"; value <=> root.dc-age-value; minimum: 1; maximum: 120;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            EnumSetting {
+                                label: "Sex"; options: ["Female", "Male", "Other"];
+                                selected-index <=> root.dc-gender-index;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Health tracking"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-tracking-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Activity insights"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-activity-insights-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Sleep insights"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-sleep-insights-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-hrm-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Heart-rate monitor"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-hrm-enabled-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-hrm-interval-available: EnumSetting {
+                                label: "Background sampling"; options: ["10 minutes", "30 minutes", "1 hour", "Off"];
+                                selected-index <=> root.dc-hrm-interval-index; enabled: !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            if root.dc-hrm-during-activity-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "HR during activities"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-hrm-during-activity-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-thresholds-available: Text {
+                                text: "Advanced heart-rate thresholds are preserved unchanged until their editing experience is reviewed.";
+                                color: Palette.muted; font-size: 11px; wrap: word-wrap;
+                            }
                         }
+                    }
+
+                    if root.dc-health-available: HorizontalLayout {
+                        spacing: 8px;
+                        ActionButton { label: "Discard"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.discard-device-config(); } }
+                        ActionButton { label: root.dc-applying ? "Applying…" : "Apply"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.apply-device-config(); } }
                     }
 
                     for entry in root.dc-preferences: VerticalLayout {

@@ -164,6 +164,8 @@ fn device_config_error(map: &VarDict) -> Option<ConfigError> {
         Some("not_supported") => ConfigErrorKind::NotSupported,
         Some("disconnected") => ConfigErrorKind::Disconnected,
         Some("timeout") => ConfigErrorKind::Timeout,
+        Some("rejected") => ConfigErrorKind::Rejected,
+        Some("readback_mismatch") => ConfigErrorKind::ReadbackMismatch,
         _ => ConfigErrorKind::Internal,
     };
     Some(ConfigError { kind, field: None, message: message.to_owned() })
@@ -316,6 +318,51 @@ fn encode_daemon_config_patch(patch: DaemonConfigPatch) -> Result<VarDict> {
     Ok(wire)
 }
 
+fn encode_device_config_patch(patch: DeviceConfigPatch) -> Result<VarDict> {
+    if !patch.preferences.is_empty() {
+        return Err(Error::Failure("general preference writes are not available until Phase 4".into()));
+    }
+    let mut wire = VarDict::new();
+    let Some(health) = patch.health else { return Ok(wire) };
+    macro_rules! insert {
+        ($key:literal, $value:expr) => {
+            if let Some(value) = $value { wire.insert($key.into(), wire_value(value)?); }
+        };
+    }
+    insert!("health.height_mm", health.height_mm);
+    insert!("health.weight_dag", health.weight_dag);
+    insert!("health.tracking_enabled", health.tracking_enabled);
+    insert!("health.activity_insights_enabled", health.activity_insights_enabled);
+    insert!("health.sleep_insights_enabled", health.sleep_insights_enabled);
+    insert!("health.age", health.age);
+    insert!("health.gender", health.gender);
+    if let Some(units) = health.distance_units {
+        let code = match units { DistanceUnits::Metric => 0, DistanceUnits::Imperial => 1, DistanceUnits::Unknown(code) => code };
+        wire.insert("health.distance_units".into(), wire_value(code)?);
+    }
+    insert!("health.hrm.enabled", health.hrm_enabled);
+    if let Some(interval) = health.hrm_measurement_interval {
+        let code = match interval {
+            HrmMeasurementInterval::TenMinutes => 0,
+            HrmMeasurementInterval::ThirtyMinutes => 1,
+            HrmMeasurementInterval::OneHour => 2,
+            HrmMeasurementInterval::Off => 3,
+            HrmMeasurementInterval::Unknown(code) => code,
+        };
+        wire.insert("health.hrm.measurement_interval".into(), wire_value(code)?);
+    }
+    insert!("health.hrm.during_activity", health.hrm_during_activity);
+    if let Some(value) = health.heart_rate_thresholds {
+        wire.insert("health.thresholds.resting".into(), wire_value(value.resting)?);
+        wire.insert("health.thresholds.elevated".into(), wire_value(value.elevated)?);
+        wire.insert("health.thresholds.maximum".into(), wire_value(value.maximum)?);
+        wire.insert("health.thresholds.zone1".into(), wire_value(value.zone_1)?);
+        wire.insert("health.thresholds.zone2".into(), wire_value(value.zone_2)?);
+        wire.insert("health.thresholds.zone3".into(), wire_value(value.zone_3)?);
+    }
+    Ok(wire)
+}
+
 /// Extract a string field from an `a{sv}` map, or `""` if absent/not a string.
 fn var_str(map: &VarDict, key: &str) -> String {
     map.get(key)
@@ -400,6 +447,7 @@ pub trait CobbleDaemon {
     async fn update_daemon_config(&self, expected_revision: u64, patch: VarDict) -> Result<VarDict>;
     async fn get_device_config(&self) -> Result<VarDict>;
     async fn refresh_device_config(&self) -> Result<VarDict>;
+    async fn update_device_config(&self, expected_revision: u64, patch: VarDict) -> Result<VarDict>;
 
     #[zbus(signal)]
     fn daemon_config_changed(&self, revision: u64) -> Result<()>;
@@ -712,6 +760,13 @@ impl CobbleClient {
 
     pub async fn refresh_device_config(&self) -> Result<DeviceConfigSnapshot> {
         let map = self.proxy().await?.refresh_device_config().await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn update_device_config(&self, patch: DeviceConfigPatch) -> Result<DeviceConfigSnapshot> {
+        let expected_revision = patch.expected_revision;
+        let wire = encode_device_config_patch(patch)?;
+        let map = self.proxy().await?.update_device_config(expected_revision, wire).await?;
         decode_device_config(&map)
     }
 

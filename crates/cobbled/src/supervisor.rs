@@ -104,7 +104,7 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                             );
                             let _ = tx.send(DaemonEvent::HealthProfile(p));
                             if let Some(config) = parse_health_activity_config(&value) {
-                                let _ = tx.send(DaemonEvent::HealthActivityRaw(config));
+                                let _ = tx.send(DaemonEvent::HealthActivityRaw(config, value));
                             }
                         }
                         None => warn!("activityPreferences blob malformed ({} bytes)", value.len()),
@@ -115,7 +115,7 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                                 "hrmPreferences: enabled={} interval={:?} activity_tracking={:?}",
                                 hrm.enabled, hrm.measurement_interval, hrm.activity_tracking_enabled,
                             );
-                            let _ = tx.send(DaemonEvent::HealthHrm(hrm));
+                            let _ = tx.send(DaemonEvent::HealthHrm(hrm, value));
                         }
                         None => warn!("hrmPreferences blob malformed ({} bytes)", value.len()),
                     },
@@ -126,14 +126,14 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                                 hr.resting_hr, hr.elevated_hr, hr.max_hr,
                                 hr.zone1_threshold, hr.zone2_threshold, hr.zone3_threshold,
                             );
-                            let _ = tx.send(DaemonEvent::HealthHeartRate(hr));
+                            let _ = tx.send(DaemonEvent::HealthHeartRate(hr, value));
                         }
                         None => warn!("heartRatePreferences blob malformed ({} bytes)", value.len()),
                     },
                     "unitsDistance" => match parse_units_distance(&value) {
                         Some(imperial) => {
                             debug!("unitsDistance: imperial={imperial}");
-                            let _ = tx.send(DaemonEvent::HealthUnits(imperial));
+                            let _ = tx.send(DaemonEvent::HealthUnits(imperial, value));
                         }
                         None => warn!("unitsDistance blob malformed ({} bytes)", value.len()),
                     },

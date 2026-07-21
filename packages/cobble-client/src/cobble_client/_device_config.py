@@ -28,6 +28,8 @@ class ConfigErrorKind(StrEnum):
     NOT_SUPPORTED = "not_supported"
     DISCONNECTED = "disconnected"
     TIMEOUT = "timeout"
+    REJECTED = "rejected"
+    READBACK_MISMATCH = "readback_mismatch"
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,22 @@ class HeartRateThresholds:
     zone_1: int
     zone_2: int
     zone_3: int
+
+
+@dataclass(frozen=True)
+class HealthConfigPatch:
+    height_mm: int | None = None
+    weight_dag: int | None = None
+    tracking_enabled: bool | None = None
+    activity_insights_enabled: bool | None = None
+    sleep_insights_enabled: bool | None = None
+    age: int | None = None
+    gender: int | None = None
+    distance_units: str | None = None
+    hrm_enabled: bool | None = None
+    hrm_measurement_interval: int | None = None
+    hrm_during_activity: bool | None = None
+    heart_rate_thresholds: HeartRateThresholds | None = None
 
 
 @dataclass(frozen=True)

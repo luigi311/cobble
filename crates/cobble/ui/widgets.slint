@@ -6,8 +6,11 @@ import { Palette } from "theme.slint";
 
 export component Toggle inherits Rectangle {
     in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
     width: 50px; height: 28px; border-radius: 14px;
     background: checked ? Palette.accent : Palette.surface;
+    opacity: enabled ? 1.0 : 0.5;
     border-width: 1px;
     border-color: checked ? Palette.accent : Palette.muted;
     animate background { duration: 150ms; easing: ease-in-out; }
@@ -17,7 +20,7 @@ export component Toggle inherits Rectangle {
         y: (parent.height - self.height) / 2;
         animate x { duration: 150ms; easing: ease-in-out; }
     }
-    TouchArea { clicked => { root.checked = !root.checked; } }
+    TouchArea { enabled: root.enabled; clicked => { root.checked = !root.checked; root.toggled(root.checked); } }
 }
 
 // ─── Labelled text-input row ─────────────────────────────────────────────────
@@ -138,6 +141,7 @@ export component NumericSetting inherits Rectangle {
     in property <int> maximum: 100;
     in property <int> step: 1;
     in property <string> suffix;
+    in property <string> display-value;
     in property <bool> enabled: true;
     callback changed(int);
     height: 48px; border-radius: 8px; background: Palette.surface;
@@ -158,7 +162,8 @@ export component NumericSetting inherits Rectangle {
             }
         }
         Text {
-            text: root.value + (root.suffix == "" ? "" : " " + root.suffix);
+            text: root.display-value != "" ? root.display-value
+                : root.value + (root.suffix == "" ? "" : " " + root.suffix);
             color: Palette.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
             min-width: 64px;
         }
