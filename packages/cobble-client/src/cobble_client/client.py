@@ -401,6 +401,15 @@ class CobbleClient:
             raise self._translate(e) from e
         return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
 
+    async def reset_device_config_defaults(self, expected_revision: int) -> DeviceConfigSnapshot:
+        """Reset observed editable general preferences; health and unknown records are untouched."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_reset_device_config_defaults(expected_revision)
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
     async def get_watch_version(self) -> dict:
         """Return the watch's version info as a dict.
 

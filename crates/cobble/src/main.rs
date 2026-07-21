@@ -283,6 +283,61 @@ fn main() -> anyhow::Result<()> {
             stage_number("dndInterruptionsMask", window.get_dc_dnd_interruptions_available(), [0, 2][window.get_dc_dnd_interruptions_index().clamp(0, 1) as usize]);
             stage_number("dndShowNotifications", window.get_dc_dnd_show_notifications_available(), window.get_dc_dnd_show_notifications_index().clamp(0, 1) as u32);
             stage_number("timelineQuickViewBeforeTimeMin", window.get_dc_timeline_minutes_available(), window.get_dc_timeline_minutes() as u32);
+            stage_number("motionSensitivity", window.get_dc_motion_sensitivity_available(), [10, 25, 40, 55, 70, 85, 100][window.get_dc_motion_sensitivity_index().clamp(0, 6) as usize]);
+            stage_number("lightAmbientThreshold", window.get_dc_light_ambient_threshold_available(), window.get_dc_light_ambient_threshold() as u32);
+            stage_number("dynBacklightMinThreshold", window.get_dc_dynamic_backlight_threshold_available(), window.get_dc_dynamic_backlight_threshold() as u32);
+            let backlight_colors = [
+                0xff0000, 0xff7f00, 0xffff00, 0x7fff00, 0x00ff00, 0x00ffff,
+                0x0000ff, 0x7f00ff, 0xff00ff, 0xff66cc, 0xffbfa2, 0xffffff,
+            ];
+            if window.get_dc_light_color_available() {
+                let original = original_preferences.get("lightColor").and_then(|field| match field.value.as_ref() {
+                    Some(PreferenceValue::Unsigned(value)) | Some(PreferenceValue::Color(value)) => Some(*value), _ => None,
+                });
+                let selected = backlight_colors.get(window.get_dc_light_color_index() as usize).copied().or(original);
+                if let (Some(selected), Some(original)) = (selected, original) {
+                    if selected != original { preferences.insert("lightColor".into(), PreferenceValue::Color(selected)); }
+                }
+            }
+            let quick_launch_values = [
+                "off",
+                "2220d805-cf9a-4e12-92b9-5ca778aff6bb",
+                "d0f12e6c-97eb-2287-a2f5-115dfaa1d168",
+                "d4f7be63-97e6-4952-b265-dd4bce11c155",
+                "88c28c12-7f81-42db-aaa6-14ccef6f27e5",
+                "daae3686-bff6-4ba5-921b-262f847bb6e8",
+                "79c76b48-6111-4e80-8deb-3119eebef33e",
+                "36d8c6ed-4c83-4fa1-a9e2-8f12dc941f8c",
+            ];
+            let mut stage_quick_launch = |key: &str, available: bool, index: i32| {
+                if !available { return; }
+                let original = original_preferences.get(key).and_then(|field| match field.value.as_ref() {
+                    Some(PreferenceValue::Text(value)) => Some(value.as_str()), _ => None,
+                });
+                let value = quick_launch_values.get(index as usize).copied().or(original);
+                if let (Some(value), Some(original)) = (value, original) {
+                    if value != original { preferences.insert(key.to_owned(), PreferenceValue::Text(value.to_owned())); }
+                }
+            };
+            stage_quick_launch("qlUp", window.get_dc_ql_up_available(), window.get_dc_ql_up_index());
+            stage_quick_launch("qlDown", window.get_dc_ql_down_available(), window.get_dc_ql_down_index());
+            stage_quick_launch("qlSelect", window.get_dc_ql_select_available(), window.get_dc_ql_select_index());
+            stage_quick_launch("qlBack", window.get_dc_ql_back_available(), window.get_dc_ql_back_index());
+            stage_quick_launch("qlComboBackUp", window.get_dc_ql_combo_back_up_available(), window.get_dc_ql_combo_back_up_index());
+            stage_quick_launch("qlComboUpDown", window.get_dc_ql_combo_up_down_available(), window.get_dc_ql_combo_up_down_index());
+            stage_quick_launch("qlSingleClickUp", window.get_dc_ql_tap_up_available(), window.get_dc_ql_tap_up_index());
+            stage_quick_launch("qlSingleClickDown", window.get_dc_ql_tap_down_available(), window.get_dc_ql_tap_down_index());
+            if window.get_dc_language_available() {
+                let original = original_preferences.get("language").and_then(|field| match field.value.as_ref() {
+                    Some(PreferenceValue::Unsigned(value)) => Some(*value), _ => None,
+                });
+                let selected = ((0..9).contains(&window.get_dc_language_index()))
+                    .then_some(window.get_dc_language_index() as u32 + 1)
+                    .or(original);
+                if let (Some(selected), Some(original)) = (selected, original) {
+                    if selected != original { preferences.insert("language".into(), PreferenceValue::Unsigned(selected)); }
+                }
+            }
             if window.get_dc_text_size_available() {
                 let code = window.get_dc_text_size_index() as u32;
                 let unchanged = original_preferences.get("textStyle").and_then(|field| field.value.as_ref())
@@ -362,6 +417,54 @@ fn main() -> anyhow::Result<()> {
             if let (Some(window), Some(snapshot)) = (weak.upgrade(), baseline.lock().unwrap().clone()) {
                 apply_device_config(&window, &snapshot);
             }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        let revision = device_revision.clone();
+        let baseline = device_baseline.clone();
+        let rt_handle = rt.handle().clone();
+        window.on_reset_device_config_defaults(move || {
+            let Some(window) = weak.upgrade() else { return };
+            if !window.get_watch_connected() || window.get_dc_applying() { return; }
+            window.set_dc_applying(true);
+            window.set_dc_status_error(false);
+            window.set_dc_status("Resetting observed general settings…".into());
+            let expected_revision = *revision.lock().unwrap();
+            let weak2 = weak.clone();
+            let revision2 = revision.clone();
+            let baseline2 = baseline.clone();
+            rt_handle.spawn(async move {
+                let result = async {
+                    let client = CobbleClient::new().await?;
+                    client.reset_device_config_defaults(expected_revision).await
+                }.await;
+                slint::invoke_from_event_loop(move || {
+                    let Some(window) = weak2.upgrade() else { return };
+                    window.set_dc_applying(false);
+                    match result {
+                        Ok(snapshot) => {
+                            *revision2.lock().unwrap() = snapshot.revision;
+                            *baseline2.lock().unwrap() = Some(snapshot.clone());
+                            apply_device_config(&window, &snapshot);
+                            if snapshot.state == DeviceConfigState::Error {
+                                window.set_dc_status_error(true);
+                                window.set_dc_status(snapshot.error.as_ref().map_or_else(
+                                    || "Reset failed; the watch state was refreshed.".to_string(),
+                                    |error| format!("Reset failed: {}", error.message),
+                                ).into());
+                            } else {
+                                window.set_dc_status("Observed general settings reset to defaults; health settings were unchanged.".into());
+                            }
+                        }
+                        Err(error) => {
+                            window.set_dc_status_error(true);
+                            window.set_dc_status(format!("Reset failed: {error}").into());
+                        }
+                    }
+                }).ok();
+            });
         });
     }
 
@@ -985,6 +1088,7 @@ fn apply_daemon_config(w: &AppWindow, snapshot: &DaemonConfigSnapshot) {
 }
 
 fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
+    w.set_confirm_device_defaults(false);
     let state = match snapshot.state {
         DeviceConfigState::Disconnected => "disconnected",
         DeviceConfigState::Loading => "loading",
@@ -1157,9 +1261,56 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_dc_dnd_show_notifications_available(dnd_show.is_some()); w.set_dc_dnd_show_notifications_index(dnd_show.unwrap_or(1) as i32);
     let timeline_minutes = pref_number("timelineQuickViewBeforeTimeMin").filter(|value| *value <= 30);
     w.set_dc_timeline_minutes_available(timeline_minutes.is_some()); w.set_dc_timeline_minutes(timeline_minutes.unwrap_or(10) as i32);
+    let backlight_colors = [
+        0xff0000, 0xff7f00, 0xffff00, 0x7fff00, 0x00ff00, 0x00ffff,
+        0x0000ff, 0x7f00ff, 0xff00ff, 0xff66cc, 0xffbfa2, 0xffffff,
+    ];
+    let light_color = pref_number("lightColor");
+    w.set_dc_light_color_available(light_color.is_some());
+    w.set_dc_light_color_index(light_color.and_then(|value| backlight_colors.iter().position(|known| *known == value)).unwrap_or(12) as i32);
+    let motion_sensitivity = pref_number("motionSensitivity").and_then(|value| [10, 25, 40, 55, 70, 85, 100].iter().position(|known| *known == value));
+    w.set_dc_motion_sensitivity_available(motion_sensitivity.is_some()); w.set_dc_motion_sensitivity_index(motion_sensitivity.unwrap_or(3) as i32);
+    let ambient_threshold = pref_number("lightAmbientThreshold").filter(|value| (1..=4096).contains(value));
+    w.set_dc_light_ambient_threshold_available(ambient_threshold.is_some()); w.set_dc_light_ambient_threshold(ambient_threshold.unwrap_or(150) as i32);
+    let dynamic_threshold = pref_number("dynBacklightMinThreshold").filter(|value| *value <= 4096);
+    w.set_dc_dynamic_backlight_threshold_available(dynamic_threshold.is_some()); w.set_dc_dynamic_backlight_threshold(dynamic_threshold.unwrap_or(5) as i32);
+    let quick_launch_values = [
+        "off",
+        "2220d805-cf9a-4e12-92b9-5ca778aff6bb",
+        "d0f12e6c-97eb-2287-a2f5-115dfaa1d168",
+        "d4f7be63-97e6-4952-b265-dd4bce11c155",
+        "88c28c12-7f81-42db-aaa6-14ccef6f27e5",
+        "daae3686-bff6-4ba5-921b-262f847bb6e8",
+        "79c76b48-6111-4e80-8deb-3119eebef33e",
+        "36d8c6ed-4c83-4fa1-a9e2-8f12dc941f8c",
+    ];
+    let set_quick_launch = |key: &str, available: fn(&AppWindow, bool), index: fn(&AppWindow, i32)| {
+        let current = snapshot.preferences.get(key).and_then(|field| match field.value.as_ref() {
+            Some(PreferenceValue::Text(value)) => Some(value.as_str()), _ => None,
+        });
+        available(w, current.is_some());
+        index(w, current.and_then(|value| quick_launch_values.iter().position(|known| *known == value)).unwrap_or(8) as i32);
+    };
+    set_quick_launch("qlUp", AppWindow::set_dc_ql_up_available, AppWindow::set_dc_ql_up_index);
+    set_quick_launch("qlDown", AppWindow::set_dc_ql_down_available, AppWindow::set_dc_ql_down_index);
+    set_quick_launch("qlSelect", AppWindow::set_dc_ql_select_available, AppWindow::set_dc_ql_select_index);
+    set_quick_launch("qlBack", AppWindow::set_dc_ql_back_available, AppWindow::set_dc_ql_back_index);
+    set_quick_launch("qlComboBackUp", AppWindow::set_dc_ql_combo_back_up_available, AppWindow::set_dc_ql_combo_back_up_index);
+    set_quick_launch("qlComboUpDown", AppWindow::set_dc_ql_combo_up_down_available, AppWindow::set_dc_ql_combo_up_down_index);
+    set_quick_launch("qlSingleClickUp", AppWindow::set_dc_ql_tap_up_available, AppWindow::set_dc_ql_tap_up_index);
+    set_quick_launch("qlSingleClickDown", AppWindow::set_dc_ql_tap_down_available, AppWindow::set_dc_ql_tap_down_index);
+    let language = pref_number("language");
+    w.set_dc_language_available(language.is_some());
+    w.set_dc_language_index(language.filter(|value| (1..=9).contains(value)).map_or(9, |value| value as i32 - 1));
 
     let mut entries = Vec::new();
-    let mut previous_group = String::new();
+    if let Some(watch) = &snapshot.watch {
+        entries.push(DeviceConfigEntry { group: "Capabilities & Diagnostics".into(), label: "Platform".into(), value: watch.platform.clone().unwrap_or_else(|| "Unknown".into()).into(), status: "available".into() });
+        entries.push(DeviceConfigEntry { group: "".into(), label: "Firmware".into(), value: watch.firmware.clone().unwrap_or_else(|| "Unknown".into()).into(), status: "available".into() });
+    }
+    entries.push(DeviceConfigEntry { group: if entries.is_empty() { "Capabilities & Diagnostics".into() } else { "".into() }, label: "BlobDB version".into(), value: snapshot.capabilities.blob_db_version.to_string().into(), status: "available".into() });
+    entries.push(DeviceConfigEntry { group: "".into(), label: "Complete readback".into(), value: if snapshot.capabilities.supported.iter().any(|capability| capability == "complete_refresh") { "Yes" } else { "No" }.into(), status: "available".into() });
+    let mut previous_group = "Capabilities & Diagnostics".to_owned();
     for (key, field) in &snapshot.preferences {
         if matches!(key.as_str(), "clock24h" | "displayOrientationLeftHanded" | "textStyle"
             | "lightEnabled" | "lightAmbientSensorEnabled" | "lightMotion" | "lightTimeoutMs"
@@ -1171,19 +1322,24 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
             | "dndSmartEnabled" | "dndInterruptionsMask" | "dndShowNotifications"
             | "dndMotionBacklight" | "dndAutoDismiss" | "timelineQuickViewEnabled"
             | "timelineQuickViewBeforeTimeMin" | "musicShowVolumeControls"
-            | "musicShowProgressBar") {
+            | "musicShowProgressBar" | "qlUp" | "qlDown" | "qlSelect" | "qlBack"
+            | "qlComboBackUp" | "qlComboUpDown" | "qlSingleClickUp" | "qlSingleClickDown"
+            | "language" | "lightColor" | "motionSensitivity" | "lightAmbientThreshold"
+            | "dynBacklightMinThreshold") {
             continue;
         }
         let group = preference_group(key);
         let heading = if group == previous_group { String::new() } else { group.to_owned() };
         previous_group = group.to_owned();
-        let value = match &field.value {
+        let decoded = match &field.value {
             Some(PreferenceValue::Bool(value)) => if *value { "On".to_string() } else { "Off".to_string() },
             Some(PreferenceValue::Unsigned(value)) | Some(PreferenceValue::Color(value)) => value.to_string(),
             Some(PreferenceValue::Text(value)) => value.clone(),
             Some(PreferenceValue::Enum { code, label }) => label.clone().unwrap_or_else(|| format!("Unknown ({code})")),
             Some(PreferenceValue::Unknown) | None => "—".to_string(),
         };
+        let raw = field.raw.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
+        let value = if raw.is_empty() { decoded } else { format!("{decoded} · raw {raw}") };
         entries.push(DeviceConfigEntry {
             group: heading.into(),
             label: humanize_preference_key(key).into(),
@@ -1239,6 +1395,14 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_dnd_motion_backlight_available(false); w.set_dc_dnd_auto_dismiss_available(false);
     w.set_dc_timeline_quick_view_available(false); w.set_dc_timeline_minutes_available(false);
     w.set_dc_music_volume_available(false); w.set_dc_music_progress_available(false);
+    w.set_dc_ql_up_available(false); w.set_dc_ql_down_available(false);
+    w.set_dc_ql_select_available(false); w.set_dc_ql_back_available(false);
+    w.set_dc_ql_combo_back_up_available(false); w.set_dc_ql_combo_up_down_available(false);
+    w.set_dc_ql_tap_up_available(false); w.set_dc_ql_tap_down_available(false);
+    w.set_dc_language_available(false);
+    w.set_dc_light_color_available(false); w.set_dc_motion_sensitivity_available(false);
+    w.set_dc_light_ambient_threshold_available(false); w.set_dc_dynamic_backlight_threshold_available(false);
+    w.set_dc_backlight_advanced_expanded(false);
     w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));
 }
 

@@ -151,6 +151,20 @@ export component AppWindow inherits Window {
     in property <bool> dc-timeline-minutes-available; in-out property <int> dc-timeline-minutes: 10;
     in property <bool> dc-music-volume-available; in-out property <bool> dc-music-volume-value;
     in property <bool> dc-music-progress-available; in-out property <bool> dc-music-progress-value;
+    in property <bool> dc-ql-up-available; in-out property <int> dc-ql-up-index;
+    in property <bool> dc-ql-down-available; in-out property <int> dc-ql-down-index;
+    in property <bool> dc-ql-select-available; in-out property <int> dc-ql-select-index;
+    in property <bool> dc-ql-back-available; in-out property <int> dc-ql-back-index;
+    in property <bool> dc-ql-combo-back-up-available; in-out property <int> dc-ql-combo-back-up-index;
+    in property <bool> dc-ql-combo-up-down-available; in-out property <int> dc-ql-combo-up-down-index;
+    in property <bool> dc-ql-tap-up-available; in-out property <int> dc-ql-tap-up-index;
+    in property <bool> dc-ql-tap-down-available; in-out property <int> dc-ql-tap-down-index;
+    in property <bool> dc-language-available; in-out property <int> dc-language-index;
+    in property <bool> dc-light-color-available; in-out property <int> dc-light-color-index;
+    in property <bool> dc-motion-sensitivity-available; in-out property <int> dc-motion-sensitivity-index: 3;
+    in property <bool> dc-light-ambient-threshold-available; in-out property <int> dc-light-ambient-threshold: 150;
+    in property <bool> dc-dynamic-backlight-threshold-available; in-out property <int> dc-dynamic-backlight-threshold: 5;
+    in-out property <bool> dc-backlight-advanced-expanded: false;
 
     // ── Period navigation ──
     in property <string> workout-period-label: "This Week";
@@ -170,6 +184,7 @@ export component AppWindow inherits Window {
     callback device-health-changed();
     callback apply-device-config();
     callback discard-device-config();
+    callback reset-device-config-defaults();
     // Device actions (Settings ▸ Device Actions)
     callback reboot-watch();
     callback reset-into-recovery();
@@ -195,6 +210,7 @@ export component AppWindow inherits Window {
     property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions, 3 = device config
     property <bool> confirm-factory: false;
     property <bool> confirm-recovery: false;
+    in-out property <bool> confirm-device-defaults: false;
     property <int> workout-period: 1;
     property <int> sleep-period-val: 1;
     property <int> heart-period: 1;
@@ -768,14 +784,18 @@ export component AppWindow inherits Window {
                     if root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
                         || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
                         || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
-                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available: Text {
+                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: Text {
                         text: "Backlight & Input"; color: Palette.muted; font-size: 12px;
                     }
 
                     if root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
                         || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
                         || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
-                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available: Rectangle {
+                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: Rectangle {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout {
                             padding: 14px; spacing: 8px;
@@ -790,6 +810,16 @@ export component AppWindow inherits Window {
                             if root.dc-light-dynamic-mode-available: EnumSetting { label: "Dynamic mode"; options: ["Off", "Bright", "Standard", "Dim"]; selected-index <=> root.dc-light-dynamic-mode-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
                             if root.dc-menu-wrap-available: HorizontalLayout { height: 36px; Text { text: "Menu wrap-around"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-menu-wrap-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
                             if root.dc-menu-vibe-available: EnumSetting { label: "Menu vibration"; options: ["No Vibe", "On Wrap Around", "When Locked"]; selected-index <=> root.dc-menu-vibe-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-color-available: EnumSetting { label: "Backlight color"; options: ["Red", "Orange", "Yellow", "Lime", "Green", "Cyan", "Blue", "Purple", "Magenta", "Pink", "Warm White", "Cool White", "Existing custom color"]; selected-index <=> root.dc-light-color-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-motion-sensitivity-available || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Advanced backlight controls"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-backlight-advanced-expanded; enabled: !root.dc-applying; }
+                            }
+                            if root.dc-backlight-advanced-expanded && root.dc-motion-sensitivity-available: EnumSetting { label: "Motion sensitivity"; options: ["Very Low", "Low", "Medium-Low", "Medium", "Medium-High", "High", "Very High"]; selected-index <=> root.dc-motion-sensitivity-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-backlight-advanced-expanded && root.dc-light-ambient-threshold-available: NumericSetting { label: "Ambient light threshold"; value <=> root.dc-light-ambient-threshold; minimum: 1; maximum: 4096; step: 1; suffix: ""; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-backlight-advanced-expanded && root.dc-dynamic-backlight-threshold-available: NumericSetting { label: "Dynamic minimum threshold"; value <=> root.dc-dynamic-backlight-threshold; minimum: 0; maximum: 4096; step: 1; suffix: ""; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
                         }
                     }
 
@@ -854,21 +884,72 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available: Text {
+                        text: "Quick Launch"; color: Palette.muted; font-size: 12px;
+                    }
+
+                    if root.dc-language-available: Text {
+                        text: "Language"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-language-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            EnumSetting { label: "Built-in language"; options: ["English", "Català", "Deutsch", "Español", "Français", "Italiano", "Nederlands", "Português", "Polski", "Existing language pack"]; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+                    if root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-ql-up-available: EnumSetting { label: "Hold Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-down-available: EnumSetting { label: "Hold Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-select-available: EnumSetting { label: "Hold Select"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-select-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-back-available: EnumSetting { label: "Hold Back"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-back-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-combo-back-up-available: EnumSetting { label: "Hold Back + Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-combo-back-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-combo-up-down-available: EnumSetting { label: "Hold Up + Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-combo-up-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-tap-up-available: EnumSetting { label: "Tap Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-tap-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-tap-down-available: EnumSetting { label: "Tap Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-tap-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+
                     if root.dc-health-available || root.dc-clock-24h-available || root.dc-left-handed-available || root.dc-text-size-available
                         || root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
                         || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
                         || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
                         || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available
                         || root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
                         || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
                         || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available
                         || root.dc-dnd-manual-available || root.dc-dnd-smart-available || root.dc-dnd-interruptions-available
                         || root.dc-dnd-show-notifications-available || root.dc-dnd-motion-backlight-available || root.dc-dnd-auto-dismiss-available
                         || root.dc-timeline-quick-view-available || root.dc-timeline-minutes-available
-                        || root.dc-music-volume-available || root.dc-music-progress-available: HorizontalLayout {
+                        || root.dc-music-volume-available || root.dc-music-progress-available
+                        || root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available
+                        || root.dc-language-available: HorizontalLayout {
                         spacing: 8px;
                         ActionButton { label: "Discard"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.discard-device-config(); } }
                         ActionButton { label: root.dc-applying ? "Applying…" : "Apply"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.apply-device-config(); } }
+                    }
+
+                    if root.dc-state == "ready" || root.dc-state == "partial": ActionButton {
+                        label: root.confirm-device-defaults ? "Tap again to reset general settings" : "Reset General Settings to Defaults";
+                        danger: root.confirm-device-defaults;
+                        enabled: !root.dc-applying;
+                        clicked => {
+                            if (root.confirm-device-defaults) {
+                                root.confirm-device-defaults = false;
+                                root.reset-device-config-defaults();
+                            } else {
+                                root.confirm-device-defaults = true;
+                            }
+                        }
                     }
 
                     for entry in root.dc-preferences: VerticalLayout {

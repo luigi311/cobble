@@ -66,8 +66,8 @@ use std::{
 use libpebble_ble::{
     ActivityPreferences, HeartRatePreferences, HrmPreferences,
     MusicPlaybackState, MusicRepeat, MusicShuffle, Pebble, WatchColorInfo, WatchPrefValue,
-    WatchVersionInfo, WeatherType, HrMonitoringInterval, WatchPrefModel, WatchType,
-    decode_watch_pref_for_model, encode_watch_pref,
+    WatchVersionInfo, WeatherType, HrMonitoringInterval, WatchPrefDefault, WatchPrefModel,
+    WatchType, decode_watch_pref_for_model, encode_watch_pref, watch_pref_metadata,
 };
 
 use cobble_db::{AppDb, DateRange, WellnessExportStatus};
@@ -84,6 +84,58 @@ use zbus::{
 
 use crate::codec::{decode_wire_dict, encode_wire_dict, WireDict};
 use crate::notification::app_name_to_category;
+
+fn editable_general_preference(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "clock24h" => "clock24h",
+        "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
+        "textStyle" => "textStyle",
+        "lightEnabled" => "lightEnabled",
+        "lightAmbientSensorEnabled" => "lightAmbientSensorEnabled",
+        "lightMotion" => "lightMotion",
+        "lightTimeoutMs" => "lightTimeoutMs",
+        "lightTouch" => "lightTouch",
+        "lightIntensity" => "lightIntensity",
+        "lightDynamicIntensity" => "lightDynamicIntensity",
+        "lightPreset" => "lightPreset",
+        "lightDynamicMode" => "lightDynamicMode",
+        "menuScrollWrapAround" => "menuScrollWrapAround",
+        "menuScrollVibeBehavior" => "menuScrollVibeBehavior",
+        "mask" => "mask",
+        "notifDesignStyle" => "notifDesignStyle",
+        "notifVibeDelay" => "notifVibeDelay",
+        "notifBacklight" => "notifBacklight",
+        "notifWindowTimeout" => "notifWindowTimeout",
+        "vibeIntensity" => "vibeIntensity",
+        "vibeScoreNotifications" => "vibeScoreNotifications",
+        "vibeScoreIncomingCalls" => "vibeScoreIncomingCalls",
+        "vibeScoreAlarms" => "vibeScoreAlarms",
+        "dndManuallyEnabled" => "dndManuallyEnabled",
+        "dndSmartEnabled" => "dndSmartEnabled",
+        "dndInterruptionsMask" => "dndInterruptionsMask",
+        "dndShowNotifications" => "dndShowNotifications",
+        "dndMotionBacklight" => "dndMotionBacklight",
+        "dndAutoDismiss" => "dndAutoDismiss",
+        "timelineQuickViewEnabled" => "timelineQuickViewEnabled",
+        "timelineQuickViewBeforeTimeMin" => "timelineQuickViewBeforeTimeMin",
+        "musicShowVolumeControls" => "musicShowVolumeControls",
+        "musicShowProgressBar" => "musicShowProgressBar",
+        "qlUp" => "qlUp",
+        "qlDown" => "qlDown",
+        "qlSelect" => "qlSelect",
+        "qlBack" => "qlBack",
+        "qlComboBackUp" => "qlComboBackUp",
+        "qlComboUpDown" => "qlComboUpDown",
+        "qlSingleClickUp" => "qlSingleClickUp",
+        "qlSingleClickDown" => "qlSingleClickDown",
+        "language" => "language",
+        "lightColor" => "lightColor",
+        "motionSensitivity" => "motionSensitivity",
+        "lightAmbientThreshold" => "lightAmbientThreshold",
+        "dynBacklightMinThreshold" => "dynBacklightMinThreshold",
+        _ => return None,
+    })
+}
 
 fn daemon_config_map(
     config: &Config,
@@ -1439,42 +1491,8 @@ impl CobbleDaemon {
             };
             let encoded = encode_watch_pref(key, &value, model)
                 .map_err(|error| DaemonError::Failed(error.to_string()))?;
-            let key: &'static str = match key {
-                "clock24h" => "clock24h",
-                "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
-                "textStyle" => "textStyle",
-                "lightEnabled" => "lightEnabled",
-                "lightAmbientSensorEnabled" => "lightAmbientSensorEnabled",
-                "lightMotion" => "lightMotion",
-                "lightTimeoutMs" => "lightTimeoutMs",
-                "lightTouch" => "lightTouch",
-                "lightIntensity" => "lightIntensity",
-                "lightDynamicIntensity" => "lightDynamicIntensity",
-                "lightPreset" => "lightPreset",
-                "lightDynamicMode" => "lightDynamicMode",
-                "menuScrollWrapAround" => "menuScrollWrapAround",
-                "menuScrollVibeBehavior" => "menuScrollVibeBehavior",
-                "mask" => "mask",
-                "notifDesignStyle" => "notifDesignStyle",
-                "notifVibeDelay" => "notifVibeDelay",
-                "notifBacklight" => "notifBacklight",
-                "notifWindowTimeout" => "notifWindowTimeout",
-                "vibeIntensity" => "vibeIntensity",
-                "vibeScoreNotifications" => "vibeScoreNotifications",
-                "vibeScoreIncomingCalls" => "vibeScoreIncomingCalls",
-                "vibeScoreAlarms" => "vibeScoreAlarms",
-                "dndManuallyEnabled" => "dndManuallyEnabled",
-                "dndSmartEnabled" => "dndSmartEnabled",
-                "dndInterruptionsMask" => "dndInterruptionsMask",
-                "dndShowNotifications" => "dndShowNotifications",
-                "dndMotionBacklight" => "dndMotionBacklight",
-                "dndAutoDismiss" => "dndAutoDismiss",
-                "timelineQuickViewEnabled" => "timelineQuickViewEnabled",
-                "timelineQuickViewBeforeTimeMin" => "timelineQuickViewBeforeTimeMin",
-                "musicShowVolumeControls" => "musicShowVolumeControls",
-                "musicShowProgressBar" => "musicShowProgressBar",
-                _ => return Err(DaemonError::Failed(format!("preference {key} is not editable in this phase"))),
-            };
+            let key = editable_general_preference(key).ok_or_else(||
+                DaemonError::Failed(format!("preference {key} is not editable in this phase")))?;
             writes.push((key, encoded.clone()));
             general_updates.push((key.to_owned(), value, encoded));
         }
@@ -1522,6 +1540,34 @@ impl CobbleDaemon {
             });
             Ok(device_config_map(&state))
         }
+    }
+
+    /// Reset only editable general preferences that this watch actually reported.
+    async fn reset_device_config_defaults(
+        &self,
+        expected_revision: u64,
+    ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let observed = self.state.lock().unwrap().watch_settings.clone();
+        let mut patch = HashMap::new();
+        for (key, current) in observed {
+            if editable_general_preference(&key).is_none() { continue; }
+            let Some(metadata) = watch_pref_metadata(&key) else { continue };
+            let default = match metadata.default {
+                WatchPrefDefault::Bool(value) => WatchPrefValue::Bool(value),
+                WatchPrefDefault::Number(value) => WatchPrefValue::Number(value),
+                WatchPrefDefault::QuickLaunch { enabled, uuid } => WatchPrefValue::Text(
+                    if enabled { uuid.unwrap_or("off") } else { "off" }.to_owned(),
+                ),
+            };
+            if current == default { continue; }
+            let value = match default {
+                WatchPrefValue::Bool(value) => dbus_val(value),
+                WatchPrefValue::Number(value) => dbus_val(value),
+                WatchPrefValue::Text(value) => dbus_val(value),
+            };
+            patch.insert(format!("preference.{key}"), value);
+        }
+        self.update_device_config(expected_revision, patch).await
     }
 
     /// Query the watch's version info (firmware, board, serial, BT address,

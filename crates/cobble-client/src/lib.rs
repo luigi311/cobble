@@ -455,6 +455,7 @@ pub trait CobbleDaemon {
     async fn get_device_config(&self) -> Result<VarDict>;
     async fn refresh_device_config(&self) -> Result<VarDict>;
     async fn update_device_config(&self, expected_revision: u64, patch: VarDict) -> Result<VarDict>;
+    async fn reset_device_config_defaults(&self, expected_revision: u64) -> Result<VarDict>;
 
     #[zbus(signal)]
     fn daemon_config_changed(&self, revision: u64) -> Result<()>;
@@ -774,6 +775,11 @@ impl CobbleClient {
         let expected_revision = patch.expected_revision;
         let wire = encode_device_config_patch(patch)?;
         let map = self.proxy().await?.update_device_config(expected_revision, wire).await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn reset_device_config_defaults(&self, expected_revision: u64) -> Result<DeviceConfigSnapshot> {
+        let map = self.proxy().await?.reset_device_config_defaults(expected_revision).await?;
         decode_device_config(&map)
     }
 
