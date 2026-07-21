@@ -16,6 +16,7 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 
 from ._codec import decode_data_dict, encode_data_dict
+from ._device_config import DeviceConfigSnapshot, DeviceConfigState, decode_device_config
 
 BUS_NAME = "org.cobble.Daemon"
 OBJECT_PATH = "/org/cobble/Daemon"
@@ -39,6 +40,7 @@ BatteryHandler = Callable[[int | None], None]
 AppRunStateHandler = Callable[[str, bool], None]
 # media-control action name from the watch (play/pause/next_track/…)
 MusicActionHandler = Callable[[str], None]
+DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -82,6 +84,7 @@ class CobbleClient:
         self._battery_handlers: list[BatteryHandler] = []
         self._app_run_state_handlers: list[AppRunStateHandler] = []
         self._music_action_handlers: list[MusicActionHandler] = []
+        self._device_config_handlers: list[DeviceConfigChangedHandler] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -128,6 +131,7 @@ class CobbleClient:
         self._iface.on_connection_changed(self._dispatch_connection)
         self._iface.on_health_data_received(self._dispatch_health_data)
         self._iface.on_health_profile_received(self._dispatch_health_profile)
+        self._iface.on_device_config_changed(self._dispatch_device_config_changed)
         self._iface.on_watch_setting_received(self._dispatch_watch_setting)
         self._iface.on_battery_changed(self._dispatch_battery)
         self._iface.on_app_run_state_changed(self._dispatch_app_run_state)
@@ -320,6 +324,24 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
         return {k: _unwrap(v) for k, v in raw.items()}
+
+    async def get_device_config(self) -> DeviceConfigSnapshot:
+        """Return the daemon's coherent typed device-configuration snapshot."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_device_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def refresh_device_config(self) -> DeviceConfigSnapshot:
+        """Refresh watch settings and return the completed typed snapshot."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_refresh_device_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
 
     async def get_watch_version(self) -> dict:
         """Return the watch's version info as a dict.
@@ -562,6 +584,12 @@ class CobbleClient:
         self._watch_setting_handlers.append(fn)
         return fn
 
+    def on_device_config_changed(
+        self, fn: DeviceConfigChangedHandler
+    ) -> DeviceConfigChangedHandler:
+        self._device_config_handlers.append(fn)
+        return fn
+
     def on_battery(self, fn: BatteryHandler) -> BatteryHandler:
         self._battery_handlers.append(fn)
         return fn
@@ -588,6 +616,11 @@ class CobbleClient:
     def _dispatch_ack(self, txn: int) -> None:
         for h in self._ack_handlers:
             _safe(h, txn)
+
+    def _dispatch_device_config_changed(self, revision: int, state: str) -> None:
+        parsed = DeviceConfigState(state)
+        for handler in self._device_config_handlers:
+            _safe(handler, revision, parsed)
 
     def _dispatch_nack(self, txn: int) -> None:
         for h in self._nack_handlers:

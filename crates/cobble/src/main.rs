@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cobble_client::{
-    ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, IntervalsIcuPatch,
+    ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigSnapshot,
+    DeviceConfigState, DistanceUnits, FieldAvailability, IntervalsIcuPatch, PreferenceValue,
     SecretPatch, StatusEvent, VarDict,
 };
 use slint::{ModelRc, VecModel};
@@ -114,6 +115,24 @@ fn main() -> anyhow::Result<()> {
                                     .ok();
                                 });
                             }
+                            if matches!(ev, StatusEvent::DeviceConfigChanged { .. }) {
+                                let weak_config = weak2.clone();
+                                tokio::spawn(async move {
+                                    let snapshot = match CobbleClient::new().await {
+                                        Ok(client) => client.get_device_config().await.ok(),
+                                        Err(_) => None,
+                                    };
+                                    slint::invoke_from_event_loop(move || {
+                                        let (Some(window), Some(snapshot)) =
+                                            (weak_config.upgrade(), snapshot)
+                                        else {
+                                            return;
+                                        };
+                                        apply_device_config(&window, &snapshot);
+                                    })
+                                    .ok();
+                                });
+                            }
                             let weak3 = weak2.clone();
                             slint::invoke_from_event_loop(move || {
                                 if let Some(w) = weak3.upgrade() {
@@ -127,6 +146,45 @@ fn main() -> anyhow::Result<()> {
                 // watch_status only returns if the bus connection drops; retry.
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
+        });
+    }
+
+    // ── Device Config refresh ────────────────────────────────────────────────
+    {
+        let weak = window.as_weak();
+        let rt_handle = rt.handle().clone();
+        window.on_refresh_device_config(move || {
+            let Some(window) = weak.upgrade() else { return };
+            if !window.get_watch_connected() {
+                window.set_dc_state("disconnected".into());
+                window.set_dc_status_error(true);
+                window.set_dc_status("Connect a watch before refreshing Device Config.".into());
+                return;
+            }
+            window.set_dc_loading(true);
+            window.set_dc_status_error(false);
+            window.set_dc_status("Reading settings from the watch…".into());
+            let weak2 = weak.clone();
+            rt_handle.spawn(async move {
+                let result = async {
+                    let client = CobbleClient::new().await?;
+                    client.refresh_device_config().await
+                }
+                .await;
+                slint::invoke_from_event_loop(move || {
+                    let Some(window) = weak2.upgrade() else { return };
+                    window.set_dc_loading(false);
+                    match result {
+                        Ok(snapshot) => apply_device_config(&window, &snapshot),
+                        Err(error) => {
+                            window.set_dc_state("error".into());
+                            window.set_dc_status_error(true);
+                            window.set_dc_status(format!("Refresh failed: {error}").into());
+                        }
+                    }
+                })
+                .ok();
+            });
         });
     }
 
@@ -699,6 +757,7 @@ fn apply_status(w: &AppWindow, ev: StatusEvent) {
             if !c {
                 w.set_battery_level(-1);
                 clear_watch_info(w);
+                clear_device_config(w);
             }
         }
         StatusEvent::Battery(b) => w.set_battery_level(b as i32),
@@ -712,6 +771,7 @@ fn apply_status(w: &AppWindow, ev: StatusEvent) {
             w.set_wi_language(info.language.into());
         }
         StatusEvent::DaemonConfigChanged(_) => {}
+        StatusEvent::DeviceConfigChanged { .. } => {}
     }
 }
 
@@ -745,6 +805,155 @@ fn apply_daemon_config(w: &AppWindow, snapshot: &DaemonConfigSnapshot) {
         w.set_save_status_error(false);
         w.set_save_status("Configuration changed. Restart cobbled to apply logging.".into());
     }
+}
+
+fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
+    let state = match snapshot.state {
+        DeviceConfigState::Disconnected => "disconnected",
+        DeviceConfigState::Loading => "loading",
+        DeviceConfigState::Ready => "ready",
+        DeviceConfigState::Partial => "partial",
+        DeviceConfigState::Error => "error",
+        DeviceConfigState::Unsupported => "unsupported",
+    };
+    w.set_dc_state(state.into());
+    w.set_dc_loading(snapshot.state == DeviceConfigState::Loading);
+    let status = match snapshot.state {
+        DeviceConfigState::Disconnected => "Watch disconnected; no device settings are available.".to_string(),
+        DeviceConfigState::Loading => "Reading settings from the watch…".to_string(),
+        DeviceConfigState::Ready => "Settings read successfully from the connected watch.".to_string(),
+        DeviceConfigState::Partial => snapshot.error.as_ref().map_or_else(
+            || "Only part of the watch configuration was received.".to_string(),
+            |error| format!("Partial settings: {}", error.message),
+        ),
+        DeviceConfigState::Error => snapshot.error.as_ref().map_or_else(
+            || "The watch configuration could not be read.".to_string(),
+            |error| format!("Read failed: {}", error.message),
+        ),
+        DeviceConfigState::Unsupported => snapshot.error.as_ref().map_or_else(
+            || "This watch cannot provide a complete settings snapshot.".to_string(),
+            |error| error.message.clone(),
+        ),
+    };
+    w.set_dc_status_error(matches!(snapshot.state, DeviceConfigState::Error));
+    w.set_dc_status(status.into());
+
+    if let Some(watch) = &snapshot.watch {
+        w.set_dc_watch_id(watch.watch_id.clone().into());
+        w.set_dc_platform(watch.platform.clone().unwrap_or_default().into());
+        w.set_dc_firmware(watch.firmware.clone().unwrap_or_default().into());
+    } else {
+        w.set_dc_watch_id("".into());
+        w.set_dc_platform("".into());
+        w.set_dc_firmware("".into());
+    }
+    w.set_dc_last_read(snapshot.last_read_at_ms.map(|value| value.to_string()).unwrap_or_default().into());
+
+    if let Some(health) = &snapshot.health.value {
+        w.set_dc_height(format!("{} mm", health.height_mm).into());
+        w.set_dc_weight(format!("{} dag", health.weight_dag).into());
+        w.set_dc_age(health.age.to_string().into());
+        w.set_dc_sex(match health.gender { 0 => "Female", 1 => "Male", 2 => "Other", _ => "Unknown" }.into());
+        w.set_dc_tracking(if health.tracking_enabled { "Enabled" } else { "Disabled" }.into());
+        let insights = match (health.activity_insights_enabled, health.sleep_insights_enabled) {
+            (true, true) => "Activity and sleep",
+            (true, false) => "Activity only",
+            (false, true) => "Sleep only",
+            (false, false) => "Disabled",
+        };
+        w.set_dc_insights(insights.into());
+        w.set_dc_units(match health.distance_units.value {
+            Some(DistanceUnits::Metric) => "Metric",
+            Some(DistanceUnits::Imperial) => "Imperial",
+            Some(DistanceUnits::Unknown(_)) => "Unknown",
+            None => availability_label(health.distance_units.availability),
+        }.into());
+        w.set_dc_hrm(health.hrm.value.as_ref().map_or_else(
+            || availability_label(health.hrm.availability),
+            |hrm| if hrm.enabled { "Enabled" } else { "Disabled" },
+        ).into());
+    } else {
+        w.set_dc_height("".into());
+        w.set_dc_weight("".into());
+        w.set_dc_age("".into());
+        w.set_dc_sex("".into());
+        w.set_dc_tracking("".into());
+        w.set_dc_insights("".into());
+        w.set_dc_units("".into());
+        w.set_dc_hrm("".into());
+    }
+
+    let mut entries = Vec::new();
+    let mut previous_group = String::new();
+    for (key, field) in &snapshot.preferences {
+        let group = preference_group(key);
+        let heading = if group == previous_group { String::new() } else { group.to_owned() };
+        previous_group = group.to_owned();
+        let value = match &field.value {
+            Some(PreferenceValue::Bool(value)) => if *value { "On".to_string() } else { "Off".to_string() },
+            Some(PreferenceValue::Unsigned(value)) | Some(PreferenceValue::Color(value)) => value.to_string(),
+            Some(PreferenceValue::Text(value)) => value.clone(),
+            Some(PreferenceValue::Enum { code, label }) => label.clone().unwrap_or_else(|| format!("Unknown ({code})")),
+            Some(PreferenceValue::Unknown) | None => "—".to_string(),
+        };
+        entries.push(DeviceConfigEntry {
+            group: heading.into(),
+            label: humanize_preference_key(key).into(),
+            value: value.into(),
+            status: availability_wire(field.availability).into(),
+        });
+    }
+    w.set_dc_preferences(ModelRc::new(VecModel::from(entries)));
+}
+
+fn clear_device_config(w: &AppWindow) {
+    w.set_dc_state("disconnected".into());
+    w.set_dc_loading(false);
+    w.set_dc_status_error(false);
+    w.set_dc_status("Connect a watch to inspect its settings.".into());
+    w.set_dc_watch_id("".into());
+    w.set_dc_height("".into());
+    w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));
+}
+
+fn availability_label(value: FieldAvailability) -> &'static str {
+    match value {
+        FieldAvailability::Available => "Available",
+        FieldAvailability::NotReceived => "Not received",
+        FieldAvailability::Unsupported => "Unsupported",
+        FieldAvailability::Invalid => "Invalid",
+    }
+}
+
+fn availability_wire(value: FieldAvailability) -> &'static str {
+    match value {
+        FieldAvailability::Available => "available",
+        FieldAvailability::NotReceived => "not received",
+        FieldAvailability::Unsupported => "unsupported",
+        FieldAvailability::Invalid => "invalid",
+    }
+}
+
+fn preference_group(key: &str) -> &'static str {
+    if key.contains("quiet") || key.contains("dnd") { "Quiet Time" }
+    else if key.contains("light") || key.contains("backlight") { "Backlight & Input" }
+    else if key.contains("notif") || key.contains("vibr") { "Notifications" }
+    else if key.contains("timeline") { "Timeline" }
+    else if key.contains("music") { "Music" }
+    else if key.contains("clock") || key.contains("time") { "Time & Display" }
+    else { "Other Preferences" }
+}
+
+fn humanize_preference_key(key: &str) -> String {
+    let mut result = String::new();
+    for character in key.chars() {
+        if character.is_ascii_uppercase() && !result.is_empty() {
+            result.push(' ');
+        }
+        result.push(character);
+    }
+    let mut characters = result.chars();
+    characters.next().map(|first| first.to_uppercase().collect::<String>() + characters.as_str()).unwrap_or(result)
 }
 
 fn clear_watch_info(w: &AppWindow) {

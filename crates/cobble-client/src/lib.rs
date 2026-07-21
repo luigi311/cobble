@@ -58,6 +58,12 @@ fn required_u16(map: &VarDict, key: &str) -> Result<u16> {
         .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
 }
 
+fn required_u8(map: &VarDict, key: &str) -> Result<u8> {
+    map.get(key)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid device-config field {key}")))
+}
+
 fn required_u64(map: &VarDict, key: &str) -> Result<u64> {
     map.get(key)
         .and_then(|value| u64::try_from(value).ok())
@@ -95,6 +101,149 @@ fn decode_daemon_config(map: &VarDict) -> Result<DaemonConfigSnapshot> {
                 api_key_configured: required_bool(map, "intervals_api_key_configured")?,
             },
         },
+    })
+}
+
+fn field_availability(map: &VarDict, key: &str) -> FieldAvailability {
+    match map.get(key).and_then(|value| <&str>::try_from(value).ok()) {
+        Some("available") => FieldAvailability::Available,
+        Some("unsupported") => FieldAvailability::Unsupported,
+        Some("invalid") => FieldAvailability::Invalid,
+        _ => FieldAvailability::NotReceived,
+    }
+}
+
+fn device_config_error(map: &VarDict) -> Option<ConfigError> {
+    let message = map.get("error_message").and_then(|value| <&str>::try_from(value).ok())?;
+    let kind = match map.get("error_kind").and_then(|value| <&str>::try_from(value).ok()) {
+        Some("not_supported") => ConfigErrorKind::NotSupported,
+        Some("disconnected") => ConfigErrorKind::Disconnected,
+        Some("timeout") => ConfigErrorKind::Timeout,
+        _ => ConfigErrorKind::Internal,
+    };
+    Some(ConfigError { kind, field: None, message: message.to_owned() })
+}
+
+fn decode_device_config(map: &VarDict) -> Result<DeviceConfigSnapshot> {
+    let api_version = required_u16(map, "api_version")?;
+    if api_version != DEVICE_CONFIG_API_VERSION {
+        return Err(Error::Failure(format!(
+            "unsupported device-config API version {api_version}"
+        )));
+    }
+    let state = match required_string(map, "state")?.as_str() {
+        "disconnected" => DeviceConfigState::Disconnected,
+        "loading" => DeviceConfigState::Loading,
+        "ready" => DeviceConfigState::Ready,
+        "partial" => DeviceConfigState::Partial,
+        "error" => DeviceConfigState::Error,
+        "unsupported" => DeviceConfigState::Unsupported,
+        value => return Err(Error::Failure(format!("unknown device-config state {value}"))),
+    };
+    let activity_availability = field_availability(map, "health.activity.availability");
+    let health = if activity_availability == FieldAvailability::Available {
+        let units_availability = field_availability(map, "health.units.availability");
+        let distance_units = map
+            .get("health.distance_units")
+            .and_then(|value| <&str>::try_from(value).ok())
+            .map(|value| match value {
+                "metric" => DistanceUnits::Metric,
+                "imperial" => DistanceUnits::Imperial,
+                _ => DistanceUnits::Unknown(255),
+            });
+        let hrm_availability = field_availability(map, "health.hrm.availability");
+        let hrm = if hrm_availability == FieldAvailability::Available {
+            Some(HrmConfig {
+            enabled: required_bool(map, "health.hrm.enabled")?,
+            measurement_interval: map
+                .get("health.hrm.measurement_interval")
+                .and_then(|value| u8::try_from(value).ok())
+                .map(|value| match value {
+                    0 => HrmMeasurementInterval::TenMinutes,
+                    1 => HrmMeasurementInterval::ThirtyMinutes,
+                    2 => HrmMeasurementInterval::OneHour,
+                    3 => HrmMeasurementInterval::Off,
+                    other => HrmMeasurementInterval::Unknown(other),
+                }),
+            during_activity: map
+                .get("health.hrm.during_activity")
+                .and_then(|value| bool::try_from(value).ok()),
+            })
+        } else {
+            None
+        };
+        let thresholds_availability = field_availability(map, "health.thresholds.availability");
+        let thresholds = if thresholds_availability == FieldAvailability::Available {
+            Some(HeartRateThresholds {
+                resting: required_u8(map, "health.thresholds.resting")?,
+                elevated: required_u8(map, "health.thresholds.elevated")?,
+                maximum: required_u8(map, "health.thresholds.maximum")?,
+                zone_1: required_u8(map, "health.thresholds.zone1")?,
+                zone_2: required_u8(map, "health.thresholds.zone2")?,
+                zone_3: required_u8(map, "health.thresholds.zone3")?,
+            })
+        } else {
+            None
+        };
+        Some(HealthConfig {
+            height_mm: required_u16(map, "health.height_mm")?,
+            weight_dag: required_u16(map, "health.weight_dag")?,
+            tracking_enabled: required_bool(map, "health.tracking_enabled")?,
+            activity_insights_enabled: required_bool(map, "health.activity_insights_enabled")?,
+            sleep_insights_enabled: required_bool(map, "health.sleep_insights_enabled")?,
+            age: required_u8(map, "health.age")?,
+            gender: required_u8(map, "health.gender")?,
+            distance_units: FieldValue { availability: units_availability, value: distance_units, error: None },
+            hrm: FieldValue { availability: hrm_availability, value: hrm, error: None },
+            heart_rate_thresholds: FieldValue { availability: thresholds_availability, value: thresholds, error: None },
+        })
+    } else {
+        None
+    };
+
+    let mut preferences = BTreeMap::new();
+    for key in map.keys().filter_map(|key| {
+        key.strip_prefix("preference.")?.strip_suffix(".availability")
+    }) {
+        let availability = field_availability(map, &format!("preference.{key}.availability"));
+        let value = map.get(&format!("preference.{key}.value")).and_then(|value| {
+            if let Ok(value) = bool::try_from(value) {
+                Some(PreferenceValue::Bool(value))
+            } else if let Ok(value) = u32::try_from(value) {
+                Some(PreferenceValue::Unsigned(value))
+            } else {
+                <&str>::try_from(value).ok().map(|value| PreferenceValue::Text(value.to_owned()))
+            }
+        });
+        let raw = map
+            .get(&format!("preference.{key}.raw"))
+            .and_then(|value| value.try_clone().ok())
+            .and_then(|value| Vec::<u8>::try_from(value).ok())
+            .unwrap_or_default();
+        preferences.insert(key.to_owned(), PreferenceField { availability, value, raw, error: None });
+    }
+
+    Ok(DeviceConfigSnapshot {
+        api_version,
+        revision: required_u64(map, "revision")?,
+        state,
+        watch: map.get("watch_id").and_then(|value| <&str>::try_from(value).ok()).map(|watch_id| WatchIdentity {
+            watch_id: watch_id.to_owned(),
+            display_name: None,
+            platform: map.get("watch_platform").and_then(|value| <&str>::try_from(value).ok()).map(str::to_owned),
+            firmware: map.get("watch_firmware").and_then(|value| <&str>::try_from(value).ok()).map(str::to_owned),
+        }),
+        capabilities: DeviceCapabilities {
+            blob_db_version: map.get("blob_db_version").and_then(|value| u8::try_from(value).ok()).unwrap_or(0),
+            supported: map.iter().filter_map(|(key, value)| {
+                (key.starts_with("capability.") && bool::try_from(value).ok() == Some(true))
+                    .then(|| key.trim_start_matches("capability.").to_owned())
+            }).collect(),
+        },
+        last_read_at_ms: map.get("last_read_at_ms").and_then(|value| i64::try_from(value).ok()),
+        health: FieldValue { availability: activity_availability, value: health, error: None },
+        preferences,
+        error: device_config_error(map),
     })
 }
 
@@ -158,6 +307,7 @@ pub enum StatusEvent {
     WatchInfo(WatchInfo),
     /// The effective daemon configuration or its on-disk error changed.
     DaemonConfigChanged(u64),
+    DeviceConfigChanged { revision: u64, state: DeviceConfigState },
 }
 
 /// Typed zbus proxy for `org.cobble.Daemon`.
@@ -203,9 +353,14 @@ pub trait CobbleDaemon {
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>>;
     async fn get_daemon_config(&self) -> Result<VarDict>;
     async fn update_daemon_config(&self, expected_revision: u64, patch: VarDict) -> Result<VarDict>;
+    async fn get_device_config(&self) -> Result<VarDict>;
+    async fn refresh_device_config(&self) -> Result<VarDict>;
 
     #[zbus(signal)]
     fn daemon_config_changed(&self, revision: u64) -> Result<()>;
+
+    #[zbus(signal)]
+    fn device_config_changed(&self, revision: u64, state: &str) -> Result<()>;
 
     // ---- Health ----
 
@@ -505,6 +660,16 @@ impl CobbleClient {
         self.proxy().await?.get_watch_settings().await
     }
 
+    pub async fn get_device_config(&self) -> Result<DeviceConfigSnapshot> {
+        let map = self.proxy().await?.get_device_config().await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn refresh_device_config(&self) -> Result<DeviceConfigSnapshot> {
+        let map = self.proxy().await?.refresh_device_config().await?;
+        decode_device_config(&map)
+    }
+
     pub async fn get_watch_version(&self) -> Result<VarDict> {
         self.proxy().await?.get_watch_version().await
     }
@@ -706,7 +871,24 @@ impl CobbleClient {
                 s.args().ok().map(|a| StatusEvent::DaemonConfigChanged(a.revision))
             })
             .boxed();
-        let mut events = select_all([owner, conn, batt, config]);
+        let device_config = proxy
+            .receive_device_config_changed()
+            .await?
+            .filter_map(|s| async move {
+                let args = s.args().ok()?;
+                let state = match args.state {
+                    "disconnected" => DeviceConfigState::Disconnected,
+                    "loading" => DeviceConfigState::Loading,
+                    "ready" => DeviceConfigState::Ready,
+                    "partial" => DeviceConfigState::Partial,
+                    "error" => DeviceConfigState::Error,
+                    "unsupported" => DeviceConfigState::Unsupported,
+                    _ => return None,
+                };
+                Some(StatusEvent::DeviceConfigChanged { revision: args.revision, state })
+            })
+            .boxed();
+        let mut events = select_all([owner, conn, batt, config, device_config]);
 
         while let Some(ev) = events.next().await {
             on_event(ev.clone());
@@ -736,5 +918,31 @@ impl CobbleClient {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_config_decoder_keeps_missing_health_absent() {
+        let map = HashMap::from([
+            ("api_version".into(), wire_value(DEVICE_CONFIG_API_VERSION).unwrap()),
+            ("revision".into(), wire_value(3_u64).unwrap()),
+            ("state".into(), wire_value("loading").unwrap()),
+            ("blob_db_version".into(), wire_value(1_u8).unwrap()),
+            ("capability.complete_refresh".into(), wire_value(true).unwrap()),
+            ("health.activity.availability".into(), wire_value("not_received").unwrap()),
+            ("health.hrm.availability".into(), wire_value("not_received").unwrap()),
+            ("health.thresholds.availability".into(), wire_value("not_received").unwrap()),
+            ("health.units.availability".into(), wire_value("not_received").unwrap()),
+        ]);
+
+        let snapshot = decode_device_config(&map).unwrap();
+        assert_eq!(snapshot.state, DeviceConfigState::Loading);
+        assert_eq!(snapshot.health.availability, FieldAvailability::NotReceived);
+        assert!(snapshot.health.value.is_none());
+        assert!(snapshot.capabilities.supported.contains("complete_refresh"));
     }
 }

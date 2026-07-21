@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_API_VERSION: u16 = 1;
+pub const DEVICE_CONFIG_API_VERSION: u16 = 1;
 pub type Revision = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +146,7 @@ pub struct HealthConfig {
     pub age: u8,
     /// Pebble protocol compatibility field: Female=0, Male=1, Other=2.
     pub gender: u8,
-    pub distance_units: DistanceUnits,
+    pub distance_units: FieldValue<DistanceUnits>,
     pub hrm: FieldValue<HrmConfig>,
     pub heart_rate_thresholds: FieldValue<HeartRateThresholds>,
 }

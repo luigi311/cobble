@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use libpebble_ble::{
-    decode_watch_pref, parse_activity_preferences, parse_heart_rate_preferences,
+    decode_watch_pref, parse_activity_preferences, parse_health_activity_config, parse_heart_rate_preferences,
     parse_hrm_preferences, parse_units_distance, AppRunStateHandler, BatteryHandler,
     HealthDataHandler, MusicAction, MusicActionHandler, Pebble, PhoneAction,
     PhoneActionHandler, WatchPrefHandler,
@@ -103,6 +103,9 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                                 p.tracking_enabled, p.activity_insights_enabled, p.sleep_insights_enabled,
                             );
                             let _ = tx.send(DaemonEvent::HealthProfile(p));
+                            if let Some(config) = parse_health_activity_config(&value) {
+                                let _ = tx.send(DaemonEvent::HealthActivityRaw(config));
+                            }
                         }
                         None => warn!("activityPreferences blob malformed ({} bytes)", value.len()),
                     },
@@ -141,6 +144,7 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                             let _ = tx.send(DaemonEvent::WatchSetting {
                                 key: other.to_string(),
                                 value: decoded,
+                                raw: value,
                             });
                         }
                         None => debug!(

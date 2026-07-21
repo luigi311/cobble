@@ -20,6 +20,8 @@
 //!     FetchHealthParams()
 //!     GetHealthProfile() -> a{sv}  health profile keyed by field name (height_cm, weight_kg, age, gender, …, imperial_units)
 //!     GetWatchSettings() -> a{sv}  general watch settings (db 12), key -> bool/uint32/string
+//!     GetDeviceConfig() -> a{sv}  coherent versioned device-settings snapshot
+//!     RefreshDeviceConfig() -> a{sv}  refresh and return the completed snapshot
 //!     GetWatchVersion() -> a{sv}  firmware/board/serial/BT/language/capabilities/platform
 //!     GetWatchColor() -> a{sv}  watch color/variant (protocol_number, js_name, description, watch_type, supports_hrm)
 //!     Screenshot() -> ay  capture the watch screen as PNG bytes
@@ -45,6 +47,7 @@
 //!     HealthDataReceived(u tag, ay app_uuid, u session_timestamp, u items_left, u crc, y item_type, q item_size, ay data)
 //!     HealthProfileReceived(a{sv} profile)
 //!     WatchSettingReceived(s key, v value)
+//!     DeviceConfigChanged(t revision, s state)
 //!     BatteryChanged(n level)  watch battery percentage (-1 = unknown)
 //!     AppRunStateChanged(s uuid, b running)  app opened/closed on the watch
 //!     MusicActionReceived(s action)  media-control action from the watch
@@ -57,6 +60,7 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use libpebble_ble::{
@@ -67,8 +71,8 @@ use libpebble_ble::{
 
 use cobble_db::{AppDb, DateRange, WellnessExportStatus};
 use cobble_config::{Config, IntervalsIcuConfig};
-use cobble_contracts::CONFIG_API_VERSION;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
+use cobble_contracts::{CONFIG_API_VERSION, DEVICE_CONFIG_API_VERSION, DeviceConfigState};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{debug, warn};
 use zbus::{
     interface,
@@ -124,6 +128,103 @@ fn patch_bool(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<b
         bool::try_from(value)
             .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a boolean")))
     }).transpose()
+}
+
+fn device_config_state_name(state: DeviceConfigState) -> &'static str {
+    match state {
+        DeviceConfigState::Disconnected => "disconnected",
+        DeviceConfigState::Loading => "loading",
+        DeviceConfigState::Ready => "ready",
+        DeviceConfigState::Partial => "partial",
+        DeviceConfigState::Error => "error",
+        DeviceConfigState::Unsupported => "unsupported",
+    }
+}
+
+fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
+    let mut result = HashMap::from([
+        ("api_version".into(), dbus_val(DEVICE_CONFIG_API_VERSION)),
+        ("revision".into(), dbus_val(state.device_config_revision)),
+        ("state".into(), dbus_val(device_config_state_name(state.device_config_state))),
+        ("blob_db_version".into(), dbus_val(state.device_config_blob_db_version)),
+        (
+            "capability.complete_refresh".into(),
+            dbus_val(state.device_config_blob_db_version >= 1),
+        ),
+    ]);
+    if let Some(timestamp) = state.device_config_last_read_at_ms {
+        result.insert("last_read_at_ms".into(), dbus_val(timestamp));
+    }
+    if let Some(info) = &state.device_config_watch {
+        result.insert("watch_id".into(), dbus_val(if info.serial.is_empty() {
+            info.bt_address.clone()
+        } else {
+            info.serial.clone()
+        }));
+        result.insert("watch_platform".into(), dbus_val(info.watch_type().codename()));
+        result.insert("watch_firmware".into(), dbus_val(info.running.string_version.clone()));
+    }
+    if let Some(error) = &state.device_config_error {
+        result.insert(
+            "error_kind".into(),
+            dbus_val(if state.device_config_blob_db_version == 0 {
+                "not_supported"
+            } else {
+                "internal"
+            }),
+        );
+        result.insert("error_message".into(), dbus_val(error.clone()));
+    }
+
+    if let Some(profile) = state.device_health_activity {
+        result.insert("health.activity.availability".into(), dbus_val("available"));
+        result.insert("health.height_mm".into(), dbus_val(profile.height_mm));
+        result.insert("health.weight_dag".into(), dbus_val(profile.weight_dag));
+        result.insert("health.age".into(), dbus_val(profile.age));
+        result.insert("health.gender".into(), dbus_val(profile.gender));
+        result.insert("health.tracking_enabled".into(), dbus_val(profile.tracking_enabled));
+        result.insert("health.activity_insights_enabled".into(), dbus_val(profile.activity_insights_enabled));
+        result.insert("health.sleep_insights_enabled".into(), dbus_val(profile.sleep_insights_enabled));
+    } else {
+        result.insert("health.activity.availability".into(), dbus_val("not_received"));
+    }
+    if let Some(hrm) = state.hrm_prefs {
+        result.insert("health.hrm.availability".into(), dbus_val("available"));
+        result.insert("health.hrm.enabled".into(), dbus_val(hrm.enabled));
+        if let Some(interval) = hrm.measurement_interval {
+            result.insert("health.hrm.measurement_interval".into(), dbus_val(interval.code()));
+        }
+        if let Some(enabled) = hrm.activity_tracking_enabled {
+            result.insert("health.hrm.during_activity".into(), dbus_val(enabled));
+        }
+    } else {
+        result.insert("health.hrm.availability".into(), dbus_val("not_received"));
+    }
+    if let Some(hr) = state.heart_rate_prefs {
+        result.insert("health.thresholds.availability".into(), dbus_val("available"));
+        result.insert("health.thresholds.resting".into(), dbus_val(hr.resting_hr));
+        result.insert("health.thresholds.elevated".into(), dbus_val(hr.elevated_hr));
+        result.insert("health.thresholds.maximum".into(), dbus_val(hr.max_hr));
+        result.insert("health.thresholds.zone1".into(), dbus_val(hr.zone1_threshold));
+        result.insert("health.thresholds.zone2".into(), dbus_val(hr.zone2_threshold));
+        result.insert("health.thresholds.zone3".into(), dbus_val(hr.zone3_threshold));
+    } else {
+        result.insert("health.thresholds.availability".into(), dbus_val("not_received"));
+    }
+    if let Some(imperial) = state.imperial_units {
+        result.insert("health.units.availability".into(), dbus_val("available"));
+        result.insert("health.distance_units".into(), dbus_val(if imperial { "imperial" } else { "metric" }));
+    } else {
+        result.insert("health.units.availability".into(), dbus_val("not_received"));
+    }
+    for (key, value) in &state.watch_settings {
+        result.insert(format!("preference.{key}.availability"), dbus_val("available"));
+        result.insert(format!("preference.{key}.value"), watch_pref_owned_value(value));
+        if let Some(raw) = state.watch_setting_raw.get(key) {
+            result.insert(format!("preference.{key}.raw"), dbus_val(raw.clone()));
+        }
+    }
+    result
 }
 
 mod state;
@@ -267,6 +368,7 @@ pub struct CobbleDaemon {
     /// Forwards watch phone actions to the call monitor.
     phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
     config_operation: Arc<AsyncMutex<()>>,
+    device_config_operation: Arc<AsyncMutex<()>>,
 }
 
 impl CobbleDaemon {
@@ -303,10 +405,18 @@ impl CobbleDaemon {
                 event_tx,
                 db,
                 health_profile: None,
+                device_health_activity: None,
                 hrm_prefs: None,
                 heart_rate_prefs: None,
                 imperial_units: None,
                 watch_settings: HashMap::new(),
+                watch_setting_raw: HashMap::new(),
+                device_config_revision: 0,
+                device_config_state: DeviceConfigState::Disconnected,
+                device_config_last_read_at_ms: None,
+                device_config_watch: None,
+                device_config_blob_db_version: 0,
+                device_config_error: None,
                 battery_level: None,
                 music: MusicState::default(),
             })),
@@ -320,6 +430,7 @@ impl CobbleDaemon {
             phone_action_tx,
             connection_tx,
             config_operation: Arc::new(AsyncMutex::new(())),
+            device_config_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -375,11 +486,88 @@ impl CobbleDaemon {
 
     /// Called by the supervisor when the watch connects.
     pub fn set_connected(&self, pebble: Arc<Pebble>) {
-        let mut state = self.state.lock().unwrap();
-        state.pebble = Some(pebble);
-        state.connected = true;
-        let _ = state.event_tx.send(DaemonEvent::ConnectionChanged(true));
+        {
+            let mut state = self.state.lock().unwrap();
+            state.pebble = Some(pebble);
+            state.connected = true;
+            let _ = state.event_tx.send(DaemonEvent::ConnectionChanged(true));
+        }
         self.connection_tx.send_replace(true);
+        self.reset_device_config(DeviceConfigState::Loading);
+    }
+
+    fn reset_device_config(&self, new_state: DeviceConfigState) {
+        let (event_tx, revision) = {
+            let mut state = self.state.lock().unwrap();
+            state.health_profile = None;
+            state.device_health_activity = None;
+            state.hrm_prefs = None;
+            state.heart_rate_prefs = None;
+            state.imperial_units = None;
+            state.watch_settings.clear();
+            state.watch_setting_raw.clear();
+            state.device_config_watch = None;
+            state.device_config_blob_db_version = 0;
+            state.device_config_last_read_at_ms = None;
+            state.device_config_error = None;
+            state.device_config_state = new_state;
+            state.device_config_revision = state.device_config_revision.wrapping_add(1);
+            (state.event_tx.clone(), state.device_config_revision)
+        };
+        let _ = event_tx.send(DaemonEvent::DeviceConfigChanged {
+            revision,
+            state: new_state,
+        });
+    }
+
+    fn note_device_config_value(&self) {
+        let event = {
+            let mut state = self.state.lock().unwrap();
+            if matches!(state.device_config_state, DeviceConfigState::Loading) {
+                None
+            } else {
+                state.device_config_revision = state.device_config_revision.wrapping_add(1);
+                Some((
+                    state.event_tx.clone(),
+                    state.device_config_revision,
+                    state.device_config_state,
+                ))
+            }
+        };
+        if let Some((event_tx, revision, state)) = event {
+            let _ = event_tx.send(DaemonEvent::DeviceConfigChanged { revision, state });
+        }
+    }
+
+    fn complete_device_config_refresh(
+        &self,
+        info: Option<WatchVersionInfo>,
+        blob_db_version: u8,
+        error: Option<String>,
+    ) -> (u64, DeviceConfigState) {
+        let mut state = self.state.lock().unwrap();
+        state.device_config_watch = info;
+        state.device_config_blob_db_version = blob_db_version;
+        state.device_config_error = error.clone();
+        state.device_config_last_read_at_ms = error.is_none().then(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+        });
+        state.device_config_state = if !state.connected {
+            DeviceConfigState::Disconnected
+        } else if blob_db_version == 0 {
+            DeviceConfigState::Unsupported
+        } else if state.device_config_watch.is_none() {
+            DeviceConfigState::Partial
+        } else if error.is_some() {
+            DeviceConfigState::Error
+        } else {
+            DeviceConfigState::Ready
+        };
+        state.device_config_revision = state.device_config_revision.wrapping_add(1);
+        (state.device_config_revision, state.device_config_state)
     }
 
     /// Cache the demographic health profile synced from the watch and return the
@@ -388,6 +576,13 @@ impl CobbleDaemon {
         let mut s = self.state.lock().unwrap();
         s.health_profile = Some(prefs);
         Self::merged_profile(&s).expect("profile just set")
+    }
+
+    pub(crate) fn cache_health_activity_raw(
+        &self,
+        config: libpebble_ble::HealthActivityConfig,
+    ) {
+        self.state.lock().unwrap().device_health_activity = Some(config);
     }
 
     /// Cache the HRM record. Returns the merged snapshot only if the demographic
@@ -415,8 +610,10 @@ impl CobbleDaemon {
     }
 
     /// Cache a decoded general watch setting (db 12).
-    pub(crate) fn cache_watch_setting(&self, key: String, value: WatchPrefValue) {
-        self.state.lock().unwrap().watch_settings.insert(key, value);
+    pub(crate) fn cache_watch_setting(&self, key: String, value: WatchPrefValue, raw: Vec<u8>) {
+        let mut state = self.state.lock().unwrap();
+        state.watch_setting_raw.insert(key.clone(), raw);
+        state.watch_settings.insert(key, value);
     }
 
     /// Re-send the last pushed music state to the watch — used to answer the
@@ -513,14 +710,18 @@ impl CobbleDaemon {
         // doesn't serve the previous watch's stale profile/settings until it
         // re-syncs. The cache_* handlers rebuild these from the new session.
         state.health_profile = None;
+        state.device_health_activity = None;
         state.hrm_prefs = None;
         state.heart_rate_prefs = None;
         state.imperial_units = None;
         state.watch_settings.clear();
+        state.watch_setting_raw.clear();
         state.battery_level = None;
         state.music = MusicState::default();
         let _ = state.event_tx.send(DaemonEvent::ConnectionChanged(false));
+        drop(state);
         self.connection_tx.send_replace(false);
+        self.reset_device_config(DeviceConfigState::Disconnected);
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -962,6 +1163,45 @@ impl CobbleDaemon {
             .collect()
     }
 
+    /// Return one coherent, versioned view of all device-owned configuration.
+    fn get_device_config(&self) -> HashMap<String, OwnedValue> {
+        device_config_map(&self.state.lock().unwrap())
+    }
+
+    /// Clear session values and request a complete WatchPrefs refresh. Modern
+    /// watches become Ready only after BlobDB2 SyncDone and after all preceding
+    /// preference events have been incorporated into the snapshot.
+    async fn refresh_device_config(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let _operation = self.device_config_operation.lock().await;
+        let pebble = self.require_pebble()?;
+        self.reset_device_config(DeviceConfigState::Loading);
+
+        let (info, identity_error) = match pebble.get_watch_version().await {
+            Ok(info) => (Some(info), None),
+            Err(error) => (None, Some(format!("watch identity unavailable: {error}"))),
+        };
+        let blob_db_version = pebble.blob_db_version();
+        let refresh_error = if blob_db_version == 0 {
+            Some("watch does not support completeness-confirmed BlobDB2 refresh".to_string())
+        } else {
+            pebble.refresh_watch_preferences().await.err().map(|error| error.to_string())
+        };
+        let error = refresh_error.or(identity_error);
+        let (done_tx, done_rx) = oneshot::channel();
+        self.event_tx()
+            .send(DaemonEvent::DeviceConfigRefreshComplete {
+                info,
+                blob_db_version,
+                error,
+                done: done_tx,
+            })
+            .map_err(|_| DaemonError::Failed("device-config event loop is unavailable".into()))?;
+        done_rx
+            .await
+            .map_err(|_| DaemonError::Failed("device-config refresh completion was lost".into()))?;
+        Ok(device_config_map(&self.state.lock().unwrap()))
+    }
+
     /// Query the watch's version info (firmware, board, serial, BT address,
     /// language, capabilities, platform) as a key -> variant map.
     async fn get_watch_version(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
@@ -1262,6 +1502,13 @@ impl CobbleDaemon {
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
+    pub async fn device_config_changed(
+        signal_emitter: &SignalEmitter<'_>,
+        revision: u64,
+        state: &str,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
     pub async fn app_message_received(
         signal_emitter: &SignalEmitter<'_>,
         app_uuid: &str,
@@ -1514,6 +1761,58 @@ mod tests {
     }
 
     #[test]
+    fn device_config_snapshot_distinguishes_missing_and_precise_values() {
+        let path = test_path();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (music_tx, _) = mpsc::unbounded_channel();
+        let (phone_tx, _) = mpsc::unbounded_channel();
+        let daemon = CobbleDaemon::new(
+            Config::default(),
+            watch::channel(0).0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            path.clone(),
+            path,
+            false,
+            event_tx,
+            None,
+            music_tx,
+            phone_tx,
+        );
+
+        let empty = daemon.get_device_config();
+        assert_eq!(<&str>::try_from(empty.get("state").unwrap()).unwrap(), "disconnected");
+        assert_eq!(
+            <&str>::try_from(empty.get("health.activity.availability").unwrap()).unwrap(),
+            "not_received"
+        );
+        assert!(!empty.contains_key("health.height_mm"));
+
+        daemon.cache_health_activity_raw(libpebble_ble::HealthActivityConfig {
+            height_mm: 1805,
+            weight_dag: 7555,
+            tracking_enabled: true,
+            activity_insights_enabled: false,
+            sleep_insights_enabled: true,
+            age: 42,
+            gender: 2,
+        });
+        {
+            let mut state = daemon.state.lock().unwrap();
+            state.connected = true;
+        }
+        let (_, completed_state) = daemon.complete_device_config_refresh(None, 1, None);
+        assert_eq!(completed_state, DeviceConfigState::Partial);
+        let snapshot = daemon.get_device_config();
+        assert_eq!(u16::try_from(snapshot.get("health.height_mm").unwrap()).unwrap(), 1805);
+        assert_eq!(u16::try_from(snapshot.get("health.weight_dag").unwrap()).unwrap(), 7555);
+        assert_eq!(
+            <&str>::try_from(snapshot.get("health.units.availability").unwrap()).unwrap(),
+            "not_received"
+        );
+    }
+
+    #[test]
     fn wellness_status_map_reports_running_without_exposing_credentials() {
         let config = IntervalsIcuConfig {
             enabled: true,
@@ -1606,6 +1905,30 @@ pub async fn run_signal_emitter(
         };
         let emitter = iface.signal_emitter();
         match event {
+            DaemonEvent::DeviceConfigChanged { revision, state } => {
+                let _ = CobbleDaemon::device_config_changed(
+                    emitter,
+                    revision,
+                    device_config_state_name(state),
+                )
+                .await;
+            }
+            DaemonEvent::DeviceConfigRefreshComplete {
+                info,
+                blob_db_version,
+                error,
+                done,
+            } => {
+                let (revision, state) =
+                    daemon.complete_device_config_refresh(info, blob_db_version, error);
+                let _ = CobbleDaemon::device_config_changed(
+                    emitter,
+                    revision,
+                    device_config_state_name(state),
+                )
+                .await;
+                let _ = done.send(());
+            }
             DaemonEvent::DaemonConfigChanged(revision) => {
                 let _ = CobbleDaemon::daemon_config_changed(emitter, revision).await;
             }
@@ -1712,26 +2035,35 @@ pub async fn run_signal_emitter(
             }
             DaemonEvent::HealthProfile(prefs) => {
                 let profile = daemon.cache_health_profile(prefs);
+                daemon.note_device_config_value();
                 let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
+            }
+            DaemonEvent::HealthActivityRaw(config) => {
+                daemon.cache_health_activity_raw(config);
+                daemon.note_device_config_value();
             }
             DaemonEvent::HealthHrm(hrm) => {
                 if let Some(profile) = daemon.cache_hrm(hrm) {
                     let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
+                daemon.note_device_config_value();
             }
             DaemonEvent::HealthHeartRate(hr) => {
                 if let Some(profile) = daemon.cache_heart_rate(hr) {
                     let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
+                daemon.note_device_config_value();
             }
             DaemonEvent::HealthUnits(imperial) => {
                 if let Some(profile) = daemon.cache_units(imperial) {
                     let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
+                daemon.note_device_config_value();
             }
-            DaemonEvent::WatchSetting { key, value } => {
+            DaemonEvent::WatchSetting { key, value, raw } => {
                 let variant = watch_pref_owned_value(&value);
-                daemon.cache_watch_setting(key.clone(), value);
+                daemon.cache_watch_setting(key.clone(), value, raw);
+                daemon.note_device_config_value();
                 let _ = CobbleDaemon::watch_setting_received(emitter, &key, variant).await;
             }
         }

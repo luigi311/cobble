@@ -189,6 +189,11 @@ impl Pebble {
 
     // ---- public API ----
 
+    /// Negotiated BlobDB protocol version for the active connection.
+    pub fn blob_db_version(&self) -> u8 {
+        self.inner.lock().unwrap().blob_db_version
+    }
+
     /// Query the watch's version info (endpoint 16): firmware versions, board,
     /// serial, BT address, language, and protocol capabilities. Times out after
     /// 10s if the watch doesn't reply.

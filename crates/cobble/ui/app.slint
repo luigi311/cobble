@@ -5,8 +5,8 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
-import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl } from "widgets.slint";
+import { DaySteps, SleepBar, HealthSession, WatchDevice, DeviceConfigEntry, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
+import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl, ErrorBanner, LoadingBanner } from "widgets.slint";
 import { StepsChart, SleepChart, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
@@ -77,6 +77,25 @@ export component AppWindow inherits Window {
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
 
+    // ── Device Config (read-only in Phase 2) ──
+    in property <string> dc-state: "disconnected";
+    in property <string> dc-status: "Connect a watch to inspect its settings.";
+    in property <bool> dc-status-error: false;
+    in property <bool> dc-loading: false;
+    in property <string> dc-watch-id;
+    in property <string> dc-platform;
+    in property <string> dc-firmware;
+    in property <string> dc-last-read;
+    in property <string> dc-height;
+    in property <string> dc-weight;
+    in property <string> dc-age;
+    in property <string> dc-sex;
+    in property <string> dc-tracking;
+    in property <string> dc-insights;
+    in property <string> dc-units;
+    in property <string> dc-hrm;
+    in property <[DeviceConfigEntry]> dc-preferences;
+
     // ── Period navigation ──
     in property <string> workout-period-label: "This Week";
     in property <bool>   workout-can-forward: false;
@@ -91,6 +110,7 @@ export component AppWindow inherits Window {
     callback scan-watches();
     callback refresh-data();
     callback refresh-device();
+    callback refresh-device-config();
     // Device actions (Settings ▸ Device Actions)
     callback reboot-watch();
     callback reset-into-recovery();
@@ -113,7 +133,7 @@ export component AppWindow inherits Window {
 
     // ── Internal state ──
     property <int> active-tab: 0;
-    property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions
+    property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions, 3 = device config
     property <bool> confirm-factory: false;
     property <bool> confirm-recovery: false;
     property <int> workout-period: 1;
@@ -375,6 +395,11 @@ export component AppWindow inherits Window {
                         clicked => { root.settings-page = 1; }
                     }
                     SettingsRow {
+                        label: "Device Config";
+                        sublabel: "Read watch health and preference settings";
+                        clicked => { root.settings-page = 3; root.refresh-device-config(); }
+                    }
+                    SettingsRow {
                         label: "Device Actions";
                         sublabel: "Reboot, recovery, core dump, forget, factory reset";
                         clicked => { root.action-status = ""; root.action-error = false; root.confirm-factory = false; root.confirm-recovery = false; root.settings-page = 2; }
@@ -518,6 +543,98 @@ export component AppWindow inherits Window {
                         text: root.save-status;
                         color: root.save-status-error ? Palette.red : Palette.green;
                         font-size: 13px; horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // ── Settings ▸ Device Config ──────────────────────────────────────
+            if active-tab == 4 && root.settings-page == 3: Flickable {
+                viewport-height: device-config-page.preferred-height;
+                device-config-page := VerticalLayout {
+                    padding: 20px; spacing: 12px; alignment: start;
+                    HorizontalLayout {
+                        height: 28px; spacing: 8px;
+                        Rectangle {
+                            width: 32px; height: 28px; border-radius: 6px; background: Palette.surface;
+                            Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea { clicked => { root.settings-page = 0; } }
+                        }
+                        Text { text: "Device Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Rectangle {
+                            width: 84px; height: 28px; border-radius: 6px;
+                            background: root.watch-connected && !root.dc-loading ? Palette.accent : Palette.muted;
+                            opacity: root.watch-connected && !root.dc-loading ? 1.0 : 0.5;
+                            Text { text: root.dc-loading ? "Loading…" : "Refresh"; color: white; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea {
+                                enabled: root.watch-connected && !root.dc-loading;
+                                clicked => { root.refresh-device-config(); }
+                            }
+                        }
+                    }
+
+                    if root.dc-loading: LoadingBanner { message: root.dc-status; }
+                    if !root.dc-loading && root.dc-status-error: ErrorBanner { message: root.dc-status; }
+                    if !root.dc-loading && !root.dc-status-error: Rectangle {
+                        background: Palette.surface; border-radius: 10px; min-height: 52px;
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 10px;
+                            Rectangle {
+                                width: 8px; height: 8px; border-radius: 4px;
+                                background: root.dc-status-error ? Palette.red
+                                    : root.dc-state == "ready" ? Palette.green : Palette.orange;
+                            }
+                            Text {
+                                text: root.dc-status; color: root.dc-status-error ? Palette.red : Palette.muted;
+                                font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1;
+                            }
+                        }
+                    }
+
+                    if root.dc-watch-id != "": Text { text: "Watch"; color: Palette.muted; font-size: 12px; }
+                    if root.dc-watch-id != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            InfoRow { label: "Identity"; value: root.dc-watch-id; }
+                            InfoRow { label: "Platform"; value: root.dc-platform; }
+                            InfoRow { label: "Firmware"; value: root.dc-firmware; }
+                            InfoRow { label: "Last read"; value: root.dc-last-read; }
+                        }
+                    }
+
+                    if root.dc-height != "": Text { text: "Health & Profile"; color: Palette.muted; font-size: 12px; }
+                    if root.dc-height != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            InfoRow { label: "Height"; value: root.dc-height; }
+                            InfoRow { label: "Weight"; value: root.dc-weight; }
+                            InfoRow { label: "Age"; value: root.dc-age; }
+                            InfoRow { label: "Sex"; value: root.dc-sex; }
+                            InfoRow { label: "Tracking"; value: root.dc-tracking; }
+                            InfoRow { label: "Insights"; value: root.dc-insights; }
+                            InfoRow { label: "Distance units"; value: root.dc-units; }
+                            InfoRow { label: "Heart-rate monitor"; value: root.dc-hrm; }
+                        }
+                    }
+
+                    for entry in root.dc-preferences: VerticalLayout {
+                        spacing: 6px;
+                        if entry.group != "": Text { text: entry.group; color: Palette.muted; font-size: 12px; }
+                        Rectangle {
+                            background: Palette.surface; border-radius: 8px; min-height: 42px;
+                            HorizontalLayout {
+                                padding-left: 14px; padding-right: 14px;
+                                Text { text: entry.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: entry.status == "available" ? entry.value : entry.status;
+                                    color: entry.status == "available" ? Palette.text : Palette.orange;
+                                    font-size: 12px; vertical-alignment: center; horizontal-alignment: right;
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -101,6 +101,131 @@ export component ActionButton inherits Rectangle {
     TouchArea { clicked => { if (root.enabled) { root.clicked(); } } }
 }
 
+// ─── Device Config form/status primitives ───────────────────────────────────
+
+export component EnumSetting inherits Rectangle {
+    in property <string> label;
+    in property <[string]> options;
+    in-out property <int> selected-index: 0;
+    in property <bool> enabled: true;
+    callback changed(int);
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 10px; spacing: 8px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: root.options.length > 0 && root.selected-index >= 0 && root.selected-index < root.options.length
+                ? root.options[root.selected-index] : "—";
+            color: Palette.accent; font-size: 13px; vertical-alignment: center;
+        }
+        Text { text: "›"; color: Palette.muted; font-size: 20px; vertical-alignment: center; }
+    }
+    TouchArea {
+        enabled: root.enabled && root.options.length > 0;
+        clicked => {
+            root.selected-index = Math.mod(root.selected-index + 1, root.options.length);
+            root.changed(root.selected-index);
+        }
+    }
+}
+
+export component NumericSetting inherits Rectangle {
+    in property <string> label;
+    in-out property <int> value;
+    in property <int> minimum;
+    in property <int> maximum: 100;
+    in property <int> step: 1;
+    in property <string> suffix;
+    in property <bool> enabled: true;
+    callback changed(int);
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 8px; spacing: 8px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 6px; background: Palette.bg;
+            Text { text: "−"; color: Palette.accent; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea {
+                enabled: root.enabled && root.value > root.minimum;
+                clicked => {
+                    root.value = max(root.minimum, root.value - root.step);
+                    root.changed(root.value);
+                }
+            }
+        }
+        Text {
+            text: root.value + (root.suffix == "" ? "" : " " + root.suffix);
+            color: Palette.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+            min-width: 64px;
+        }
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 6px; background: Palette.bg;
+            Text { text: "+"; color: Palette.accent; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea {
+                enabled: root.enabled && root.value < root.maximum;
+                clicked => {
+                    root.value = min(root.maximum, root.value + root.step);
+                    root.changed(root.value);
+                }
+            }
+        }
+    }
+}
+
+export component UnitSelector inherits Rectangle {
+    in property <string> label;
+    in property <[string]> units;
+    in-out property <int> selected-index: 0;
+    in property <bool> enabled: true;
+    callback changed(int);
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 8px; spacing: 6px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        for unit[index] in root.units: Rectangle {
+            width: 52px; height: 30px; border-radius: 6px;
+            background: index == root.selected-index ? Palette.accent : Palette.bg;
+            Text {
+                text: unit; color: index == root.selected-index ? white : Palette.muted;
+                font-size: 12px; horizontal-alignment: center; vertical-alignment: center;
+            }
+            TouchArea {
+                enabled: root.enabled;
+                clicked => { root.selected-index = index; root.changed(index); }
+            }
+        }
+    }
+}
+
+export component ErrorBanner inherits Rectangle {
+    in property <string> message;
+    min-height: 52px; border-radius: 10px;
+    background: Palette.surface; border-width: 1px; border-color: Palette.red;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 10px;
+        Text { text: "!"; color: Palette.red; font-size: 16px; font-weight: 700; vertical-alignment: center; }
+        Text { text: root.message; color: Palette.red; font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+    }
+}
+
+export component LoadingBanner inherits Rectangle {
+    in property <string> message: "Loading…";
+    height: 52px; border-radius: 10px; background: Palette.surface;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 10px;
+        Rectangle {
+            width: 12px; height: 12px; border-radius: 6px; background: Palette.accent;
+        }
+        Text { text: root.message; color: Palette.muted; font-size: 12px; vertical-alignment: center; }
+    }
+}
+
 // ─── Segmented control button ─────────────────────────────────────────────────
 
 export component SegBtn inherits Rectangle {

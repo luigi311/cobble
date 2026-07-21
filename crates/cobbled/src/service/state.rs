@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use libpebble_ble::{
     ActivityPreferences, AppMessageValue, DatalogData, HeartRatePreferences, HrmPreferences,
-    Pebble, WatchPrefValue,
+    HealthActivityConfig, Pebble, WatchPrefValue, WatchVersionInfo,
 };
 
 use cobble_db::AppDb;
 use cobble_config::Config;
-use tokio::sync::mpsc;
+use cobble_contracts::DeviceConfigState;
+use tokio::sync::{mpsc, oneshot};
 use zbus::zvariant::{OwnedValue, Value};
 
 pub const BUS_NAME: &str = "org.cobble.Daemon";
@@ -37,11 +38,19 @@ pub enum DaemonEvent {
     MusicAction(String),
     PhoneAction(libpebble_ble::PhoneAction),
     HealthProfile(ActivityPreferences),
+    HealthActivityRaw(HealthActivityConfig),
     HealthHrm(HrmPreferences),
     HealthHeartRate(HeartRatePreferences),
     HealthUnits(bool),
-    WatchSetting { key: String, value: WatchPrefValue },
+    WatchSetting { key: String, value: WatchPrefValue, raw: Vec<u8> },
     DaemonConfigChanged(u64),
+    DeviceConfigChanged { revision: u64, state: DeviceConfigState },
+    DeviceConfigRefreshComplete {
+        info: Option<WatchVersionInfo>,
+        blob_db_version: u8,
+        error: Option<String>,
+        done: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,10 +126,18 @@ pub(crate) struct DaemonState {
     pub(crate) event_tx: mpsc::UnboundedSender<DaemonEvent>,
     pub(crate) db: Option<Arc<Mutex<AppDb>>>,
     pub(crate) health_profile: Option<ActivityPreferences>,
+    pub(crate) device_health_activity: Option<HealthActivityConfig>,
     pub(crate) hrm_prefs: Option<HrmPreferences>,
     pub(crate) heart_rate_prefs: Option<HeartRatePreferences>,
     pub(crate) imperial_units: Option<bool>,
     pub(crate) watch_settings: HashMap<String, WatchPrefValue>,
+    pub(crate) watch_setting_raw: HashMap<String, Vec<u8>>,
+    pub(crate) device_config_revision: u64,
+    pub(crate) device_config_state: DeviceConfigState,
+    pub(crate) device_config_last_read_at_ms: Option<i64>,
+    pub(crate) device_config_watch: Option<WatchVersionInfo>,
+    pub(crate) device_config_blob_db_version: u8,
+    pub(crate) device_config_error: Option<String>,
     pub(crate) battery_level: Option<u8>,
     pub(crate) music: MusicState,
 }

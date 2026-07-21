@@ -101,24 +101,36 @@ pub fn encode_activity_preferences(
     Ok(blob)
 }
 
-/// Decode a 9-byte "activityPreferences" blob into an [`ActivityPreferences`].
-///
-/// Returns `None` if the blob is shorter than 9 bytes. Trailing bytes beyond
-/// the 9th are ignored so a longer firmware blob still parses.
-pub fn parse_activity_preferences(blob: &[u8]) -> Option<ActivityPreferences> {
+/// Losslessly decode a 9-byte "activityPreferences" blob in native wire units.
+pub fn parse_health_activity_config(blob: &[u8]) -> Option<HealthActivityConfig> {
     if blob.len() < 9 {
         return None;
     }
-    let height_mm = u16::from_le_bytes([blob[0], blob[1]]);
-    let weight_dag = u16::from_le_bytes([blob[2], blob[3]]);
-    Some(ActivityPreferences {
-        height_cm: height_mm / 10,   // stored in mm
-        weight_kg: weight_dag / 100, // stored in decagrams
+    Some(HealthActivityConfig {
+        height_mm: u16::from_le_bytes([blob[0], blob[1]]),
+        weight_dag: u16::from_le_bytes([blob[2], blob[3]]),
         tracking_enabled: blob[4] != 0,
         activity_insights_enabled: blob[5] != 0,
         sleep_insights_enabled: blob[6] != 0,
         age: blob[7],
         gender: blob[8],
+    })
+}
+
+/// Decode a 9-byte "activityPreferences" blob into the legacy whole-unit model.
+///
+/// Returns `None` if the blob is shorter than 9 bytes. Trailing bytes beyond
+/// the 9th are ignored so a longer firmware blob still parses.
+pub fn parse_activity_preferences(blob: &[u8]) -> Option<ActivityPreferences> {
+    let config = parse_health_activity_config(blob)?;
+    Some(ActivityPreferences {
+        height_cm: config.height_mm / 10,
+        weight_kg: config.weight_dag / 100,
+        tracking_enabled: config.tracking_enabled,
+        activity_insights_enabled: config.activity_insights_enabled,
+        sleep_insights_enabled: config.sleep_insights_enabled,
+        age: config.age,
+        gender: config.gender,
     })
 }
 
@@ -300,6 +312,18 @@ mod tests {
         assert!(prefs.tracking_enabled);
         assert!(!prefs.activity_insights_enabled);
         assert!(!prefs.sleep_insights_enabled);
+
+        let precise = HealthActivityConfig {
+            height_mm: 1805,
+            weight_dag: 7555,
+            tracking_enabled: true,
+            activity_insights_enabled: true,
+            sleep_insights_enabled: false,
+            age: 30,
+            gender: 1,
+        };
+        let precise_blob = encode_activity_preferences(&precise).expect("encodes");
+        assert_eq!(parse_health_activity_config(&precise_blob), Some(precise));
     }
 
     #[test]
