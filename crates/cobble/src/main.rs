@@ -43,6 +43,13 @@ fn main() -> anyhow::Result<()> {
     let effective_db_path = initial_snapshot
         .as_ref()
         .map(|snapshot| PathBuf::from(&snapshot.active_database_path))
+        .or_else(|| match cobble_client::offline_database_path() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                warn!("offline database path unavailable: {error}");
+                None
+            }
+        })
         .unwrap_or_default();
 
     // Derive the watch timezone offset from synced data so all times/labels

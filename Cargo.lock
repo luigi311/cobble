@@ -795,8 +795,10 @@ dependencies = [
 name = "cobble-client"
 version = "0.2.0"
 dependencies = [
+ "cobble-config",
  "cobble-contracts",
  "futures-util",
+ "toml 0.8.23",
  "zbus",
  "zvariant",
 ]

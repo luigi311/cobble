@@ -19,7 +19,10 @@
 //! For signal subscriptions, obtain a [`CobbleDaemonProxy`] via
 //! [`CobbleClient::proxy`] and call the generated `receive_*()` methods.
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+};
 
 pub use cobble_contracts::*;
 use zbus::{Connection, proxy};
@@ -34,6 +37,48 @@ pub type WireDict = HashMap<i32, (String, OwnedValue)>;
 
 /// Self-describing `a{sv}` map (watch version/color/health-profile/settings).
 pub type VarDict = HashMap<String, OwnedValue>;
+
+fn xdg_path(variable: &str, home_suffix: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join(home_suffix))
+        })
+}
+
+fn database_path_from_config(
+    config_path: &Path,
+    default_database_path: PathBuf,
+) -> std::result::Result<PathBuf, String> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_database_path);
+        }
+        Err(error) => {
+            return Err(format!("read config file {}: {error}", config_path.display()));
+        }
+    };
+    let config: cobble_config::Config = toml::from_str(&text)
+        .map_err(|error| format!("parse config file {}: {error}", config_path.display()))?;
+    Ok(config.db.map(PathBuf::from).unwrap_or(default_database_path))
+}
+
+/// Resolve the database used for offline read-only access from the standard
+/// daemon config. A running daemon's reported active path must take precedence.
+pub fn offline_database_path() -> std::result::Result<PathBuf, String> {
+    let config_base = xdg_path("XDG_CONFIG_HOME", ".config")
+        .ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set".to_string())?;
+    let data_base = xdg_path("XDG_DATA_HOME", ".local/share")
+        .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+    database_path_from_config(
+        &config_base.join("cobbled/config.toml"),
+        data_base.join("cobbled/cobbled.db"),
+    )
+}
 
 fn wire_value(value: impl Into<zvariant::Value<'static>>) -> Result<OwnedValue> {
     OwnedValue::try_from(value.into()).map_err(Error::Variant)
@@ -924,6 +969,19 @@ impl CobbleClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_database_path_uses_configured_value() {
+        let path = std::env::temp_dir().join(format!(
+            "cobble-client-config-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, "db = '/tmp/custom-cobbled.db'\n").unwrap();
+        let resolved = database_path_from_config(&path, PathBuf::from("/tmp/default.db")).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/custom-cobbled.db"));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn device_config_decoder_keeps_missing_health_absent() {
