@@ -349,11 +349,15 @@ class CobbleClient:
         return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
 
     async def update_device_config(
-        self, expected_revision: int, patch: HealthConfigPatch
+        self,
+        expected_revision: int,
+        patch: HealthConfigPatch | None = None,
+        preferences: dict[str, bool | int | str] | None = None,
     ) -> DeviceConfigSnapshot:
-        """Apply only the supplied health fields and return reconciled watch state."""
+        """Apply supplied health/general fields and return reconciled watch state."""
         self._require_iface()
         wire: dict[str, Variant] = {}
+        patch = patch or HealthConfigPatch()
         fields = {
             "health.height_mm": ("q", patch.height_mm),
             "health.weight_dag": ("q", patch.weight_dag),
@@ -382,6 +386,15 @@ class CobbleClient:
                 "zone2": value.zone_2, "zone3": value.zone_3,
             }.items():
                 wire[f"health.thresholds.{key}"] = Variant("y", threshold)
+        for key, value in (preferences or {}).items():
+            if isinstance(value, bool):
+                wire[f"preference.{key}"] = Variant("b", value)
+            elif isinstance(value, int):
+                wire[f"preference.{key}"] = Variant("u", value)
+            elif isinstance(value, str):
+                wire[f"preference.{key}"] = Variant("s", value)
+            else:
+                raise TypeError(f"unsupported preference value for {key}")
         try:
             raw = await self._iface.call_update_device_config(expected_revision, wire)
         except DBusError as e:

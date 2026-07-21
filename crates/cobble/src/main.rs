@@ -230,8 +230,7 @@ fn main() -> anyhow::Result<()> {
         window.on_apply_device_config(move || {
             let Some(window) = weak.upgrade() else { return };
             if !window.get_watch_connected() || window.get_dc_applying() { return; }
-            let current = baseline.lock().unwrap().clone();
-            let Some(original) = current.and_then(|snapshot| snapshot.health.value) else { return };
+            let Some(current) = baseline.lock().unwrap().clone() else { return };
             let staged_units = if window.get_dc_units_index() == 0 { DistanceUnits::Metric } else { DistanceUnits::Imperial };
             let staged_interval = match window.get_dc_hrm_interval_index() {
                     0 => HrmMeasurementInterval::TenMinutes,
@@ -239,8 +238,60 @@ fn main() -> anyhow::Result<()> {
                     2 => HrmMeasurementInterval::OneHour,
                     _ => HrmMeasurementInterval::Off,
                 };
-            let original_hrm = original.hrm.value.as_ref();
-            let patch = HealthConfigPatch {
+            let mut preferences = std::collections::BTreeMap::new();
+            let original_preferences = current.preferences;
+            let mut stage_bool = |key: &str, available: bool, value: bool| {
+                if available && original_preferences.get(key).and_then(|field| field.value.as_ref()) != Some(&PreferenceValue::Bool(value)) {
+                    preferences.insert(key.to_owned(), PreferenceValue::Bool(value));
+                }
+            };
+            stage_bool("clock24h", window.get_dc_clock_24h_available(), window.get_dc_clock_24h_value());
+            stage_bool("displayOrientationLeftHanded", window.get_dc_left_handed_available(), window.get_dc_left_handed_value());
+            stage_bool("lightEnabled", window.get_dc_light_enabled_available(), window.get_dc_light_enabled_value());
+            stage_bool("lightAmbientSensorEnabled", window.get_dc_light_ambient_available(), window.get_dc_light_ambient_value());
+            stage_bool("lightMotion", window.get_dc_light_motion_available(), window.get_dc_light_motion_value());
+            stage_bool("lightDynamicIntensity", window.get_dc_light_dynamic_legacy_available(), window.get_dc_light_dynamic_legacy_value());
+            stage_bool("menuScrollWrapAround", window.get_dc_menu_wrap_available(), window.get_dc_menu_wrap_value());
+            stage_bool("notifDesignStyle", window.get_dc_notif_design_available(), window.get_dc_notif_design_value());
+            stage_bool("notifVibeDelay", window.get_dc_notif_delay_available(), window.get_dc_notif_delay_value());
+            stage_bool("notifBacklight", window.get_dc_notif_backlight_available(), window.get_dc_notif_backlight_value());
+            stage_bool("dndManuallyEnabled", window.get_dc_dnd_manual_available(), window.get_dc_dnd_manual_value());
+            stage_bool("dndSmartEnabled", window.get_dc_dnd_smart_available(), window.get_dc_dnd_smart_value());
+            stage_bool("dndMotionBacklight", window.get_dc_dnd_motion_backlight_available(), window.get_dc_dnd_motion_backlight_value());
+            stage_bool("dndAutoDismiss", window.get_dc_dnd_auto_dismiss_available(), window.get_dc_dnd_auto_dismiss_value());
+            stage_bool("timelineQuickViewEnabled", window.get_dc_timeline_quick_view_available(), window.get_dc_timeline_quick_view_value());
+            stage_bool("musicShowVolumeControls", window.get_dc_music_volume_available(), window.get_dc_music_volume_value());
+            stage_bool("musicShowProgressBar", window.get_dc_music_progress_available(), window.get_dc_music_progress_value());
+            let mut stage_number = |key: &str, available: bool, value: u32| {
+                if available && original_preferences.get(key).and_then(|field| field.value.as_ref()) != Some(&PreferenceValue::Unsigned(value)) {
+                    preferences.insert(key.to_owned(), PreferenceValue::Unsigned(value));
+                }
+            };
+            stage_number("lightTimeoutMs", window.get_dc_light_timeout_available(), window.get_dc_light_timeout_ms() as u32);
+            stage_number("lightTouch", window.get_dc_light_touch_available(), window.get_dc_light_touch_index() as u32);
+            let intensity_codes = [10, 25, 50, 100];
+            stage_number("lightIntensity", window.get_dc_light_intensity_available(), intensity_codes[window.get_dc_light_intensity_index().clamp(0, 3) as usize]);
+            stage_number("lightPreset", window.get_dc_light_preset_available(), window.get_dc_light_preset_index() as u32);
+            stage_number("lightDynamicMode", window.get_dc_light_dynamic_mode_available(), window.get_dc_light_dynamic_mode_index() as u32);
+            stage_number("menuScrollVibeBehavior", window.get_dc_menu_vibe_available(), window.get_dc_menu_vibe_index() as u32);
+            stage_number("mask", window.get_dc_notif_filter_available(), [0, 2, 15][window.get_dc_notif_filter_index().clamp(0, 2) as usize]);
+            stage_number("notifWindowTimeout", window.get_dc_notif_timeout_available(), window.get_dc_notif_timeout_ms() as u32);
+            stage_number("vibeIntensity", window.get_dc_vibe_intensity_available(), window.get_dc_vibe_intensity_index() as u32);
+            stage_number("vibeScoreNotifications", window.get_dc_vibe_notifications_available(), [1, 2, 4, 8, 9, 10, 12][window.get_dc_vibe_notifications_index().clamp(0, 6) as usize]);
+            stage_number("vibeScoreIncomingCalls", window.get_dc_vibe_calls_available(), [1, 3, 5, 8, 9, 10, 12][window.get_dc_vibe_calls_index().clamp(0, 6) as usize]);
+            stage_number("vibeScoreAlarms", window.get_dc_vibe_alarms_available(), [3, 5, 8, 9, 10, 11, 12, 14][window.get_dc_vibe_alarms_index().clamp(0, 7) as usize]);
+            stage_number("dndInterruptionsMask", window.get_dc_dnd_interruptions_available(), [0, 2][window.get_dc_dnd_interruptions_index().clamp(0, 1) as usize]);
+            stage_number("dndShowNotifications", window.get_dc_dnd_show_notifications_available(), window.get_dc_dnd_show_notifications_index().clamp(0, 1) as u32);
+            stage_number("timelineQuickViewBeforeTimeMin", window.get_dc_timeline_minutes_available(), window.get_dc_timeline_minutes() as u32);
+            if window.get_dc_text_size_available() {
+                let code = window.get_dc_text_size_index() as u32;
+                let unchanged = original_preferences.get("textStyle").and_then(|field| field.value.as_ref())
+                    .is_some_and(|value| matches!(value, PreferenceValue::Unsigned(old) if *old == code));
+                if !unchanged { preferences.insert("textStyle".into(), PreferenceValue::Unsigned(code)); }
+            }
+            let patch = current.health.value.as_ref().map(|original| {
+                let original_hrm = original.hrm.value.as_ref();
+                HealthConfigPatch {
                 height_mm: (original.height_mm != window.get_dc_height_mm() as u16).then_some(window.get_dc_height_mm() as u16),
                 weight_dag: (original.weight_dag != window.get_dc_weight_dag() as u16).then_some(window.get_dc_weight_dag() as u16),
                 tracking_enabled: (original.tracking_enabled != window.get_dc_tracking_value()).then_some(window.get_dc_tracking_value()),
@@ -253,10 +304,11 @@ fn main() -> anyhow::Result<()> {
                 hrm_measurement_interval: original_hrm.filter(|value| window.get_dc_hrm_interval_available() && value.measurement_interval != Some(staged_interval)).map(|_| staged_interval),
                 hrm_during_activity: original_hrm.filter(|value| window.get_dc_hrm_during_activity_available() && value.during_activity != Some(window.get_dc_hrm_during_activity_value())).map(|_| window.get_dc_hrm_during_activity_value()),
                 heart_rate_thresholds: None,
-            };
+                }
+            });
             window.set_dc_applying(true);
             window.set_dc_status_error(false);
-            window.set_dc_status("Applying health settings…".into());
+            window.set_dc_status("Applying device settings…".into());
             let expected_revision = *revision.lock().unwrap();
             let weak2 = weak.clone();
             let revision2 = revision.clone();
@@ -266,8 +318,8 @@ fn main() -> anyhow::Result<()> {
                     let client = CobbleClient::new().await?;
                     client.update_device_config(DeviceConfigPatch {
                         expected_revision,
-                        health: Some(patch),
-                        preferences: Default::default(),
+                        health: patch,
+                        preferences,
                     }).await
                 }.await;
                 slint::invoke_from_event_loop(move || {
@@ -287,9 +339,9 @@ fn main() -> anyhow::Result<()> {
                                 let read_back = snapshot.capabilities.blob_db_version >= 1;
                                 apply_device_config(&window, &snapshot);
                                 window.set_dc_status(if read_back {
-                                    "Health settings applied and read back from the watch."
+                                    "Device settings applied and read back from the watch."
                                 } else {
-                                    "Health settings accepted; this watch cannot confirm complete readback."
+                                    "Device settings accepted; this watch cannot confirm complete readback."
                                 }.into());
                             }
                         }
@@ -1037,10 +1089,91 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_hrm("".into());
     }
     w.set_dc_dirty(false);
+    let pref_bool = |key: &str| snapshot.preferences.get(key).and_then(|field| match field.value {
+        Some(PreferenceValue::Bool(value)) => Some(value), _ => None,
+    });
+    let clock = pref_bool("clock24h");
+    w.set_dc_clock_24h_available(clock.is_some());
+    w.set_dc_clock_24h_value(clock.unwrap_or(false));
+    let left = pref_bool("displayOrientationLeftHanded");
+    w.set_dc_left_handed_available(left.is_some());
+    w.set_dc_left_handed_value(left.unwrap_or(false));
+    let text_size = snapshot.preferences.get("textStyle").and_then(|field| match field.value {
+        Some(PreferenceValue::Unsigned(value @ 0..=2)) => Some(value as i32), _ => None,
+    });
+    w.set_dc_text_size_available(text_size.is_some());
+    w.set_dc_text_size_index(text_size.unwrap_or(1));
+    let set_bool = |key: &str, available: fn(&AppWindow, bool), value: fn(&AppWindow, bool)| {
+        let current = pref_bool(key);
+        available(w, current.is_some());
+        value(w, current.unwrap_or(false));
+    };
+    set_bool("lightEnabled", AppWindow::set_dc_light_enabled_available, AppWindow::set_dc_light_enabled_value);
+    set_bool("lightAmbientSensorEnabled", AppWindow::set_dc_light_ambient_available, AppWindow::set_dc_light_ambient_value);
+    set_bool("lightMotion", AppWindow::set_dc_light_motion_available, AppWindow::set_dc_light_motion_value);
+    set_bool("lightDynamicIntensity", AppWindow::set_dc_light_dynamic_legacy_available, AppWindow::set_dc_light_dynamic_legacy_value);
+    set_bool("menuScrollWrapAround", AppWindow::set_dc_menu_wrap_available, AppWindow::set_dc_menu_wrap_value);
+    set_bool("notifDesignStyle", AppWindow::set_dc_notif_design_available, AppWindow::set_dc_notif_design_value);
+    set_bool("notifVibeDelay", AppWindow::set_dc_notif_delay_available, AppWindow::set_dc_notif_delay_value);
+    set_bool("notifBacklight", AppWindow::set_dc_notif_backlight_available, AppWindow::set_dc_notif_backlight_value);
+    set_bool("dndManuallyEnabled", AppWindow::set_dc_dnd_manual_available, AppWindow::set_dc_dnd_manual_value);
+    set_bool("dndSmartEnabled", AppWindow::set_dc_dnd_smart_available, AppWindow::set_dc_dnd_smart_value);
+    set_bool("dndMotionBacklight", AppWindow::set_dc_dnd_motion_backlight_available, AppWindow::set_dc_dnd_motion_backlight_value);
+    set_bool("dndAutoDismiss", AppWindow::set_dc_dnd_auto_dismiss_available, AppWindow::set_dc_dnd_auto_dismiss_value);
+    set_bool("timelineQuickViewEnabled", AppWindow::set_dc_timeline_quick_view_available, AppWindow::set_dc_timeline_quick_view_value);
+    set_bool("musicShowVolumeControls", AppWindow::set_dc_music_volume_available, AppWindow::set_dc_music_volume_value);
+    set_bool("musicShowProgressBar", AppWindow::set_dc_music_progress_available, AppWindow::set_dc_music_progress_value);
+    let pref_number = |key: &str| snapshot.preferences.get(key).and_then(|field| match field.value {
+        Some(PreferenceValue::Unsigned(value)) => Some(value), _ => None,
+    });
+    let timeout = pref_number("lightTimeoutMs").filter(|value| (1000..=10000).contains(value));
+    w.set_dc_light_timeout_available(timeout.is_some()); w.set_dc_light_timeout_ms(timeout.unwrap_or(3000) as i32);
+    let touch = pref_number("lightTouch").filter(|value| *value <= 2);
+    w.set_dc_light_touch_available(touch.is_some()); w.set_dc_light_touch_index(touch.unwrap_or(0) as i32);
+    let intensity = pref_number("lightIntensity").and_then(|value| [10, 25, 50, 100].iter().position(|code| *code == value));
+    w.set_dc_light_intensity_available(intensity.is_some()); w.set_dc_light_intensity_index(intensity.unwrap_or(1) as i32);
+    let preset = pref_number("lightPreset").filter(|value| *value <= 3);
+    w.set_dc_light_preset_available(preset.is_some()); w.set_dc_light_preset_index(preset.unwrap_or(1) as i32);
+    let dynamic = pref_number("lightDynamicMode").filter(|value| *value <= 3);
+    w.set_dc_light_dynamic_mode_available(dynamic.is_some()); w.set_dc_light_dynamic_mode_index(dynamic.unwrap_or(2) as i32);
+    let menu_vibe = pref_number("menuScrollVibeBehavior").filter(|value| *value <= 2);
+    w.set_dc_menu_vibe_available(menu_vibe.is_some()); w.set_dc_menu_vibe_index(menu_vibe.unwrap_or(0) as i32);
+    let filter = pref_number("mask").and_then(|value| [0, 2, 15].iter().position(|code| *code == value));
+    w.set_dc_notif_filter_available(filter.is_some()); w.set_dc_notif_filter_index(filter.unwrap_or(2) as i32);
+    let notif_timeout = pref_number("notifWindowTimeout").filter(|value| *value <= 600000);
+    w.set_dc_notif_timeout_available(notif_timeout.is_some()); w.set_dc_notif_timeout_ms(notif_timeout.unwrap_or(180000) as i32);
+    let vibe_intensity = pref_number("vibeIntensity").filter(|value| *value <= 2);
+    w.set_dc_vibe_intensity_available(vibe_intensity.is_some()); w.set_dc_vibe_intensity_index(vibe_intensity.unwrap_or(2) as i32);
+    let option_index = |key: &str, codes: &[u32]| pref_number(key).and_then(|value| codes.iter().position(|code| *code == value));
+    let vibe_notifications = option_index("vibeScoreNotifications", &[1, 2, 4, 8, 9, 10, 12]);
+    w.set_dc_vibe_notifications_available(vibe_notifications.is_some()); w.set_dc_vibe_notifications_index(vibe_notifications.unwrap_or(4) as i32);
+    let vibe_calls = option_index("vibeScoreIncomingCalls", &[1, 3, 5, 8, 9, 10, 12]);
+    w.set_dc_vibe_calls_available(vibe_calls.is_some()); w.set_dc_vibe_calls_index(vibe_calls.unwrap_or(3) as i32);
+    let vibe_alarms = option_index("vibeScoreAlarms", &[3, 5, 8, 9, 10, 11, 12, 14]);
+    w.set_dc_vibe_alarms_available(vibe_alarms.is_some()); w.set_dc_vibe_alarms_index(vibe_alarms.unwrap_or(5) as i32);
+    let dnd_interruptions = option_index("dndInterruptionsMask", &[0, 2]);
+    w.set_dc_dnd_interruptions_available(dnd_interruptions.is_some()); w.set_dc_dnd_interruptions_index(dnd_interruptions.unwrap_or(0) as i32);
+    let dnd_show = pref_number("dndShowNotifications").filter(|value| *value <= 1);
+    w.set_dc_dnd_show_notifications_available(dnd_show.is_some()); w.set_dc_dnd_show_notifications_index(dnd_show.unwrap_or(1) as i32);
+    let timeline_minutes = pref_number("timelineQuickViewBeforeTimeMin").filter(|value| *value <= 30);
+    w.set_dc_timeline_minutes_available(timeline_minutes.is_some()); w.set_dc_timeline_minutes(timeline_minutes.unwrap_or(10) as i32);
 
     let mut entries = Vec::new();
     let mut previous_group = String::new();
     for (key, field) in &snapshot.preferences {
+        if matches!(key.as_str(), "clock24h" | "displayOrientationLeftHanded" | "textStyle"
+            | "lightEnabled" | "lightAmbientSensorEnabled" | "lightMotion" | "lightTimeoutMs"
+            | "lightTouch" | "lightIntensity" | "lightDynamicIntensity" | "lightPreset"
+            | "lightDynamicMode" | "menuScrollWrapAround" | "menuScrollVibeBehavior"
+            | "mask" | "notifDesignStyle" | "notifVibeDelay" | "notifBacklight"
+            | "notifWindowTimeout" | "vibeIntensity" | "vibeScoreNotifications"
+            | "vibeScoreIncomingCalls" | "vibeScoreAlarms" | "dndManuallyEnabled"
+            | "dndSmartEnabled" | "dndInterruptionsMask" | "dndShowNotifications"
+            | "dndMotionBacklight" | "dndAutoDismiss" | "timelineQuickViewEnabled"
+            | "timelineQuickViewBeforeTimeMin" | "musicShowVolumeControls"
+            | "musicShowProgressBar") {
+            continue;
+        }
         let group = preference_group(key);
         let heading = if group == previous_group { String::new() } else { group.to_owned() };
         previous_group = group.to_owned();
@@ -1087,6 +1220,25 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_hrm_during_activity_available(false);
     w.set_dc_dirty(false);
     w.set_dc_applying(false);
+    w.set_dc_clock_24h_available(false);
+    w.set_dc_left_handed_available(false);
+    w.set_dc_text_size_available(false);
+    w.set_dc_light_enabled_available(false); w.set_dc_light_ambient_available(false);
+    w.set_dc_light_motion_available(false); w.set_dc_light_timeout_available(false);
+    w.set_dc_light_touch_available(false); w.set_dc_light_intensity_available(false);
+    w.set_dc_light_dynamic_legacy_available(false); w.set_dc_light_preset_available(false);
+    w.set_dc_light_dynamic_mode_available(false); w.set_dc_menu_wrap_available(false);
+    w.set_dc_menu_vibe_available(false);
+    w.set_dc_notif_filter_available(false); w.set_dc_notif_design_available(false);
+    w.set_dc_notif_delay_available(false); w.set_dc_notif_backlight_available(false);
+    w.set_dc_notif_timeout_available(false); w.set_dc_vibe_intensity_available(false);
+    w.set_dc_vibe_notifications_available(false); w.set_dc_vibe_calls_available(false);
+    w.set_dc_vibe_alarms_available(false);
+    w.set_dc_dnd_manual_available(false); w.set_dc_dnd_smart_available(false);
+    w.set_dc_dnd_interruptions_available(false); w.set_dc_dnd_show_notifications_available(false);
+    w.set_dc_dnd_motion_backlight_available(false); w.set_dc_dnd_auto_dismiss_available(false);
+    w.set_dc_timeline_quick_view_available(false); w.set_dc_timeline_minutes_available(false);
+    w.set_dc_music_volume_available(false); w.set_dc_music_progress_available(false);
     w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));
 }
 

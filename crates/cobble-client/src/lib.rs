@@ -319,10 +319,17 @@ fn encode_daemon_config_patch(patch: DaemonConfigPatch) -> Result<VarDict> {
 }
 
 fn encode_device_config_patch(patch: DeviceConfigPatch) -> Result<VarDict> {
-    if !patch.preferences.is_empty() {
-        return Err(Error::Failure("general preference writes are not available until Phase 4".into()));
-    }
     let mut wire = VarDict::new();
+    for (key, value) in patch.preferences {
+        let value = match value {
+            PreferenceValue::Bool(value) => wire_value(value)?,
+            PreferenceValue::Unsigned(value) | PreferenceValue::Color(value) => wire_value(value)?,
+            PreferenceValue::Enum { code, .. } => wire_value(code)?,
+            PreferenceValue::Text(value) => wire_value(value)?,
+            PreferenceValue::Unknown => return Err(Error::Failure(format!("cannot write unknown preference {key}"))),
+        };
+        wire.insert(format!("preference.{key}"), value);
+    }
     let Some(health) = patch.health else { return Ok(wire) };
     macro_rules! insert {
         ($key:literal, $value:expr) => {

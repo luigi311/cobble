@@ -66,7 +66,8 @@ use std::{
 use libpebble_ble::{
     ActivityPreferences, HeartRatePreferences, HrmPreferences,
     MusicPlaybackState, MusicRepeat, MusicShuffle, Pebble, WatchColorInfo, WatchPrefValue,
-    WatchVersionInfo, WeatherType, HrMonitoringInterval,
+    WatchVersionInfo, WeatherType, HrMonitoringInterval, WatchPrefModel, WatchType,
+    decode_watch_pref_for_model, encode_watch_pref,
 };
 
 use cobble_db::{AppDb, DateRange, WellnessExportStatus};
@@ -171,6 +172,14 @@ fn completed_write_state(blob_db_version: u8, failed: bool) -> DeviceConfigState
     else { DeviceConfigState::Partial }
 }
 
+fn preference_model(watch: Option<&WatchVersionInfo>) -> WatchPrefModel {
+    match watch.map(WatchVersionInfo::watch_type) {
+        Some(WatchType::Emery) => WatchPrefModel::Emery,
+        Some(WatchType::Gabbro) => WatchPrefModel::Gabbro,
+        _ => WatchPrefModel::Standard,
+    }
+}
+
 fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
     let mut result = HashMap::from([
         ("api_version".into(), dbus_val(DEVICE_CONFIG_API_VERSION)),
@@ -253,7 +262,11 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
     } else {
         result.insert("health.units.availability".into(), dbus_val("not_received"));
     }
-    for (key, value) in &state.watch_settings {
+    let model = preference_model(state.device_config_watch.as_ref());
+    for (key, cached_value) in &state.watch_settings {
+        let decoded = state.watch_setting_raw.get(key)
+            .and_then(|raw| decode_watch_pref_for_model(key, raw, model));
+        let value = decoded.as_ref().unwrap_or(cached_value);
         result.insert(format!("preference.{key}.availability"), dbus_val("available"));
         result.insert(format!("preference.{key}.value"), watch_pref_owned_value(value));
         if let Some(raw) = state.watch_setting_raw.get(key) {
@@ -1272,7 +1285,9 @@ impl CobbleDaemon {
             "health.thresholds.resting", "health.thresholds.elevated", "health.thresholds.maximum",
             "health.thresholds.zone1", "health.thresholds.zone2", "health.thresholds.zone3",
         ];
-        if let Some(key) = patch.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+        if let Some(key) = patch.keys().find(|key| {
+            !FIELDS.contains(&key.as_str()) && !key.starts_with("preference.")
+        }) {
             return Err(DaemonError::Failed(format!("unsupported patch field {key}")));
         }
 
@@ -1377,6 +1392,19 @@ impl CobbleDaemon {
             if let Some(v) = patch_u8(&patch, "health.thresholds.zone3")? { value.zone3_threshold = v; raw[5] = v; }
         }
 
+        let (watch_type, observed_settings) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.device_config_watch.as_ref().map(|info| info.watch_type()).unwrap_or(WatchType::Unknown),
+                state.watch_settings.clone(),
+            )
+        };
+        let model = match watch_type {
+            WatchType::Emery => WatchPrefModel::Emery,
+            WatchType::Gabbro => WatchPrefModel::Gabbro,
+            _ => WatchPrefModel::Standard,
+        };
+
         let mut writes = Vec::new();
         if activity_changed {
             writes.push(("activityPreferences", activity_raw.clone().unwrap()));
@@ -1387,6 +1415,68 @@ impl CobbleDaemon {
         }
         if thresholds_changed {
             writes.push(("heartRatePreferences", thresholds_raw.clone().unwrap()));
+        }
+        let mut general_updates = Vec::new();
+        let mut preference_fields: Vec<_> = patch.iter()
+            .filter(|(field, _)| field.starts_with("preference."))
+            .collect();
+        preference_fields.sort_by_key(|(field, _)| field.as_str());
+        for (field, value) in preference_fields {
+            let Some(key) = field.strip_prefix("preference.") else { continue };
+            if !observed_settings.contains_key(key) {
+                return Err(DaemonError::Failed(format!(
+                    "preference {key} was not reported by this watch"
+                )));
+            }
+            let value = if let Ok(value) = bool::try_from(value) {
+                WatchPrefValue::Bool(value)
+            } else if let Ok(value) = u32::try_from(value) {
+                WatchPrefValue::Number(value)
+            } else if let Ok(value) = <&str>::try_from(value) {
+                WatchPrefValue::Text(value.to_owned())
+            } else {
+                return Err(DaemonError::Failed(format!("invalid preference value for {key}")));
+            };
+            let encoded = encode_watch_pref(key, &value, model)
+                .map_err(|error| DaemonError::Failed(error.to_string()))?;
+            let key: &'static str = match key {
+                "clock24h" => "clock24h",
+                "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
+                "textStyle" => "textStyle",
+                "lightEnabled" => "lightEnabled",
+                "lightAmbientSensorEnabled" => "lightAmbientSensorEnabled",
+                "lightMotion" => "lightMotion",
+                "lightTimeoutMs" => "lightTimeoutMs",
+                "lightTouch" => "lightTouch",
+                "lightIntensity" => "lightIntensity",
+                "lightDynamicIntensity" => "lightDynamicIntensity",
+                "lightPreset" => "lightPreset",
+                "lightDynamicMode" => "lightDynamicMode",
+                "menuScrollWrapAround" => "menuScrollWrapAround",
+                "menuScrollVibeBehavior" => "menuScrollVibeBehavior",
+                "mask" => "mask",
+                "notifDesignStyle" => "notifDesignStyle",
+                "notifVibeDelay" => "notifVibeDelay",
+                "notifBacklight" => "notifBacklight",
+                "notifWindowTimeout" => "notifWindowTimeout",
+                "vibeIntensity" => "vibeIntensity",
+                "vibeScoreNotifications" => "vibeScoreNotifications",
+                "vibeScoreIncomingCalls" => "vibeScoreIncomingCalls",
+                "vibeScoreAlarms" => "vibeScoreAlarms",
+                "dndManuallyEnabled" => "dndManuallyEnabled",
+                "dndSmartEnabled" => "dndSmartEnabled",
+                "dndInterruptionsMask" => "dndInterruptionsMask",
+                "dndShowNotifications" => "dndShowNotifications",
+                "dndMotionBacklight" => "dndMotionBacklight",
+                "dndAutoDismiss" => "dndAutoDismiss",
+                "timelineQuickViewEnabled" => "timelineQuickViewEnabled",
+                "timelineQuickViewBeforeTimeMin" => "timelineQuickViewBeforeTimeMin",
+                "musicShowVolumeControls" => "musicShowVolumeControls",
+                "musicShowProgressBar" => "musicShowProgressBar",
+                _ => return Err(DaemonError::Failed(format!("preference {key} is not editable in this phase"))),
+            };
+            writes.push((key, encoded.clone()));
+            general_updates.push((key.to_owned(), value, encoded));
         }
 
         let write_error = write_records_in_order(writes, |key, value| {
@@ -1421,6 +1511,10 @@ impl CobbleDaemon {
             if hrm_changed { state.hrm_prefs_raw = hrm_raw; }
             if thresholds_changed { state.heart_rate_prefs = thresholds; }
             if thresholds_changed { state.heart_rate_prefs_raw = thresholds_raw; }
+            for (key, value, raw) in general_updates {
+                state.watch_settings.insert(key.clone(), value);
+                state.watch_setting_raw.insert(key, raw);
+            }
             state.device_config_state = completed_write_state(blob_db_version, false);
             state.device_config_revision = state.device_config_revision.wrapping_add(1);
             let _ = state.event_tx.send(DaemonEvent::DeviceConfigChanged {
