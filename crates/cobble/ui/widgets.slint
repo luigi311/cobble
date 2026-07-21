@@ -213,8 +213,14 @@ export component ErrorBanner inherits Rectangle {
     min-height: 52px; border-radius: 10px;
     background: Palette.surface; border-width: 1px; border-color: Palette.red;
     HorizontalLayout {
-        padding-left: 14px; padding-right: 14px; spacing: 10px;
-        Text { text: "!"; color: Palette.red; font-size: 16px; font-weight: 700; vertical-alignment: center; }
+        padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
+        Rectangle {
+            width: 8px; vertical-stretch: 1; background: transparent;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                y: (parent.height - self.height) / 2; background: Palette.red;
+            }
+        }
         Text { text: root.message; color: Palette.red; font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
     }
 }
@@ -223,11 +229,15 @@ export component LoadingBanner inherits Rectangle {
     in property <string> message: "Loading…";
     height: 52px; border-radius: 10px; background: Palette.surface;
     HorizontalLayout {
-        padding-left: 14px; padding-right: 14px; spacing: 10px;
+        padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
         Rectangle {
-            width: 12px; height: 12px; border-radius: 6px; background: Palette.accent;
+            width: 8px; vertical-stretch: 1; background: transparent;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                y: (parent.height - self.height) / 2; background: Palette.accent;
+            }
         }
-        Text { text: root.message; color: Palette.muted; font-size: 12px; vertical-alignment: center; }
+        Text { text: root.message; color: Palette.muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
     }
 }
 

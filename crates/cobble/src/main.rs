@@ -998,9 +998,6 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         }));
         w.set_dc_hrm_during_activity_available(hrm.and_then(|value| value.during_activity).is_some());
         w.set_dc_hrm_during_activity_value(hrm.and_then(|value| value.during_activity).unwrap_or(false));
-        w.set_dc_thresholds_available(
-            health.heart_rate_thresholds.availability == FieldAvailability::Available,
-        );
         w.set_dc_height(format!("{} mm", health.height_mm).into());
         w.set_dc_weight(format!("{} dag", health.weight_dag).into());
         w.set_dc_age(health.age.to_string().into());
@@ -1030,7 +1027,6 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_hrm_available(false);
         w.set_dc_hrm_interval_available(false);
         w.set_dc_hrm_during_activity_available(false);
-        w.set_dc_thresholds_available(false);
         w.set_dc_height("".into());
         w.set_dc_weight("".into());
         w.set_dc_age("".into());
@@ -1089,7 +1085,6 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_hrm_available(false);
     w.set_dc_hrm_interval_available(false);
     w.set_dc_hrm_during_activity_available(false);
-    w.set_dc_thresholds_available(false);
     w.set_dc_dirty(false);
     w.set_dc_applying(false);
     w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));

@@ -111,7 +111,6 @@ export component AppWindow inherits Window {
     in property <bool> dc-hrm-available: false;
     in property <bool> dc-hrm-interval-available: false;
     in property <bool> dc-hrm-during-activity-available: false;
-    in property <bool> dc-thresholds-available: false;
     in property <string> dc-height-display;
     in property <string> dc-weight-display;
     in-out property <bool> dc-dirty: false;
@@ -602,11 +601,15 @@ export component AppWindow inherits Window {
                     if !root.dc-loading && !root.dc-status-error: Rectangle {
                         background: Palette.surface; border-radius: 10px; min-height: 52px;
                         HorizontalLayout {
-                            padding-left: 14px; padding-right: 14px; spacing: 10px;
+                            padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
                             Rectangle {
-                                width: 8px; height: 8px; border-radius: 4px;
-                                background: root.dc-status-error ? Palette.red
-                                    : root.dc-state == "ready" ? Palette.green : Palette.orange;
+                                width: 8px; vertical-stretch: 1; background: transparent;
+                                Rectangle {
+                                    width: 8px; height: 8px; border-radius: 4px;
+                                    y: (parent.height - self.height) / 2;
+                                    background: root.dc-status-error ? Palette.red
+                                        : root.dc-state == "ready" ? Palette.green : Palette.orange;
+                                }
                             }
                             Text {
                                 text: root.dc-status; color: root.dc-status-error ? Palette.red : Palette.muted;
@@ -695,10 +698,6 @@ export component AppWindow inherits Window {
                                 Text { text: "HR during activities"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
                                 Rectangle { horizontal-stretch: 1; }
                                 Toggle { checked <=> root.dc-hrm-during-activity-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
-                            }
-                            if root.dc-thresholds-available: Text {
-                                text: "Advanced heart-rate thresholds are preserved unchanged until their editing experience is reviewed.";
-                                color: Palette.muted; font-size: 11px; wrap: word-wrap;
                             }
                         }
                     }
