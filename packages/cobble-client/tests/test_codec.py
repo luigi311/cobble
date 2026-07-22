@@ -102,3 +102,13 @@ def test_daemon_config_changed_handler_receives_revision():
     client._dispatch_daemon_config_changed(17)
 
     assert revisions == [17]
+
+
+def test_device_config_changed_handler_tolerates_unknown_state():
+    client = CobbleClient()
+    changes = []
+    client.on_device_config_changed(lambda revision, state: changes.append((revision, state)))
+
+    client._dispatch_device_config_changed(18, "future_state")
+
+    assert changes == [(18, DeviceConfigState.INVALID)]

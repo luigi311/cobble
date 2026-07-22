@@ -13,6 +13,12 @@ use crate::service::CobbleDaemon;
 
 static NEXT_COOKIE: AtomicU32 = AtomicU32::new(1);
 
+// org.freedesktop.ModemManager1.Call.State values.
+const MM_CALL_STATE_RINGING_IN: i32 = 3;
+const MM_CALL_STATE_ACTIVE: i32 = 4;
+const MM_CALL_STATE_WAITING: i32 = 6;
+const MM_CALL_STATE_TERMINATED: i32 = 7;
+
 struct CallMap {
     inner: Arc<Mutex<HashMap<u32, ModemCall>>>,
 }
@@ -179,7 +185,7 @@ async fn handle_mm_call(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap,
     .await
     .unwrap_or(0);
     trace!("call-monitor: MM call {call_path} state={state} direction={direction}");
-    if direction != 1 || state != 1 {
+    if direction != 1 || !matches!(state, MM_CALL_STATE_RINGING_IN | MM_CALL_STATE_WAITING) {
         return;
     }
 
@@ -233,12 +239,12 @@ async fn handle_mm_property_change(
     if let Some(state) = changed.get("State")
         && let Ok(s) = state.downcast_ref::<i32>()
     {
-        if s == 9 {
+        if s == MM_CALL_STATE_TERMINATED {
             if let Some(cookie) = map.remove_by_path(&call_path).await {
                 debug!("call-monitor: MM call {cookie} terminated");
                 let _ = daemon.push_call_end(cookie).await;
             }
-        } else if s == 3 {
+        } else if s == MM_CALL_STATE_ACTIVE {
             // Call became active — notify watch, keep cookie for hangup.
             if let Some(cookie) = map.find_by_path(&call_path).await {
                 debug!("call-monitor: MM call {cookie} active");

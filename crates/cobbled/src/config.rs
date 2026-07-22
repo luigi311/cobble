@@ -97,7 +97,15 @@ pub fn save(path: &Path, config: &Config) -> anyhow::Result<()> {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)
-            .with_context(|| format!("replace config {}", path.display()))
+            .with_context(|| format!("replace config {}", path.display()))?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)
+            .with_context(|| format!("open config directory {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("sync config directory {}", parent.display()))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);

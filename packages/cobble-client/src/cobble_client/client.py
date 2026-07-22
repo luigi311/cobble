@@ -768,7 +768,10 @@ class CobbleClient:
             _safe(h, txn)
 
     def _dispatch_device_config_changed(self, revision: int, state: str) -> None:
-        parsed = DeviceConfigState(state)
+        try:
+            parsed = DeviceConfigState(state)
+        except ValueError:
+            parsed = DeviceConfigState.INVALID
         for handler in self._device_config_handlers:
             _safe(handler, revision, parsed)
 

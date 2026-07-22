@@ -122,6 +122,7 @@ const ALERT_MASK: &[WatchPrefOption] = &[
         label: "All On",
     },
 ];
+const DND_INTERRUPTIONS_MASK: &[WatchPrefOption] = &[ALERT_MASK[0], ALERT_MASK[1]];
 const SHOW_NOTIFICATIONS: &[WatchPrefOption] = &[
     WatchPrefOption {
         code: 0,
@@ -379,175 +380,230 @@ const LANGUAGE: &[WatchPrefOption] = &[
     },
 ];
 
+macro_rules! bool_pref {
+    ($key:literal, $default:literal, $variant:ident) => {
+        WatchPrefMetadata {
+            key: $key,
+            wire_type: WatchPrefType::Bool,
+            default: WatchPrefDefault::Bool($default),
+            range: None,
+            options: EMPTY_OPTIONS,
+            debug_only: false,
+            variant: WatchPrefVariant::$variant,
+        }
+    };
+}
+
+macro_rules! number_pref {
+    ($key:literal, $wire:ident, $default:expr, $range:expr, $options:expr, $debug:literal, $variant:ident) => {
+        WatchPrefMetadata {
+            key: $key,
+            wire_type: WatchPrefType::$wire,
+            default: WatchPrefDefault::Number($default),
+            range: $range,
+            options: $options,
+            debug_only: $debug,
+            variant: WatchPrefVariant::$variant,
+        }
+    };
+}
+
+macro_rules! quick_launch_pref {
+    ($key:literal, $enabled:literal, $uuid:expr) => {
+        WatchPrefMetadata {
+            key: $key,
+            wire_type: WatchPrefType::QuickLaunch,
+            default: WatchPrefDefault::QuickLaunch {
+                enabled: $enabled,
+                uuid: $uuid,
+            },
+            range: None,
+            options: EMPTY_OPTIONS,
+            debug_only: false,
+            variant: WatchPrefVariant::Common,
+        }
+    };
+}
+
+const WATCH_PREF_METADATA: &[WatchPrefMetadata] = &[
+    bool_pref!("timezoneSource", false, Common),
+    bool_pref!("clock24h", false, Common),
+    bool_pref!("stationaryMode", true, Common),
+    bool_pref!("displayOrientationLeftHanded", false, Common),
+    bool_pref!("lightEnabled", true, Common),
+    bool_pref!("lightAmbientSensorEnabled", true, Common),
+    bool_pref!("lightMotion", true, Common),
+    bool_pref!("timelineQuickViewEnabled", true, Common),
+    bool_pref!("dndManuallyEnabled", false, Common),
+    bool_pref!("dndSmartEnabled", false, Common),
+    bool_pref!("notifDesignStyle", false, Common),
+    bool_pref!("notifVibeDelay", true, Common),
+    bool_pref!("notifBacklight", true, Common),
+    bool_pref!("menuScrollWrapAround", false, Common),
+    bool_pref!("dndMotionBacklight", true, Common),
+    bool_pref!("dndAutoDismiss", false, Current),
+    bool_pref!("musicShowVolumeControls", true, Common),
+    bool_pref!("musicShowProgressBar", true, Common),
+    bool_pref!("lightDynamicIntensity", true, Legacy),
+    bool_pref!("langEnglish", false, Legacy),
+    number_pref!("textStyle", U8, 1, None, TEXT_SIZE, false, Common),
+    number_pref!("mask", U8, 15, None, ALERT_MASK, false, Common),
+    number_pref!(
+        "dndInterruptionsMask",
+        U8,
+        0,
+        None,
+        DND_INTERRUPTIONS_MASK,
+        false,
+        Common
+    ),
+    number_pref!(
+        "dndShowNotifications",
+        U8,
+        1,
+        None,
+        SHOW_NOTIFICATIONS,
+        false,
+        Common
+    ),
+    number_pref!("vibeIntensity", U8, 2, None, VIBE_INTENSITY, false, Common),
+    number_pref!(
+        "vibeScoreNotifications",
+        U8,
+        9,
+        None,
+        VIBE_SCORE_NOTIFICATIONS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "vibeScoreIncomingCalls",
+        U8,
+        8,
+        None,
+        VIBE_SCORE_CALLS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "vibeScoreAlarms",
+        U8,
+        11,
+        None,
+        VIBE_SCORE_ALARMS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "menuScrollVibeBehavior",
+        U8,
+        0,
+        None,
+        MENU_VIBE,
+        false,
+        Common
+    ),
+    number_pref!("motionSensitivity", U8, 55, None, MOTION, true, Common),
+    number_pref!("lightPreset", U8, 1, None, LIGHT_PRESET, false, Current),
+    number_pref!(
+        "lightIntensity",
+        U8,
+        25,
+        None,
+        LIGHT_INTENSITY,
+        false,
+        Common
+    ),
+    number_pref!(
+        "lightDynamicMode",
+        U8,
+        2,
+        None,
+        LIGHT_DYNAMIC,
+        false,
+        Current
+    ),
+    number_pref!("lightTouch", U8, 0, None, LIGHT_TOUCH, false, Common),
+    number_pref!("language", U8, 0, None, LANGUAGE, false, Current),
+    number_pref!(
+        "lightTimeoutMs",
+        U32,
+        3000,
+        Some((1, 10_000)),
+        EMPTY_OPTIONS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "lightAmbientThreshold",
+        U32,
+        150,
+        Some((1, 4096)),
+        EMPTY_OPTIONS,
+        true,
+        Common
+    ),
+    number_pref!(
+        "dynBacklightMinThreshold",
+        U32,
+        5,
+        Some((0, 4096)),
+        EMPTY_OPTIONS,
+        true,
+        Common
+    ),
+    number_pref!(
+        "timelineQuickViewBeforeTimeMin",
+        U16,
+        10,
+        Some((0, 30)),
+        EMPTY_OPTIONS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "notifWindowTimeout",
+        U32,
+        180_000,
+        Some((0, 600_000)),
+        EMPTY_OPTIONS,
+        false,
+        Common
+    ),
+    number_pref!(
+        "lightColor",
+        U32,
+        0x00ff_bfa2,
+        Some((0, 0x00ff_ffff)),
+        EMPTY_OPTIONS,
+        false,
+        Common
+    ),
+    quick_launch_pref!("qlUp", false, None),
+    quick_launch_pref!("qlDown", false, None),
+    quick_launch_pref!("qlSelect", false, None),
+    quick_launch_pref!("qlBack", true, Some("2220d805-cf9a-4e12-92b9-5ca778aff6bb")),
+    quick_launch_pref!("qlComboBackUp", false, None),
+    quick_launch_pref!("qlComboUpDown", false, None),
+    quick_launch_pref!(
+        "qlSingleClickUp",
+        true,
+        Some("36d8c6ed-4c83-4fa1-a9e2-8f12dc941f8c")
+    ),
+    quick_launch_pref!(
+        "qlSingleClickDown",
+        true,
+        Some("79c76b48-6111-4e80-8deb-3119eebef33e")
+    ),
+];
+
 /// Look up the authoritative metadata for a preference that is safe to model.
 /// Support is still gated by keys/capabilities observed from the connected watch.
 pub fn watch_pref_metadata(key: &str) -> Option<WatchPrefMetadata> {
-    use WatchPrefDefault::{Bool, Number, QuickLaunch};
-    use WatchPrefType::{Bool as BoolType, QuickLaunch as QuickLaunchType, U8, U16, U32};
-    let (wire_type, default, range, options, debug_only) = match key {
-        "timezoneSource"
-        | "clock24h"
-        | "displayOrientationLeftHanded"
-        | "dndManuallyEnabled"
-        | "dndSmartEnabled"
-        | "notifDesignStyle"
-        | "menuScrollWrapAround"
-        | "dndAutoDismiss" => (BoolType, Bool(false), None, EMPTY_OPTIONS, false),
-        "stationaryMode"
-        | "lightEnabled"
-        | "lightAmbientSensorEnabled"
-        | "lightMotion"
-        | "timelineQuickViewEnabled"
-        | "notifVibeDelay"
-        | "notifBacklight"
-        | "dndMotionBacklight"
-        | "musicShowVolumeControls"
-        | "musicShowProgressBar" => (BoolType, Bool(true), None, EMPTY_OPTIONS, false),
-        "lightDynamicIntensity" => (BoolType, Bool(true), None, EMPTY_OPTIONS, false),
-        "langEnglish" => (BoolType, Bool(false), None, EMPTY_OPTIONS, false),
-        "textStyle" => (U8, Number(1), None, TEXT_SIZE, false),
-        "mask" => (U8, Number(15), None, ALERT_MASK, false),
-        "dndInterruptionsMask" => (U8, Number(0), None, &ALERT_MASK[..2], false),
-        "dndShowNotifications" => (U8, Number(1), None, SHOW_NOTIFICATIONS, false),
-        "vibeIntensity" => (U8, Number(2), None, VIBE_INTENSITY, false),
-        "vibeScoreNotifications" => (U8, Number(9), None, VIBE_SCORE_NOTIFICATIONS, false),
-        "vibeScoreIncomingCalls" => (U8, Number(8), None, VIBE_SCORE_CALLS, false),
-        "vibeScoreAlarms" => (U8, Number(11), None, VIBE_SCORE_ALARMS, false),
-        "menuScrollVibeBehavior" => (U8, Number(0), None, MENU_VIBE, false),
-        "motionSensitivity" => (U8, Number(55), None, MOTION, true),
-        "lightPreset" => (U8, Number(1), None, LIGHT_PRESET, false),
-        "lightIntensity" => (U8, Number(25), None, LIGHT_INTENSITY, false),
-        "lightDynamicMode" => (U8, Number(2), None, LIGHT_DYNAMIC, false),
-        "lightTouch" => (U8, Number(0), None, LIGHT_TOUCH, false),
-        "language" => (U8, Number(0), None, LANGUAGE, false),
-        "lightTimeoutMs" => (U32, Number(3000), Some((1, 10_000)), EMPTY_OPTIONS, false),
-        "lightAmbientThreshold" => (U32, Number(150), Some((1, 4096)), EMPTY_OPTIONS, true),
-        "dynBacklightMinThreshold" => (U32, Number(5), Some((0, 4096)), EMPTY_OPTIONS, true),
-        "timelineQuickViewBeforeTimeMin" => (U16, Number(10), Some((0, 30)), EMPTY_OPTIONS, false),
-        "notifWindowTimeout" => (
-            U32,
-            Number(180_000),
-            Some((0, 600_000)),
-            EMPTY_OPTIONS,
-            false,
-        ),
-        "lightColor" => (
-            U32,
-            Number(0x00ff_bfa2),
-            Some((0, 0x00ff_ffff)),
-            EMPTY_OPTIONS,
-            false,
-        ),
-        "qlBack" => (
-            QuickLaunchType,
-            QuickLaunch {
-                enabled: true,
-                uuid: Some("2220d805-cf9a-4e12-92b9-5ca778aff6bb"),
-            },
-            None,
-            EMPTY_OPTIONS,
-            false,
-        ),
-        "qlSingleClickUp" => (
-            QuickLaunchType,
-            QuickLaunch {
-                enabled: true,
-                uuid: Some("36d8c6ed-4c83-4fa1-a9e2-8f12dc941f8c"),
-            },
-            None,
-            EMPTY_OPTIONS,
-            false,
-        ),
-        "qlSingleClickDown" => (
-            QuickLaunchType,
-            QuickLaunch {
-                enabled: true,
-                uuid: Some("79c76b48-6111-4e80-8deb-3119eebef33e"),
-            },
-            None,
-            EMPTY_OPTIONS,
-            false,
-        ),
-        "qlUp" | "qlDown" | "qlSelect" | "qlComboBackUp" | "qlComboUpDown" => (
-            QuickLaunchType,
-            QuickLaunch {
-                enabled: false,
-                uuid: None,
-            },
-            None,
-            EMPTY_OPTIONS,
-            false,
-        ),
-        _ => return None,
-    };
-    let variant = match key {
-        "lightDynamicIntensity" | "langEnglish" => WatchPrefVariant::Legacy,
-        "dndAutoDismiss" | "lightPreset" | "lightDynamicMode" | "language" => {
-            WatchPrefVariant::Current
-        }
-        _ => WatchPrefVariant::Common,
-    };
-    Some(WatchPrefMetadata {
-        key: match key {
-            // Metadata is static; return its canonical key rather than the caller's allocation.
-            "timezoneSource" => "timezoneSource",
-            "clock24h" => "clock24h",
-            "stationaryMode" => "stationaryMode",
-            "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
-            "lightEnabled" => "lightEnabled",
-            "lightAmbientSensorEnabled" => "lightAmbientSensorEnabled",
-            "lightMotion" => "lightMotion",
-            "timelineQuickViewEnabled" => "timelineQuickViewEnabled",
-            "dndManuallyEnabled" => "dndManuallyEnabled",
-            "dndSmartEnabled" => "dndSmartEnabled",
-            "notifDesignStyle" => "notifDesignStyle",
-            "notifVibeDelay" => "notifVibeDelay",
-            "notifBacklight" => "notifBacklight",
-            "menuScrollWrapAround" => "menuScrollWrapAround",
-            "dndMotionBacklight" => "dndMotionBacklight",
-            "dndAutoDismiss" => "dndAutoDismiss",
-            "musicShowVolumeControls" => "musicShowVolumeControls",
-            "musicShowProgressBar" => "musicShowProgressBar",
-            "lightDynamicIntensity" => "lightDynamicIntensity",
-            "langEnglish" => "langEnglish",
-            "textStyle" => "textStyle",
-            "mask" => "mask",
-            "dndInterruptionsMask" => "dndInterruptionsMask",
-            "dndShowNotifications" => "dndShowNotifications",
-            "vibeIntensity" => "vibeIntensity",
-            "vibeScoreNotifications" => "vibeScoreNotifications",
-            "vibeScoreIncomingCalls" => "vibeScoreIncomingCalls",
-            "vibeScoreAlarms" => "vibeScoreAlarms",
-            "menuScrollVibeBehavior" => "menuScrollVibeBehavior",
-            "motionSensitivity" => "motionSensitivity",
-            "lightPreset" => "lightPreset",
-            "lightIntensity" => "lightIntensity",
-            "lightDynamicMode" => "lightDynamicMode",
-            "lightTouch" => "lightTouch",
-            "language" => "language",
-            "lightTimeoutMs" => "lightTimeoutMs",
-            "lightAmbientThreshold" => "lightAmbientThreshold",
-            "dynBacklightMinThreshold" => "dynBacklightMinThreshold",
-            "timelineQuickViewBeforeTimeMin" => "timelineQuickViewBeforeTimeMin",
-            "notifWindowTimeout" => "notifWindowTimeout",
-            "lightColor" => "lightColor",
-            "qlUp" => "qlUp",
-            "qlDown" => "qlDown",
-            "qlSelect" => "qlSelect",
-            "qlBack" => "qlBack",
-            "qlComboBackUp" => "qlComboBackUp",
-            "qlComboUpDown" => "qlComboUpDown",
-            "qlSingleClickUp" => "qlSingleClickUp",
-            "qlSingleClickDown" => "qlSingleClickDown",
-            _ => unreachable!(),
-        },
-        wire_type,
-        default,
-        range,
-        options,
-        debug_only,
-        variant,
-    })
+    WATCH_PREF_METADATA
+        .iter()
+        .copied()
+        .find(|metadata| metadata.key == key)
 }
 
 /// The "no binding" sentinel UUID used by quick-launch settings.
@@ -778,6 +834,15 @@ mod tests {
         assert_eq!(decode_watch_pref("automaticTimezoneID", &[0, 0]), None);
         assert_eq!(decode_watch_pref("activityPreferences", &[0; 9]), None);
         assert_eq!(decode_watch_pref("dndWeekdaySchedule", &[0; 4]), None);
+    }
+
+    #[test]
+    fn registry_keys_are_unique_and_canonical() {
+        let mut keys = std::collections::HashSet::new();
+        for metadata in WATCH_PREF_METADATA {
+            assert!(keys.insert(metadata.key), "duplicate key: {}", metadata.key);
+            assert_eq!(watch_pref_metadata(metadata.key), Some(*metadata));
+        }
     }
 
     #[test]

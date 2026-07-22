@@ -207,6 +207,9 @@ impl Pebble {
             }
         }
 
+        // Startup synchronization uses the same connected guard as later API calls.
+        let _ = self.connected_tx.send(true);
+
         // 8. BlobDB2 version handshake.
         let blob_db_version = self.negotiate_blobdb2_version().await;
         self.inner.lock().unwrap().blob_db_version = blob_db_version;
@@ -274,8 +277,6 @@ impl Pebble {
                 }
             }
         });
-
-        let _ = self.connected_tx.send(true);
         info!("Pebble connected and ready");
         Ok(())
     }

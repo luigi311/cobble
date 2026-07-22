@@ -1517,9 +1517,15 @@ impl CobbleDaemon {
         hrm_enabled: bool,
     ) -> Result<(), DaemonError> {
         let patch = compatibility_health_patch(height_cm, weight_kg, age, gender, hrm_enabled)?;
-        self.refresh_device_config().await?;
-        let expected_revision = self.state.lock().unwrap().device_config_revision;
-        self.update_device_config(expected_revision, patch).await?;
+        let operation = self.device_config_operation.lock().await;
+        let snapshot = self.refresh_device_config_unlocked().await?;
+        let expected_revision = snapshot
+            .get("revision")
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| DaemonError::Failed("refreshed snapshot has no revision".into()))?;
+        self.update_device_config_unlocked(expected_revision, patch)
+            .await?;
+        drop(operation);
         let state = self.state.lock().unwrap();
         if state.device_config_state == DeviceConfigState::Error {
             return Err(DaemonError::Failed(
@@ -1648,6 +1654,16 @@ impl CobbleDaemon {
         expected_revision: u64,
         patch: HashMap<String, OwnedValue>,
     ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let _operation = self.device_config_operation.lock().await;
+        self.update_device_config_unlocked(expected_revision, patch)
+            .await
+    }
+
+    async fn update_device_config_unlocked(
+        &self,
+        expected_revision: u64,
+        patch: HashMap<String, OwnedValue>,
+    ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
         const FIELDS: &[&str] = &[
             "health.height_mm",
             "health.weight_dag",
@@ -1676,7 +1692,6 @@ impl CobbleDaemon {
             )));
         }
 
-        let _operation = self.device_config_operation.lock().await;
         let pebble = self.require_pebble()?;
         let (
             actual_revision,

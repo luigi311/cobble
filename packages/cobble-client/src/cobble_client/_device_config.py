@@ -14,6 +14,7 @@ class DeviceConfigState(StrEnum):
     PARTIAL = "partial"
     ERROR = "error"
     UNSUPPORTED = "unsupported"
+    INVALID = "invalid"
 
 
 class FieldAvailability(StrEnum):
