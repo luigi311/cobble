@@ -24,6 +24,8 @@ class FieldAvailability(StrEnum):
 
 
 class ConfigErrorKind(StrEnum):
+    INVALID_DATA = "invalid_data"
+    REVISION_CONFLICT = "revision_conflict"
     INTERNAL = "internal"
     NOT_SUPPORTED = "not_supported"
     DISCONNECTED = "disconnected"

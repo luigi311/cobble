@@ -16,6 +16,10 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 
 from ._codec import decode_data_dict, encode_data_dict
+from ._daemon_config import (
+    ApplyDisposition, DaemonConfigPatch, DaemonConfigSnapshot, DaemonConfigUpdate,
+    decode_daemon_config,
+)
 from ._device_config import (
     DeviceConfigSnapshot,
     DeviceConfigState,
@@ -249,6 +253,10 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
+    async def ping(self) -> bool:
+        """Return whether the daemon responds; alias matching the Rust client."""
+        return await self.ping_daemon()
+
     async def notify(self, title: str, body: str, subtitle: str = "") -> int:
         """Send a notification to the watch. Returns the BlobDB token.
 
@@ -267,6 +275,37 @@ class CobbleClient:
             return await self._iface.call_scan(timeout_secs)
         except DBusError as e:
             raise self._translate(e) from e
+
+    async def get_daemon_config(self) -> DaemonConfigSnapshot:
+        """Return the running daemon's effective, revisioned configuration."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_daemon_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_daemon_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def update_daemon_config(self, patch: DaemonConfigPatch) -> DaemonConfigUpdate:
+        """Apply a revision-guarded daemon configuration patch."""
+        self._require_iface()
+        wire: dict[str, Variant] = {}
+        if patch.address is not None: wire["address"] = Variant("s", patch.address)
+        if patch.adapter is not None: wire["adapter"] = Variant("s", patch.adapter)
+        if patch.verbose is not None: wire["verbose"] = Variant("b", patch.verbose)
+        if patch.database_path is not None or patch.use_default_database_path:
+            wire["database_path"] = Variant("s", patch.database_path or "")
+        if intervals := patch.intervals_icu:
+            if intervals.enabled is not None: wire["intervals_enabled"] = Variant("b", intervals.enabled)
+            if intervals.athlete_id is not None: wire["intervals_athlete_id"] = Variant("s", intervals.athlete_id)
+            if intervals.api_key is not None: wire["intervals_api_key_replace"] = Variant("s", intervals.api_key)
+            if intervals.clear_api_key: wire["intervals_api_key_clear"] = Variant("b", True)
+        try:
+            raw = await self._iface.call_update_daemon_config(patch.expected_revision, wire)
+        except DBusError as e:
+            raise self._translate(e) from e
+        values = {k: _unwrap(v) for k, v in raw.items()}
+        fields = {key.removeprefix("apply."): ApplyDisposition(str(value)) for key, value in values.items() if key.startswith("apply.")}
+        return DaemonConfigUpdate(decode_daemon_config(values), fields)
 
     async def activate_health(
         self,
@@ -569,6 +608,23 @@ class CobbleClient:
             await self._iface.call_reload_config()
         except DBusError as e:
             raise self._translate(e) from e
+
+    async def sync_wellness(self) -> None:
+        """Request an immediate configured wellness-provider reconciliation."""
+        self._require_iface()
+        try:
+            await self._iface.call_sync_wellness()
+        except DBusError as e:
+            raise self._translate(e) from e
+
+    async def get_wellness_sync_status(self) -> dict:
+        """Return the current wellness reconciliation status."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_wellness_sync_status()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return {k: _unwrap(v) for k, v in raw.items()}
 
     async def push_weather(
         self,

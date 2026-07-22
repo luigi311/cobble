@@ -43,14 +43,23 @@ from ._device_config import (
     PreferenceField,
     WatchIdentity,
 )
+from ._daemon_config import (
+    ApplyDisposition, DaemonConfig, DaemonConfigPatch, DaemonConfigSnapshot,
+    DaemonConfigUpdate, IntervalsIcuConfig, IntervalsIcuPatch,
+)
 from ._types import Int, i8, i16, i32, u8, u16, u32
 from .client import CobbleClient, DaemonNotRunningError, NotConnectedError
 
 __all__ = [
     "CobbleClient",
+    "ApplyDisposition",
     "ConfigError",
     "ConfigErrorKind",
     "DaemonNotRunningError",
+    "DaemonConfig",
+    "DaemonConfigPatch",
+    "DaemonConfigSnapshot",
+    "DaemonConfigUpdate",
     "DeviceCapabilities",
     "DeviceConfigSnapshot",
     "DeviceConfigState",
@@ -61,6 +70,8 @@ __all__ = [
     "HeartRateThresholds",
     "HrmConfig",
     "Int",
+    "IntervalsIcuConfig",
+    "IntervalsIcuPatch",
     "NotConnectedError",
     "PreferenceField",
     "WatchIdentity",
