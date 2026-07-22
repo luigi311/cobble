@@ -31,9 +31,9 @@ use crate::{
         app_run_state::{AppRunStateCmd, build_app_run_state},
         blob_db::{
             BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
-            build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_str_insert,
-            build_blobdb2_mark_all_dirty, build_notification, build_weather_blob,
-            build_weather_prefs_blob,
+            build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_raw_str_insert,
+            build_blobdb_str_insert, build_blobdb2_mark_all_dirty, build_notification,
+            build_weather_blob, build_weather_prefs_blob,
         },
         datalog::build_report_sessions,
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
@@ -657,9 +657,13 @@ impl Pebble {
         // "no location information" even though the Weather BlobDB insert succeeds.
         let prefs_token = rand_u16();
         let prefs_blob = build_weather_prefs_blob(&[*location_key]);
-        let prefs_payload =
-            build_blobdb_str_insert(BlobDBId::AppConfigs, "weatherApp", &prefs_blob, prefs_token)
-                .map_err(|e| PebbleError::Other(e.to_string()))?;
+        let prefs_payload = build_blobdb_raw_str_insert(
+            BlobDBId::AppConfigs,
+            "weatherApp",
+            &prefs_blob,
+            prefs_token,
+        )
+        .map_err(|e| PebbleError::Other(e.to_string()))?;
         debug!("push_weather prefs token={prefs_token}");
         self.send_pebble(Endpoint::BlobDb, &prefs_payload)
     }
@@ -750,13 +754,29 @@ impl Pebble {
         let token = rand_u16();
         let payload = build_blobdb_str_insert(db, key, value, token)
             .map_err(|error| PebbleError::Other(error.into()))?;
+        let status = self.send_blobdb_confirmed(token, key, &payload).await?;
+        if status == BlobDBStatus::Success {
+            Ok(())
+        } else {
+            Err(PebbleError::Other(format!(
+                "watch rejected preference {key}: {status:?}"
+            )))
+        }
+    }
+
+    async fn send_blobdb_confirmed(
+        &self,
+        token: u16,
+        key: &str,
+        payload: &[u8],
+    ) -> Result<BlobDBStatus, PebbleError> {
         let (sender, receiver) = oneshot::channel();
         self.inner
             .lock()
             .unwrap()
             .blobdb_pending
             .insert(token, sender);
-        if let Err(error) = self.send_pebble(Endpoint::BlobDb, &payload) {
+        if let Err(error) = self.send_pebble(Endpoint::BlobDb, payload) {
             self.inner.lock().unwrap().blobdb_pending.remove(&token);
             return Err(error);
         }
@@ -777,13 +797,7 @@ impl Pebble {
                 return Err(PebbleError::Timeout(format!("BlobDB write for {key}")));
             }
         };
-        if status == BlobDBStatus::Success {
-            Ok(())
-        } else {
-            Err(PebbleError::Other(format!(
-                "watch rejected preference {key}: {status:?}"
-            )))
-        }
+        Ok(status)
     }
 
     /// Request a full WatchPrefs refresh and wait for both command acceptance

@@ -147,8 +147,37 @@ pub fn build_blobdb_insert(
     Ok(out)
 }
 
-/// Like `build_blobdb_insert` but with an arbitrary byte-string key (e.g. "activityPreferences").
+/// Like `build_blobdb_insert` but with a NUL-terminated string key.
 pub fn build_blobdb_str_insert(
+    db: BlobDBId,
+    key: &str,
+    blob: &[u8],
+    token: u16,
+) -> Result<Vec<u8>, &'static str> {
+    let key_len = u8::try_from(
+        key.len()
+            .checked_add(1)
+            .ok_or("BlobDB string key exceeds 255 bytes")?,
+    )
+    .map_err(|_| "BlobDB string key exceeds 255 bytes")?;
+    let blob_len = u16::try_from(blob.len()).map_err(|_| "BlobDB blob exceeds 65535 bytes")?;
+    let mut out = Vec::new();
+    out.push(BlobDBCommand::Insert as u8);
+    out.extend_from_slice(&token.to_le_bytes());
+    out.push(db as u8);
+    out.push(key_len);
+    out.extend_from_slice(key.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&blob_len.to_le_bytes());
+    out.extend_from_slice(blob);
+    Ok(out)
+}
+
+/// Insert a record whose string key is not NUL-terminated.
+///
+/// AppConfigs records such as `weatherApp` use this form, unlike WatchPrefs
+/// and HealthParams string keys.
+pub fn build_blobdb_raw_str_insert(
     db: BlobDBId,
     key: &str,
     blob: &[u8],
@@ -638,5 +667,24 @@ mod preference_routing_tests {
             logical_incoming_database(BlobDBId::WatchPrefs as u8, "clock24h"),
             BlobDBId::WatchPrefs as u8
         );
+    }
+
+    #[test]
+    fn database_string_keys_use_their_required_wire_formats() {
+        let insert =
+            build_blobdb_str_insert(BlobDBId::WatchPrefs, "lightEnabled", &[0], 0x1234).unwrap();
+        assert_eq!(
+            &insert[..5],
+            &[BlobDBCommand::Insert as u8, 0x34, 0x12, 12, 13]
+        );
+        assert_eq!(&insert[5..18], b"lightEnabled\0");
+
+        let app_config =
+            build_blobdb_raw_str_insert(BlobDBId::AppConfigs, "weatherApp", &[1], 0x1234).unwrap();
+        assert_eq!(
+            &app_config[..5],
+            &[BlobDBCommand::Insert as u8, 0x34, 0x12, 9, 10]
+        );
+        assert_eq!(&app_config[5..15], b"weatherApp");
     }
 }
