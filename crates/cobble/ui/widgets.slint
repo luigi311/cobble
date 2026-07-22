@@ -6,10 +6,15 @@ import { Palette } from "theme.slint";
 
 export component Toggle inherits Rectangle {
     in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    accessible-role: switch;
+    accessible-value: root.checked ? "On" : "Off";
     width: 50px; height: 28px; border-radius: 14px;
     background: checked ? Palette.accent : Palette.surface;
-    border-width: 1px;
-    border-color: checked ? Palette.accent : Palette.muted;
+    opacity: enabled ? 1.0 : 0.5;
+    border-width: toggle-focus.has-focus ? 2px : 1px;
+    border-color: toggle-focus.has-focus ? Palette.accent : checked ? Palette.accent : Palette.muted;
     animate background { duration: 150ms; easing: ease-in-out; }
     Rectangle {
         width: 22px; height: 22px; border-radius: 11px; background: white;
@@ -17,7 +22,15 @@ export component Toggle inherits Rectangle {
         y: (parent.height - self.height) / 2;
         animate x { duration: 150ms; easing: ease-in-out; }
     }
-    TouchArea { clicked => { root.checked = !root.checked; } }
+    toggle-focus := FocusScope {
+        enabled: root.enabled; x: -6px; y: -6px; width: parent.width + 12px; height: parent.height + 12px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.checked = !root.checked; root.toggled(root.checked); accept
+            } else { reject }
+        }
+        TouchArea { enabled: root.enabled; clicked => { root.checked = !root.checked; root.toggled(root.checked); } }
+    }
 }
 
 // ─── Labelled text-input row ─────────────────────────────────────────────────
@@ -63,20 +76,28 @@ export component SettingsRow inherits Rectangle {
     in property <string> label;
     in property <string> sublabel;
     callback clicked;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.sublabel;
     background: Palette.surface;
-    border-radius: 10px;
+    border-radius: 10px; border-width: row-focus.has-focus ? 2px : 0px; border-color: Palette.accent;
     height: 62px;
     HorizontalLayout {
         padding-left: 16px; padding-right: 16px; spacing: 8px;
         VerticalLayout {
             alignment: center; spacing: 3px;
-            Text { text: root.label; color: Palette.text; font-size: 15px; font-weight: 600; }
-            if root.sublabel != "": Text { text: root.sublabel; color: Palette.muted; font-size: 12px; }
+            Text { text: root.label; color: Palette.text; font-size: 15px; font-weight: 600; wrap: word-wrap; }
+            if root.sublabel != "": Text { text: root.sublabel; color: Palette.muted; font-size: 12px; wrap: word-wrap; }
         }
         Rectangle { horizontal-stretch: 1; }
         Text { text: "›"; color: Palette.muted; font-size: 24px; vertical-alignment: center; }
     }
-    TouchArea { clicked => { root.clicked(); } }
+    row-focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) { root.clicked(); accept } else { reject }
+        }
+        TouchArea { clicked => { root.clicked(); } }
+    }
 }
 
 // ─── Full-width action button (Device Actions) ────────────────────────────────
@@ -86,19 +107,212 @@ export component ActionButton inherits Rectangle {
     in property <bool> danger: false;
     in property <bool> enabled: true;
     callback clicked;
+    accessible-role: button;
+    accessible-label: root.label;
     height: 52px;
     border-radius: 10px;
     background: Palette.surface;
-    border-width: root.danger ? 1px : 0px;
-    border-color: Palette.red;
+    border-width: button-focus.has-focus || root.danger ? 2px : 0px;
+    border-color: button-focus.has-focus ? Palette.accent : Palette.red;
     opacity: root.enabled ? 1.0 : 0.4;
     Text {
         text: root.label;
         color: root.danger ? Palette.red : Palette.accent;
-        font-size: 15px; font-weight: 600;
+        font-size: 15px; font-weight: 600; wrap: word-wrap;
         horizontal-alignment: center; vertical-alignment: center;
     }
-    TouchArea { clicked => { if (root.enabled) { root.clicked(); } } }
+    button-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) { root.clicked(); accept } else { reject }
+        }
+        TouchArea { clicked => { if (root.enabled) { root.clicked(); } } }
+    }
+}
+
+// ─── Device Config form/status primitives ───────────────────────────────────
+
+export component EnumSetting inherits Rectangle {
+    in property <string> label;
+    in property <[string]> options;
+    in-out property <int> selected-index: 0;
+    in property <bool> enabled: true;
+    callback changed(int);
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.options.length > 0 && root.selected-index >= 0 && root.selected-index < root.options.length ? root.options[root.selected-index] : "";
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    border-width: enum-focus.has-focus ? 2px : 0px; border-color: Palette.accent;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 10px; spacing: 8px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; wrap: word-wrap; }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: root.options.length > 0 && root.selected-index >= 0 && root.selected-index < root.options.length
+                ? root.options[root.selected-index] : "—";
+            color: Palette.accent; font-size: 13px; vertical-alignment: center;
+        }
+        Text { text: "›"; color: Palette.muted; font-size: 20px; vertical-alignment: center; }
+    }
+    enum-focus := FocusScope {
+        enabled: root.enabled && root.options.length > 0;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) {
+                root.selected-index = Math.mod(root.selected-index + root.options.length - 1, root.options.length);
+                root.changed(root.selected-index); accept
+            } else if (event.text == Key.RightArrow || event.text == Key.Space || event.text == Key.Return) {
+                root.selected-index = Math.mod(root.selected-index + 1, root.options.length);
+                root.changed(root.selected-index); accept
+            } else { reject }
+        }
+        TouchArea {
+            clicked => {
+                root.selected-index = Math.mod(root.selected-index + 1, root.options.length);
+                root.changed(root.selected-index);
+            }
+        }
+    }
+}
+
+export component NumericSetting inherits Rectangle {
+    in property <string> label;
+    in-out property <int> value;
+    in property <int> minimum;
+    in property <int> maximum: 100;
+    in property <int> step: 1;
+    in property <string> suffix;
+    in property <string> display-value;
+    in property <bool> enabled: true;
+    callback changed(int);
+    accessible-role: spinbox;
+    accessible-label: root.label;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.step;
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    border-width: numeric-focus.has-focus ? 2px : 0px; border-color: Palette.accent;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 8px; spacing: 8px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; wrap: word-wrap; }
+        Rectangle { horizontal-stretch: 1; }
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 6px; background: Palette.bg;
+            Text { text: "−"; color: Palette.accent; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea {
+                enabled: root.enabled && root.value > root.minimum;
+                clicked => {
+                    root.value = max(root.minimum, root.value - root.step);
+                    root.changed(root.value);
+                }
+            }
+        }
+        Text {
+            text: root.display-value != "" ? root.display-value
+                : root.value + (root.suffix == "" ? "" : " " + root.suffix);
+            color: Palette.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+            min-width: 64px;
+        }
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 6px; background: Palette.bg;
+            Text { text: "+"; color: Palette.accent; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea {
+                enabled: root.enabled && root.value < root.maximum;
+                clicked => {
+                    root.value = min(root.maximum, root.value + root.step);
+                    root.changed(root.value);
+                }
+            }
+        }
+    }
+    numeric-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.value = max(root.minimum, root.value - root.step); root.changed(root.value); accept
+            } else if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.value = min(root.maximum, root.value + root.step); root.changed(root.value); accept
+            } else { reject }
+        }
+    }
+}
+
+export component UnitSelector inherits Rectangle {
+    in property <string> label;
+    in property <[string]> units;
+    in-out property <int> selected-index: 0;
+    in property <bool> enabled: true;
+    callback changed(int);
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.units.length > 0 && root.selected-index >= 0 && root.selected-index < root.units.length ? root.units[root.selected-index] : "";
+    height: 48px; border-radius: 8px; background: Palette.surface;
+    border-width: unit-focus.has-focus ? 2px : 0px; border-color: Palette.accent;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 8px; spacing: 6px;
+        Text { text: root.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        for unit[index] in root.units: Rectangle {
+            width: 52px; height: 30px; border-radius: 6px;
+            background: index == root.selected-index ? Palette.accent : Palette.bg;
+            Text {
+                text: unit; color: index == root.selected-index ? white : Palette.muted;
+                font-size: 12px; horizontal-alignment: center; vertical-alignment: center;
+            }
+            TouchArea {
+                enabled: root.enabled;
+                clicked => { root.selected-index = index; root.changed(index); }
+            }
+        }
+    }
+    unit-focus := FocusScope {
+        enabled: root.enabled && root.units.length > 0;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) {
+                root.selected-index = Math.mod(root.selected-index + root.units.length - 1, root.units.length);
+                root.changed(root.selected-index); accept
+            } else if (event.text == Key.RightArrow) {
+                root.selected-index = Math.mod(root.selected-index + 1, root.units.length);
+                root.changed(root.selected-index); accept
+            } else { reject }
+        }
+    }
+}
+
+export component ErrorBanner inherits Rectangle {
+    in property <string> message;
+    min-height: 52px; border-radius: 10px;
+    background: Palette.surface; border-width: 1px; border-color: Palette.red;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
+        Rectangle {
+            width: 8px; vertical-stretch: 1; background: transparent;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                y: (parent.height - self.height) / 2; background: Palette.red;
+            }
+        }
+        Text { text: root.message; color: Palette.red; font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+    }
+}
+
+export component LoadingBanner inherits Rectangle {
+    in property <string> message: "Loading…";
+    height: 52px; border-radius: 10px; background: Palette.surface;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
+        Rectangle {
+            width: 8px; vertical-stretch: 1; background: transparent;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                y: (parent.height - self.height) / 2; background: Palette.accent;
+            }
+        }
+        Text { text: root.message; color: Palette.muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+    }
 }
 
 // ─── Segmented control button ─────────────────────────────────────────────────

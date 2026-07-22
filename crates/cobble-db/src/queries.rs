@@ -99,10 +99,15 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
         let local_start = utc_start + utc_offset;
         let local_end = local_start + dur;
         let utc_end = utc_start + dur;
-        let Some(date) = wake_date(local_end) else { continue };
+        let Some(date) = wake_date(local_end) else {
+            continue;
+        };
         nights
             .entry(date)
-            .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
+            .or_insert_with(|| Night {
+                wake_date: date,
+                phases: Vec::new(),
+            })
             .phases
             .push(NightPhase {
                 local_start,
@@ -133,7 +138,10 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
         let Some(date) = date else { continue };
         nights
             .entry(date)
-            .or_insert_with(|| Night { wake_date: date, phases: Vec::new() })
+            .or_insert_with(|| Night {
+                wake_date: date,
+                phases: Vec::new(),
+            })
             .phases
             .push(NightPhase {
                 local_start,
@@ -474,7 +482,12 @@ fn weekly_step_bars(by_day: &BTreeMap<NaiveDate, i64>, range: DateRange) -> Vec<
                 return None;
             }
             let total: i64 = span.days().filter_map(|d| by_day.get(&d)).sum();
-            Some(Week { idx, span, total, avg: total / elapsed })
+            Some(Week {
+                idx,
+                span,
+                total,
+                avg: total / elapsed,
+            })
         })
         .collect();
 
@@ -589,7 +602,12 @@ fn deep_label(deep: i64) -> String {
 }
 
 fn nightly_sleep_bars(nights: &[Night]) -> Vec<SleepBarData> {
-    let max_total = nights.iter().map(|n| n.total_secs()).max().unwrap_or(1).max(1);
+    let max_total = nights
+        .iter()
+        .map(|n| n.total_secs())
+        .max()
+        .unwrap_or(1)
+        .max(1);
     nights
         .iter()
         .map(|n| {
@@ -625,14 +643,22 @@ fn weekly_sleep_bars(nights: &[Night], range: DateRange) -> Vec<SleepBarData> {
         .into_iter()
         .enumerate()
         .filter_map(|(idx, span)| {
-            let wn: Vec<&Night> = nights.iter().filter(|n| span.contains(n.wake_date)).collect();
+            let wn: Vec<&Night> = nights
+                .iter()
+                .filter(|n| span.contains(n.wake_date))
+                .collect();
             if wn.is_empty() {
                 return None;
             }
             let n = wn.len() as i64;
             let total: i64 = wn.iter().map(|night| night.total_secs()).sum();
             let deep: i64 = wn.iter().map(|night| night.deep_secs()).sum();
-            Some(Week { idx, span, avg_total: total / n, avg_deep: deep / n })
+            Some(Week {
+                idx,
+                span,
+                avg_total: total / n,
+                avg_deep: deep / n,
+            })
         })
         .collect();
 
@@ -668,7 +694,11 @@ fn sleep_labels(nights: &[Night], period: i32) -> (String, String) {
 
     if period == 0 {
         let summary = if deep > 0 {
-            format!("{} · {} deep", format_duration(total), format_duration(deep))
+            format!(
+                "{} · {} deep",
+                format_duration(total),
+                format_duration(deep)
+            )
         } else {
             format_duration(total)
         };
@@ -677,7 +707,11 @@ fn sleep_labels(nights: &[Night], period: i32) -> (String, String) {
         let n = nights.len() as i64;
         let (avg, avg_deep) = (total / n, deep / n);
         let summary = if avg_deep > 0 {
-            format!("avg {} · {} deep", format_duration(avg), format_duration(avg_deep))
+            format!(
+                "avg {} · {} deep",
+                format_duration(avg),
+                format_duration(avg_deep)
+            )
         } else {
             format!("avg {}", format_duration(avg))
         };
@@ -900,11 +934,7 @@ fn heart_trend_scale(points: &[HeartTrendPointData]) -> (f32, f32) {
 }
 
 /// Build average and resting heart-rate trend points for the active period.
-pub fn load_heart_trend(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<HeartTrend> {
+pub fn load_heart_trend(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<HeartTrend> {
     let range = range_for(period, offset);
     let samples = fetch_heart_samples(conn, range)?;
     let wellness = fetch_daily_wellness(conn, range)?;
@@ -922,11 +952,7 @@ pub fn load_heart_trend(
 }
 
 /// Compute key heart-rate metrics for one navigated period.
-pub fn load_heart_stats(
-    conn: &Connection,
-    period: i32,
-    offset: i32,
-) -> anyhow::Result<HeartStats> {
+pub fn load_heart_stats(conn: &Connection, period: i32, offset: i32) -> anyhow::Result<HeartStats> {
     let range = range_for(period, offset);
     let samples = fetch_heart_samples(conn, range)?;
     let wellness = fetch_daily_wellness(conn, range)?;
@@ -1061,8 +1087,7 @@ fn lowest_sustained_resting_hr(samples: &[(i64, i64)]) -> Option<u16> {
                 continue;
             }
 
-            let mean = window.iter().map(|(_, bpm)| *bpm as f64).sum::<f64>()
-                / window.len() as f64;
+            let mean = window.iter().map(|(_, bpm)| *bpm as f64).sum::<f64>() / window.len() as f64;
             best = Some(best.map_or(mean, |current| current.min(mean)));
         }
     }
@@ -1081,9 +1106,7 @@ fn estimated_resting_hr_by_wake_date(
         let mut spans: Vec<(i64, i64)> = night
             .phases
             .iter()
-            .filter(|phase| {
-                !phase.is_deep && !phase.is_nap && phase.utc_start < phase.utc_end
-            })
+            .filter(|phase| !phase.is_deep && !phase.is_nap && phase.utc_start < phase.utc_end)
             .map(|phase| (phase.utc_start, phase.utc_end))
             .collect();
         spans.sort_unstable_by_key(|&(start, _)| start);
@@ -1114,11 +1137,7 @@ fn estimated_resting_hr_by_wake_date(
         .map(|&(_, start, _)| start)
         .min()
         .unwrap();
-    let query_end = primary_spans
-        .iter()
-        .map(|&(_, _, end)| end)
-        .max()
-        .unwrap();
+    let query_end = primary_spans.iter().map(|&(_, _, end)| end).max().unwrap();
     let mut stmt = conn.prepare(
         "SELECT start_ts, heart_rate_bpm
          FROM health_activity_minutes
@@ -1241,7 +1260,10 @@ pub fn load_sleep_stats_for_range(
         bedtimes.push(start);
         wakeups.push(end);
         in_bed += end - start;
-        slept_in_bed += block.iter().map(|p| p.local_end - p.local_start).sum::<i64>();
+        slept_in_bed += block
+            .iter()
+            .map(|p| p.local_end - p.local_start)
+            .sum::<i64>();
     }
 
     // One denominator for the whole stage mix — slept time plus the awake
@@ -1288,9 +1310,8 @@ fn stage_percentages(light: i64, deep: i64, awake: i64) -> (f32, f32, f32) {
     let exact = parts.map(|p| p as f64 / total as f64 * 100.0);
     let mut floors = exact.map(|e| e.floor() as i64);
     let mut by_remainder: Vec<usize> = (0..exact.len()).collect();
-    by_remainder.sort_by(|&a, &b| {
-        (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor()))
-    });
+    by_remainder
+        .sort_by(|&a, &b| (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor())));
     let deficit = 100 - floors.iter().sum::<i64>();
     for &i in by_remainder.iter().take(deficit as usize) {
         floors[i] += 1;
@@ -1444,13 +1465,19 @@ mod tests {
             insert_session(&conn, 1, local(d(2026, 7, day), 23, 0), 7 * 3600);
         }
 
-        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 5) };
+        let range = DateRange {
+            start: d(2026, 6, 29),
+            end: d(2026, 7, 5),
+        };
         let nights = fetch_sleep_nights(&conn, range).unwrap();
         let dates: Vec<NaiveDate> = nights.iter().map(|n| n.wake_date).collect();
         assert_eq!(dates, vec![d(2026, 7, 2), d(2026, 7, 3), d(2026, 7, 4)]);
 
         // A range ending Jul 3 must exclude the night that woke on Jul 4.
-        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 3) };
+        let range = DateRange {
+            start: d(2026, 6, 29),
+            end: d(2026, 7, 3),
+        };
         assert_eq!(fetch_sleep_nights(&conn, range).unwrap().len(), 2);
     }
 
@@ -1484,7 +1511,10 @@ mod tests {
         insert_minute(&conn, local(jul4, 12, 0), 100);
         insert_minute(&conn, local(jul4, 23, 59), 30);
 
-        let range = DateRange { start: d(2026, 6, 29), end: d(2026, 7, 5) };
+        let range = DateRange {
+            start: d(2026, 6, 29),
+            end: d(2026, 7, 5),
+        };
         let by_day = fetch_steps_by_day(&conn, range).unwrap();
         assert_eq!(by_day.len(), 1);
         assert_eq!(by_day[&jul4], 150);
@@ -1500,12 +1530,33 @@ mod tests {
     #[test]
     fn weekly_buckets_follow_iso_weeks() {
         // July 2026: Wed Jul 1 … Fri Jul 31 spans 5 ISO weeks.
-        let range = DateRange { start: d(2026, 7, 1), end: d(2026, 7, 31) };
+        let range = DateRange {
+            start: d(2026, 7, 1),
+            end: d(2026, 7, 31),
+        };
         let weeks = week_buckets(range);
         assert_eq!(weeks.len(), 5);
-        assert_eq!(weeks[0], DateRange { start: d(2026, 7, 1), end: d(2026, 7, 5) });
-        assert_eq!(weeks[1], DateRange { start: d(2026, 7, 6), end: d(2026, 7, 12) });
-        assert_eq!(weeks[4], DateRange { start: d(2026, 7, 27), end: d(2026, 7, 31) });
+        assert_eq!(
+            weeks[0],
+            DateRange {
+                start: d(2026, 7, 1),
+                end: d(2026, 7, 5)
+            }
+        );
+        assert_eq!(
+            weeks[1],
+            DateRange {
+                start: d(2026, 7, 6),
+                end: d(2026, 7, 12)
+            }
+        );
+        assert_eq!(
+            weeks[4],
+            DateRange {
+                start: d(2026, 7, 27),
+                end: d(2026, 7, 31)
+            }
+        );
     }
 
     #[test]
@@ -1547,7 +1598,11 @@ mod tests {
         assert_eq!(fetch_steps_by_hour(&conn, jul4).unwrap(), vec![(0, 42)]);
 
         // And Jul 3 must not double-count it under either rule.
-        assert!(fetch_steps_by_day(&conn, DateRange::day(jul3)).unwrap().is_empty());
+        assert!(
+            fetch_steps_by_day(&conn, DateRange::day(jul3))
+                .unwrap()
+                .is_empty()
+        );
         assert!(fetch_steps_by_hour(&conn, jul3).unwrap().is_empty());
     }
 
@@ -1592,7 +1647,10 @@ mod tests {
 
         let wellness = fetch_daily_wellness(
             &conn,
-            DateRange { start: jul2, end: jul5 },
+            DateRange {
+                start: jul2,
+                end: jul5,
+            },
         )
         .unwrap();
         assert_eq!(wellness.len(), 2);
@@ -1616,13 +1674,7 @@ mod tests {
         let jul4 = d(2026, 7, 4);
         let row_offset = TZ + 3600;
         let row_local_start = local(jul4, 0, 30);
-        insert_minute_at(
-            &conn,
-            row_local_start - row_offset,
-            row_offset,
-            42,
-            None,
-        );
+        insert_minute_at(&conn, row_local_start - row_offset, row_offset, 42, None);
 
         let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
         assert_eq!(wellness[0].date, jul4);
@@ -1644,20 +1696,8 @@ mod tests {
         // Keep the minute's absolute timestamp inside sleep while storing a
         // different row offset, proving matching does not use local wall time.
         insert_minute_at(&conn, sleep_start_utc + 2 * 3600, TZ + 3600, 0, Some(50));
-        insert_minute_at(
-            &conn,
-            sleep_start_utc + 2 * 3600 + 60,
-            TZ,
-            0,
-            Some(60),
-        );
-        insert_minute_at(
-            &conn,
-            sleep_start_utc + 2 * 3600 + 120,
-            TZ,
-            0,
-            Some(0),
-        );
+        insert_minute_at(&conn, sleep_start_utc + 2 * 3600 + 60, TZ, 0, Some(60));
+        insert_minute_at(&conn, sleep_start_utc + 2 * 3600 + 120, TZ, 0, Some(0));
 
         let wellness = fetch_daily_wellness(&conn, DateRange::day(jul4)).unwrap();
         assert_eq!(wellness.len(), 1);
@@ -1675,13 +1715,7 @@ mod tests {
         insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
 
         for (minute, bpm) in [(0, 60), (10, 62), (20, 64), (30, 66)] {
-            insert_minute_at(
-                &conn,
-                sleep_start_utc + minute * 60,
-                TZ,
-                0,
-                Some(bpm),
-            );
+            insert_minute_at(&conn, sleep_start_utc + minute * 60, TZ, 0, Some(bpm));
         }
         insert_minute_at(&conn, local(jul4, 12, 0) - TZ, TZ, 0, Some(100));
         insert_minute_at(&conn, local(jul4, 13, 0) - TZ, TZ, 0, Some(120));
@@ -1713,13 +1747,7 @@ mod tests {
         let jul4 = d(2026, 7, 4);
         let row_tz = 10 * 3600; // UTC+10, 14 hours from the watch's UTC-4.
         let local_start = local(jul4, 0, 30);
-        insert_minute_at(
-            &conn,
-            local_start - row_tz,
-            row_tz,
-            0,
-            Some(88),
-        );
+        insert_minute_at(&conn, local_start - row_tz, row_tz, 0, Some(88));
 
         let offset = (watch_today() - jul4).num_days() as i32;
         let stats = load_heart_stats(&conn, 0, offset).unwrap();
@@ -1737,10 +1765,16 @@ mod tests {
         let range = DateRange::day(jul4);
 
         insert_minute(&conn, local(jul4, 9, 0), 10);
-        assert_eq!(fetch_daily_wellness(&conn, range).unwrap()[0].steps, Some(10));
+        assert_eq!(
+            fetch_daily_wellness(&conn, range).unwrap()[0].steps,
+            Some(10)
+        );
 
         insert_minute(&conn, local(jul4, 12, 0), 5);
-        assert_eq!(fetch_daily_wellness(&conn, range).unwrap()[0].steps, Some(15));
+        assert_eq!(
+            fetch_daily_wellness(&conn, range).unwrap()[0].steps,
+            Some(15)
+        );
     }
 
     #[test]
@@ -1750,7 +1784,7 @@ mod tests {
         assert_eq!(delta_pct(50, 100), "-50%");
         assert_eq!(delta_pct(100, 100), "+0%");
         assert_eq!(delta_pct(999, 1000), "+0%"); // -0.1% must not read "-0%"
-        assert_eq!(delta_pct(199, 200), "-1%");  // -0.5% rounds away from zero
+        assert_eq!(delta_pct(199, 200), "-1%"); // -0.5% rounds away from zero
     }
 
     #[test]
@@ -1979,22 +2013,10 @@ mod tests {
         insert_session(&conn, 3, nap_start, 3600);
 
         for (minute, bpm) in [(0, 60), (10, 59), (20, 61), (30, 60)] {
-            insert_minute_at(
-                &conn,
-                sleep_start - TZ + minute * 60,
-                TZ,
-                0,
-                Some(bpm),
-            );
+            insert_minute_at(&conn, sleep_start - TZ + minute * 60, TZ, 0, Some(bpm));
         }
         for (minute, bpm) in [(0, 40), (10, 40), (20, 40), (30, 40)] {
-            insert_minute_at(
-                &conn,
-                nap_start - TZ + minute * 60,
-                TZ,
-                0,
-                Some(bpm),
-            );
+            insert_minute_at(&conn, nap_start - TZ + minute * 60, TZ, 0, Some(bpm));
         }
 
         let resting_hr = fetch_daily_resting_hr(&conn, DateRange::day(jul4)).unwrap();
@@ -2015,13 +2037,7 @@ mod tests {
 
         for (start, bpm) in [(first_start, 60), (second_start, 65)] {
             for minute in [0, 10, 20, 30] {
-                insert_minute_at(
-                    &conn,
-                    start - TZ + minute * 60,
-                    TZ,
-                    0,
-                    Some(bpm),
-                );
+                insert_minute_at(&conn, start - TZ + minute * 60, TZ, 0, Some(bpm));
             }
         }
         // These lower daytime readings fall inside the batched SQL bounds but

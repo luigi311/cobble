@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use tracing::debug;
 
-use cobble_db::{AppDb, IpLocation};
 use crate::http;
+use cobble_db::{AppDb, IpLocation};
 
 /// Get coordinates and a human-readable city name.
 ///
@@ -42,19 +42,32 @@ async fn try_geoclue() -> anyhow::Result<(f64, f64, String)> {
         .map_err(|e| anyhow::anyhow!("GeoClue2 GetClient: {e}"))?;
     let client_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize()?;
 
-    conn
-        .call_method(
-            Some("org.freedesktop.GeoClue2"),
-            client_path.as_str(),
-            Some("org.freedesktop.GeoClue2.Client"),
-            "Start",
-            &(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("GeoClue2 Start: {e}"))?;
+    conn.call_method(
+        Some("org.freedesktop.GeoClue2"),
+        client_path.as_str(),
+        Some("org.freedesktop.GeoClue2.Client"),
+        "Start",
+        &(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("GeoClue2 Start: {e}"))?;
 
-    let lat = get_prop_f64(&conn, client_path.as_str(), "org.freedesktop.GeoClue2.Client", "Latitude", Duration::from_secs(5)).await?;
-    let lon = get_prop_f64(&conn, client_path.as_str(), "org.freedesktop.GeoClue2.Client", "Longitude", Duration::from_secs(5)).await?;
+    let lat = get_prop_f64(
+        &conn,
+        client_path.as_str(),
+        "org.freedesktop.GeoClue2.Client",
+        "Latitude",
+        Duration::from_secs(5),
+    )
+    .await?;
+    let lon = get_prop_f64(
+        &conn,
+        client_path.as_str(),
+        "org.freedesktop.GeoClue2.Client",
+        "Longitude",
+        Duration::from_secs(5),
+    )
+    .await?;
 
     let _ = conn
         .call_method(
@@ -77,13 +90,16 @@ async fn get_prop_f64(
     prop: &str,
     timeout: Duration,
 ) -> anyhow::Result<f64> {
-    let reply = tokio::time::timeout(timeout, conn.call_method(
-        Some("org.freedesktop.GeoClue2"),
-        path,
-        Some("org.freedesktop.DBus.Properties"),
-        "Get",
-        &(iface, prop),
-    ))
+    let reply = tokio::time::timeout(
+        timeout,
+        conn.call_method(
+            Some("org.freedesktop.GeoClue2"),
+            path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(iface, prop),
+        ),
+    )
     .await
     .map_err(|_| anyhow::anyhow!("GeoClue2 {prop} read timed out"))?
     .map_err(|e| anyhow::anyhow!("GeoClue2 {prop}: {e}"))?;
@@ -129,7 +145,12 @@ async fn try_ip_geolocation(db: Option<Arc<Mutex<AppDb>>>) -> anyhow::Result<(f6
 
     // 4. Store in cache if DB is available.
     if let Some(ref db) = db {
-        let loc = IpLocation { latitude: lat, longitude: lon, city, region };
+        let loc = IpLocation {
+            latitude: lat,
+            longitude: lon,
+            city,
+            region,
+        };
         if let Err(e) = db.lock().unwrap().store_ip_location(&ip, &loc) {
             tracing::warn!("weather: failed to cache IP location: {e}");
         }
@@ -141,11 +162,15 @@ async fn try_ip_geolocation(db: Option<Arc<Mutex<AppDb>>>) -> anyhow::Result<(f6
 /// Fetch raw data from ipapi.co.  Returns (lat, lon, city, region).
 async fn fetch_ipapi_raw() -> anyhow::Result<(f64, f64, String, String)> {
     let body = http::http_get("https://ipapi.co/json/").await?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("ipapi parse: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("ipapi parse: {e}"))?;
 
-    let lat = json["latitude"].as_f64().ok_or_else(|| anyhow::anyhow!("ipapi: missing latitude"))?;
-    let lon = json["longitude"].as_f64().ok_or_else(|| anyhow::anyhow!("ipapi: missing longitude"))?;
+    let lat = json["latitude"]
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("ipapi: missing latitude"))?;
+    let lon = json["longitude"]
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("ipapi: missing longitude"))?;
     let city = json["city"].as_str().unwrap_or("").to_string();
     let region = json["region"].as_str().unwrap_or("").to_string();
 
@@ -162,12 +187,19 @@ async fn fetch_ipapi_and_build() -> anyhow::Result<(f64, f64, String)> {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn location_name(city: &str) -> String {
-    if city.is_empty() { "Current Location".into() } else { city.to_string() }
+    if city.is_empty() {
+        "Current Location".into()
+    } else {
+        city.to_string()
+    }
 }
 
 /// Quick validation: the response should look like an IP address, not an HTML page.
 fn looks_like_ip(s: &str) -> bool {
-    !s.is_empty() && !s.contains('<') && s.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':')
+    !s.is_empty()
+        && !s.contains('<')
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':')
 }
 
 // ── Nominatim reverse geocoding ─────────────────────────────────────────
@@ -180,7 +212,8 @@ async fn reverse_geocode(lat: f64, lon: f64) -> anyhow::Result<String> {
     let json: serde_json::Value = serde_json::from_str(&body)?;
     let address = &json["address"];
 
-    let city = address["city"].as_str()
+    let city = address["city"]
+        .as_str()
         .or_else(|| address["town"].as_str())
         .or_else(|| address["village"].as_str())
         .unwrap_or("");

@@ -77,7 +77,10 @@ pub struct DateRange {
 
 impl DateRange {
     pub fn day(date: NaiveDate) -> Self {
-        Self { start: date, end: date }
+        Self {
+            start: date,
+            end: date,
+        }
     }
 
     pub fn contains(&self, date: NaiveDate) -> bool {
@@ -90,7 +93,10 @@ impl DateRange {
 
     /// UTC bounds `[start-of-first-day, end-of-last-day]` using the watch offset.
     pub fn utc_bounds(&self) -> (i64, i64) {
-        (local_ts(self.start, 0, 0, 0), local_ts(self.end, 23, 59, 59))
+        (
+            local_ts(self.start, 0, 0, 0),
+            local_ts(self.end, 23, 59, 59),
+        )
     }
 
     /// Days from `start` through `min(end, today)` — the denominator for
@@ -124,11 +130,17 @@ pub fn range_for(period: i32, offset: i32) -> DateRange {
             } else {
                 NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
             } - chrono::Duration::days(1);
-            DateRange { start: first, end: last }
+            DateRange {
+                start: first,
+                end: last,
+            }
         }
         _ => {
             let end = today - chrono::Duration::days(offset as i64 * 7);
-            DateRange { start: end - chrono::Duration::days(6), end }
+            DateRange {
+                start: end - chrono::Duration::days(6),
+                end,
+            }
         }
     }
 }
@@ -167,7 +179,11 @@ pub fn period_label(period: i32, offset: i32) -> String {
                 let end = today - chrono::Duration::days(n as i64 * 7);
                 let start = end - chrono::Duration::days(6);
                 if start.year() == end.year() {
-                    format!("{} \u{2013} {}", start.format("%b %-d"), end.format("%b %-d"))
+                    format!(
+                        "{} \u{2013} {}",
+                        start.format("%b %-d"),
+                        end.format("%b %-d")
+                    )
                 } else {
                     format!(
                         "{} \u{2013} {}",

@@ -5,10 +5,10 @@
 #[allow(dead_code)]
 mod remote_os {
     pub const UNKNOWN: u32 = 0;
-    pub const IOS:     u32 = 1;
+    pub const IOS: u32 = 1;
     pub const ANDROID: u32 = 2;
-    pub const MACOS:   u32 = 3;
-    pub const LINUX:   u32 = 4;
+    pub const MACOS: u32 = 3;
+    pub const LINUX: u32 = 4;
     pub const WINDOWS: u32 = 5;
 }
 
@@ -16,40 +16,40 @@ mod remote_os {
 // Values match libpebble3's PhoneAppVersion.PlatformFlag enum.
 #[allow(dead_code)]
 mod platform_caps {
-    pub const TELEPHONY:     u32 = 1 << 4;  // 16
-    pub const SMS:           u32 = 1 << 5;  // 32
-    pub const GPS:           u32 = 1 << 6;  // 64
-    pub const BTLE:          u32 = 1 << 7;  // 128
-    pub const CAMERA_REAR:   u32 = 1 << 8;  // 256
-    pub const ACCELEROMETER: u32 = 1 << 9;  // 512
-    pub const GYROSCOPE:     u32 = 1 << 10; // 1024
-    pub const COMPASS:       u32 = 1 << 11; // 2048
+    pub const TELEPHONY: u32 = 1 << 4; // 16
+    pub const SMS: u32 = 1 << 5; // 32
+    pub const GPS: u32 = 1 << 6; // 64
+    pub const BTLE: u32 = 1 << 7; // 128
+    pub const CAMERA_REAR: u32 = 1 << 8; // 256
+    pub const ACCELEROMETER: u32 = 1 << 9; // 512
+    pub const GYROSCOPE: u32 = 1 << 10; // 1024
+    pub const COMPASS: u32 = 1 << 11; // 2048
 }
 
 // Protocol capability bits — 64-bit value sent little-endian (per Pebble protocol spec).
 // Bit positions match libpebble3's ProtocolCapsFlag enum (value field).
 #[allow(dead_code)]
 mod protocol_caps {
-    pub const APP_RUN_STATE: u64              = 1 << 0;  // SupportsAppRunStateProtocol
-    pub const INFINITE_LOG_DUMPING: u64       = 1 << 1;  // SupportsInfiniteLogDump
-    pub const UPDATED_MUSIC_PROTOCOL: u64     = 1 << 2;  // SupportsExtendedMusicProtocol
-    pub const TWO_WAY_DISMISSAL: u64          = 1 << 3;  // SupportsTwoWayDismissal
-    pub const LOCALIZATION: u64               = 1 << 4;  // SupportsLocalization
-    pub const APP_MESSAGES_8K: u64            = 1 << 5;  // Supports8kAppMessage
-    pub const HEALTH_INSIGHTS: u64            = 1 << 6;  // SupportsHealthInsights
-    pub const APP_DICTATION: u64              = 1 << 7;  // SupportsAppDictation
-    pub const SEND_TEXT_APP: u64              = 1 << 8;  // SupportsSendTextApp
-    pub const NOTIFICATION_FILTERING: u64     = 1 << 9;  // SupportsNotificationFiltering
-    pub const UNREAD_CORE_DUMP: u64           = 1 << 10; // SupportsUnreadCoreDump
-    pub const WEATHER: u64                    = 1 << 11; // SupportsWeatherApp
-    pub const REMINDERS_APP: u64              = 1 << 12; // SupportsRemindersApp
-    pub const WORKOUT_APP: u64                = 1 << 13; // SupportsWorkoutApp
+    pub const APP_RUN_STATE: u64 = 1 << 0; // SupportsAppRunStateProtocol
+    pub const INFINITE_LOG_DUMPING: u64 = 1 << 1; // SupportsInfiniteLogDump
+    pub const UPDATED_MUSIC_PROTOCOL: u64 = 1 << 2; // SupportsExtendedMusicProtocol
+    pub const TWO_WAY_DISMISSAL: u64 = 1 << 3; // SupportsTwoWayDismissal
+    pub const LOCALIZATION: u64 = 1 << 4; // SupportsLocalization
+    pub const APP_MESSAGES_8K: u64 = 1 << 5; // Supports8kAppMessage
+    pub const HEALTH_INSIGHTS: u64 = 1 << 6; // SupportsHealthInsights
+    pub const APP_DICTATION: u64 = 1 << 7; // SupportsAppDictation
+    pub const SEND_TEXT_APP: u64 = 1 << 8; // SupportsSendTextApp
+    pub const NOTIFICATION_FILTERING: u64 = 1 << 9; // SupportsNotificationFiltering
+    pub const UNREAD_CORE_DUMP: u64 = 1 << 10; // SupportsUnreadCoreDump
+    pub const WEATHER: u64 = 1 << 11; // SupportsWeatherApp
+    pub const REMINDERS_APP: u64 = 1 << 12; // SupportsRemindersApp
+    pub const WORKOUT_APP: u64 = 1 << 13; // SupportsWorkoutApp
     pub const SMOOTH_FW_INSTALL_PROGRESS: u64 = 1 << 14; // SupportsSmoothFwInstallProgress
-    pub const CUSTOM_VIBE_PATTERNS: u64       = 1 << 15; // SupportsCustomVibePatterns
-    pub const JS_BYTECODE_VERSION: u64        = 1 << 16; // JavascriptBytecodeVersionAppended
+    pub const CUSTOM_VIBE_PATTERNS: u64 = 1 << 15; // SupportsCustomVibePatterns
+    pub const JS_BYTECODE_VERSION: u64 = 1 << 16; // JavascriptBytecodeVersionAppended
     pub const FW_UPDATE_ACROSS_DISCONNECT: u64 = 1 << 21; // SupportsFwUpdateAcrossDisconnection
-    pub const BLOB_DB_VERSION: u64            = 1 << 22; // SupportsBlobDbVersion
-    pub const SETTINGS_SYNC: u64              = 1 << 23; // SupportsSettingsSync
+    pub const BLOB_DB_VERSION: u64 = 1 << 22; // SupportsBlobDbVersion
+    pub const SETTINGS_SYNC: u64 = 1 << 23; // SupportsSettingsSync
 }
 
 pub fn build_phone_version_response() -> Vec<u8> {

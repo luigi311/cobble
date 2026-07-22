@@ -1,0 +1,8 @@
+[package]
+name = "cobble-contracts"
+version = "0.1.0"
+edition = "2024"
+description = "Transport-neutral public API models shared by cobbled and Cobble clients."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

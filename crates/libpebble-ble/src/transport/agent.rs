@@ -5,8 +5,8 @@
 //! watch address; rejects everything else.
 
 use bluer::{
-    agent::{Agent, ReqError, RequestConfirmation},
     Address,
+    agent::{Agent, ReqError, RequestConfirmation},
 };
 use tracing::{debug, info, warn};
 
@@ -19,10 +19,16 @@ pub fn build_pairing_agent(watch_address: Address) -> Agent {
             let addr = watch_address;
             Box::pin(async move {
                 if req.device == addr {
-                    debug!("agent auto-confirming passkey {:06} for {}", req.passkey, req.device);
+                    debug!(
+                        "agent auto-confirming passkey {:06} for {}",
+                        req.passkey, req.device
+                    );
                     Ok(())
                 } else {
-                    warn!("agent rejecting confirmation for unexpected device {}", req.device);
+                    warn!(
+                        "agent rejecting confirmation for unexpected device {}",
+                        req.device
+                    );
                     Err(ReqError::Rejected)
                 }
             })
@@ -44,7 +50,10 @@ pub fn build_pairing_agent(watch_address: Address) -> Agent {
             let addr = watch_address;
             Box::pin(async move {
                 if req.device == addr {
-                    debug!("agent auto-authorizing service {} for {}", req.service, req.device);
+                    debug!(
+                        "agent auto-authorizing service {} for {}",
+                        req.service, req.device
+                    );
                     Ok(())
                 } else {
                     Err(ReqError::Rejected)

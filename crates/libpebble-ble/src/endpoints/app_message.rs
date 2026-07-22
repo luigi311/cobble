@@ -110,9 +110,14 @@ fn decode_tuples(payload: &[u8]) -> std::collections::HashMap<u32, AppMessageVal
     let mut out = std::collections::HashMap::new();
     let mut off = 0usize;
     while off + 7 <= payload.len() {
-        let key = u32::from_le_bytes([payload[off], payload[off+1], payload[off+2], payload[off+3]]);
-        let ttype = payload[off+4];
-        let length = u16::from_le_bytes([payload[off+5], payload[off+6]]) as usize;
+        let key = u32::from_le_bytes([
+            payload[off],
+            payload[off + 1],
+            payload[off + 2],
+            payload[off + 3],
+        ]);
+        let ttype = payload[off + 4];
+        let length = u16::from_le_bytes([payload[off + 5], payload[off + 6]]) as usize;
         off += 7;
         if off + length > payload.len() {
             break;
@@ -176,10 +181,20 @@ pub fn parse_app_message(payload: &[u8]) -> Option<ParsedAppMessage> {
         let app_uuid = Uuid::from_bytes(uuid_bytes).to_string();
         // payload[18] = count of tuples; tuples start at byte 19
         let data = decode_tuples(&payload[19..]);
-        return Some(ParsedAppMessage { cmd, txn, app_uuid: Some(app_uuid), data: Some(data) });
+        return Some(ParsedAppMessage {
+            cmd,
+            txn,
+            app_uuid: Some(app_uuid),
+            data: Some(data),
+        });
     }
 
-    Some(ParsedAppMessage { cmd, txn, app_uuid: None, data: None })
+    Some(ParsedAppMessage {
+        cmd,
+        txn,
+        app_uuid: None,
+        data: None,
+    })
 }
 
 pub fn build_app_message_push(

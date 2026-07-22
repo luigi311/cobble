@@ -1,10 +1,13 @@
 [package]
 name = "cobble-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Rust D-Bus client for the cobbled Pebble BLE daemon."
 
 [dependencies]
+cobble-contracts = { path = "../cobble-contracts" }
+cobble-config = { path = "../cobble-config" }
+toml = "0.8"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 zvariant = "5"
 futures-util = "0.3"

@@ -7,16 +7,14 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Context;
 use chrono::NaiveDate;
-use libpebble_ble::endpoints::datalog::tag as datalog_tag;
 use libpebble_ble::DatalogData;
+use libpebble_ble::endpoints::datalog::tag as datalog_tag;
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
 use crate::schema;
 use crate::time::DateRange;
-use crate::types::{
-    DailyWellness, IpLocation, WellnessExportState, WellnessExportStatus,
-};
+use crate::types::{DailyWellness, IpLocation, WellnessExportState, WellnessExportStatus};
 
 // Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
@@ -45,15 +43,13 @@ impl AppDb {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create DB directory {}", parent.display()))?;
             #[cfg(unix)]
-            if let Err(e) = std::fs::set_permissions(
-                parent,
-                std::fs::Permissions::from_mode(0o700),
-            ) {
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
                 warn!("could not set permissions on {}: {e}", parent.display());
             }
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("open app DB at {}", path.display()))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("open app DB at {}", path.display()))?;
         #[cfg(unix)]
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             warn!("could not set permissions on {}: {e}", path.display());
@@ -156,7 +152,10 @@ impl AppDb {
             .filter(|(date, hash)| successful_hashes.get(date) == Some(&hash.as_str()))
             .count() as i64;
         let pending_dates = current_payloads.len() as i64 - exported_dates;
-        let last_success_at = states.iter().filter_map(|state| state.last_success_at).max();
+        let last_success_at = states
+            .iter()
+            .filter_map(|state| state.last_success_at)
+            .max();
         let latest_error = states
             .iter()
             .filter_map(|state| {
@@ -386,14 +385,14 @@ impl AppDb {
                         (None, None, None)
                     };
 
-                let heart_rate: Option<i64> =
-                    if record_version >= VERSION_FW_4_0 && off < rec.len() {
-                        let v = rec[off] as i64;
-                        off += 1;
-                        Some(v)
-                    } else {
-                        None
-                    };
+                let heart_rate: Option<i64> = if record_version >= VERSION_FW_4_0 && off < rec.len()
+                {
+                    let v = rec[off] as i64;
+                    off += 1;
+                    Some(v)
+                } else {
+                    None
+                };
 
                 let heart_rate_weight: Option<i64> =
                     if record_version >= VERSION_FW_4_1 && off + 1 < rec.len() {
@@ -483,8 +482,7 @@ impl AppDb {
             let version = u16::from_le_bytes([item[0], item[1]]);
             // item[2..4]: skip (u16)
             let session_type = u16::from_le_bytes([item[4], item[5]]);
-            let utc_offset =
-                u32::from_le_bytes([item[6], item[7], item[8], item[9]]) as i32 as i64;
+            let utc_offset = u32::from_le_bytes([item[6], item[7], item[8], item[9]]) as i32 as i64;
             let start_ts = u32::from_le_bytes([item[10], item[11], item[12], item[13]]) as i64;
             let duration = u32::from_le_bytes([item[14], item[15], item[16], item[17]]) as i64;
 
@@ -556,8 +554,7 @@ impl AppDb {
     /// or to pick up any parser fix without re-syncing from the watch.
     pub fn reprocess(&self) -> anyhow::Result<()> {
         // Load raw records before opening the write transaction.
-        let steps_records =
-            Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_STEPS as i64)?;
+        let steps_records = Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_STEPS as i64)?;
         let sleep_records = Self::load_raw_records(&self.conn, datalog_tag::SLEEP as i64)?;
         let session_records =
             Self::load_raw_records(&self.conn, datalog_tag::ACTIVITY_SESSIONS as i64)?;
@@ -573,12 +570,7 @@ impl AppDb {
         self.conn
             .execute("DELETE FROM health_activity_sessions", [])?;
         for rec in sleep_records.iter().chain(&session_records) {
-            Self::do_insert_activity_sessions(
-                &self.conn,
-                rec.id,
-                &rec.data,
-                rec.item_size,
-            )?;
+            Self::do_insert_activity_sessions(&self.conn, rec.id, &rec.data, rec.item_size)?;
         }
         txn.commit()?;
         debug!(
@@ -662,14 +654,16 @@ mod tests {
                 last_error: None,
             }]
         );
-        assert!(db
-            .fetch_wellness_export_states("intervals_icu", "athlete-b")
-            .unwrap()
-            .is_empty());
-        assert!(db
-            .fetch_wellness_export_states("other_provider", "athlete-a")
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.fetch_wellness_export_states("intervals_icu", "athlete-b")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.fetch_wellness_export_states("other_provider", "athlete-a")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -702,7 +696,10 @@ mod tests {
         assert_eq!(state.next_attempt_at, Some(500));
         assert_eq!(state.last_attempt_at, Some(200));
         assert_eq!(state.last_success_at, Some(100));
-        assert_eq!(state.last_error.as_deref(), Some("HTTP 503: transient response"));
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("HTTP 503: transient response")
+        );
 
         db.record_wellness_export_failure(
             "intervals_icu",
@@ -720,7 +717,10 @@ mod tests {
         assert_eq!(state.next_attempt_at, None);
         assert_eq!(state.last_attempt_at, Some(600));
         assert_eq!(state.last_success_at, Some(100));
-        assert_eq!(state.last_error.as_deref(), Some("HTTP 401: authentication failure"));
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("HTTP 401: authentication failure")
+        );
 
         db.record_wellness_export_success(
             "intervals_icu",

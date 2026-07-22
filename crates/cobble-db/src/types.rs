@@ -97,8 +97,11 @@ impl Night {
     /// afternoon nap doesn't stretch the in-bed span or shift the wake-up
     /// time; nap-only nights fall back to the nap phases themselves.
     pub fn overnight_phases(&self) -> Vec<&NightPhase> {
-        let block: Vec<&NightPhase> =
-            self.phases.iter().filter(|p| !p.is_deep && !p.is_nap).collect();
+        let block: Vec<&NightPhase> = self
+            .phases
+            .iter()
+            .filter(|p| !p.is_deep && !p.is_nap)
+            .collect();
         if !block.is_empty() {
             return block;
         }

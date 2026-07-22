@@ -28,14 +28,58 @@ The width wrappers (u8/u16/u32/i8/i16/i32) are re-exported here so apps don't
 need to depend on libpebble-ble directly just to pin an integer width.
 """
 
+from ._daemon_config import (
+    ApplyDisposition,
+    DaemonConfig,
+    DaemonConfigPatch,
+    DaemonConfigSnapshot,
+    DaemonConfigUpdate,
+    IntervalsIcuConfig,
+    IntervalsIcuPatch,
+)
+from ._device_config import (
+    ConfigError,
+    ConfigErrorKind,
+    DeviceCapabilities,
+    DeviceConfigSnapshot,
+    DeviceConfigState,
+    FieldAvailability,
+    FieldValue,
+    HealthConfig,
+    HealthConfigPatch,
+    HeartRateThresholds,
+    HrmConfig,
+    PreferenceField,
+    WatchIdentity,
+)
 from ._types import Int, i8, i16, i32, u8, u16, u32
 from .client import CobbleClient, DaemonNotRunningError, NotConnectedError
 
 __all__ = [
     "CobbleClient",
+    "ApplyDisposition",
+    "ConfigError",
+    "ConfigErrorKind",
     "DaemonNotRunningError",
+    "DaemonConfig",
+    "DaemonConfigPatch",
+    "DaemonConfigSnapshot",
+    "DaemonConfigUpdate",
+    "DeviceCapabilities",
+    "DeviceConfigSnapshot",
+    "DeviceConfigState",
+    "FieldAvailability",
+    "FieldValue",
+    "HealthConfig",
+    "HealthConfigPatch",
+    "HeartRateThresholds",
+    "HrmConfig",
     "Int",
+    "IntervalsIcuConfig",
+    "IntervalsIcuPatch",
     "NotConnectedError",
+    "PreferenceField",
+    "WatchIdentity",
     "i8",
     "i16",
     "i32",

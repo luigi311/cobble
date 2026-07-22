@@ -238,7 +238,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `Notify` | `(s, s, s) → u` | title, body, subtitle → token |
 | Method | `Ping` | `() → b` | daemon liveness probe |
 | Method | `Scan` | `(d) → a(ss)` | timeout\_secs → [(address, name)] |
-| Method | `ActivateHealth` | `(q, q, y, y, b)` | height\_cm, weight\_kg, age, gender (0=female 1=male 2=other), hrm\_enabled |
+| Method | `ActivateHealth` | `(q, q, y, y, b)` | compatibility API: refresh and losslessly patch height\_cm, weight\_kg, age, gender (0=female 1=male 2=other), and hrm\_enabled |
 | Method | `FetchHealthData` | `()` | flush pending health records from watch |
 | Method | `FetchHealthParams` | `()` | re-sync watch settings (health + general) from watch |
 | Method | `GetHealthProfile` | `() → a{sv}` | watch health profile: height/weight/age/gender, HRM, HR zones, units |

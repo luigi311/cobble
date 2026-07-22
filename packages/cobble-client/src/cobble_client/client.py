@@ -16,6 +16,19 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 
 from ._codec import decode_data_dict, encode_data_dict
+from ._daemon_config import (
+    ApplyDisposition,
+    DaemonConfigPatch,
+    DaemonConfigSnapshot,
+    DaemonConfigUpdate,
+    decode_daemon_config,
+)
+from ._device_config import (
+    DeviceConfigSnapshot,
+    DeviceConfigState,
+    HealthConfigPatch,
+    decode_device_config,
+)
 
 BUS_NAME = "org.cobble.Daemon"
 OBJECT_PATH = "/org/cobble/Daemon"
@@ -39,6 +52,8 @@ BatteryHandler = Callable[[int | None], None]
 AppRunStateHandler = Callable[[str, bool], None]
 # media-control action name from the watch (play/pause/next_track/…)
 MusicActionHandler = Callable[[str], None]
+DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
+DaemonConfigChangedHandler = Callable[[int], None]
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -82,6 +97,8 @@ class CobbleClient:
         self._battery_handlers: list[BatteryHandler] = []
         self._app_run_state_handlers: list[AppRunStateHandler] = []
         self._music_action_handlers: list[MusicActionHandler] = []
+        self._device_config_handlers: list[DeviceConfigChangedHandler] = []
+        self._daemon_config_handlers: list[DaemonConfigChangedHandler] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -128,6 +145,8 @@ class CobbleClient:
         self._iface.on_connection_changed(self._dispatch_connection)
         self._iface.on_health_data_received(self._dispatch_health_data)
         self._iface.on_health_profile_received(self._dispatch_health_profile)
+        self._iface.on_daemon_config_changed(self._dispatch_daemon_config_changed)
+        self._iface.on_device_config_changed(self._dispatch_device_config_changed)
         self._iface.on_watch_setting_received(self._dispatch_watch_setting)
         self._iface.on_battery_changed(self._dispatch_battery)
         self._iface.on_app_run_state_changed(self._dispatch_app_run_state)
@@ -240,6 +259,10 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
+    async def ping(self) -> bool:
+        """Return whether the daemon responds; alias matching the Rust client."""
+        return await self.ping_daemon()
+
     async def notify(self, title: str, body: str, subtitle: str = "") -> int:
         """Send a notification to the watch. Returns the BlobDB token.
 
@@ -259,6 +282,48 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
+    async def get_daemon_config(self) -> DaemonConfigSnapshot:
+        """Return the running daemon's effective, revisioned configuration."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_daemon_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_daemon_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def update_daemon_config(self, patch: DaemonConfigPatch) -> DaemonConfigUpdate:
+        """Apply a revision-guarded daemon configuration patch."""
+        self._require_iface()
+        wire: dict[str, Variant] = {}
+        if patch.address is not None:
+            wire["address"] = Variant("s", patch.address)
+        if patch.adapter is not None:
+            wire["adapter"] = Variant("s", patch.adapter)
+        if patch.verbose is not None:
+            wire["verbose"] = Variant("b", patch.verbose)
+        if patch.database_path is not None or patch.use_default_database_path:
+            wire["database_path"] = Variant("s", patch.database_path or "")
+        if intervals := patch.intervals_icu:
+            if intervals.enabled is not None:
+                wire["intervals_enabled"] = Variant("b", intervals.enabled)
+            if intervals.athlete_id is not None:
+                wire["intervals_athlete_id"] = Variant("s", intervals.athlete_id)
+            if intervals.api_key is not None:
+                wire["intervals_api_key_replace"] = Variant("s", intervals.api_key)
+            if intervals.clear_api_key:
+                wire["intervals_api_key_clear"] = Variant("b", True)
+        try:
+            raw = await self._iface.call_update_daemon_config(patch.expected_revision, wire)
+        except DBusError as e:
+            raise self._translate(e) from e
+        values = {k: _unwrap(v) for k, v in raw.items()}
+        fields = {
+            key.removeprefix("apply."): ApplyDisposition(str(value))
+            for key, value in values.items()
+            if key.startswith("apply.")
+        }
+        return DaemonConfigUpdate(decode_daemon_config(values), fields)
+
     async def activate_health(
         self,
         height_cm: int,
@@ -268,8 +333,9 @@ class CobbleClient:
         *,
         hrm_enabled: bool = False,
     ) -> None:
-        """Write the health user profile to the watch and trigger a DataLog sync.
+        """Refresh and safely patch the health profile, then trigger a DataLog sync.
 
+        Existing insight flags and firmware-specific HRM fields are preserved.
         gender: 0 = female, 1 = male, 2 = other (libpebble3 HealthGender).
         """
         self._require_iface()
@@ -320,6 +386,89 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
         return {k: _unwrap(v) for k, v in raw.items()}
+
+    async def get_device_config(self) -> DeviceConfigSnapshot:
+        """Return the daemon's coherent typed device-configuration snapshot."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_device_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def refresh_device_config(self) -> DeviceConfigSnapshot:
+        """Refresh watch settings and return the completed typed snapshot."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_refresh_device_config()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def update_device_config(
+        self,
+        expected_revision: int,
+        patch: HealthConfigPatch | None = None,
+        preferences: dict[str, bool | int | str] | None = None,
+    ) -> DeviceConfigSnapshot:
+        """Apply supplied health/general fields and return reconciled watch state."""
+        self._require_iface()
+        wire: dict[str, Variant] = {}
+        patch = patch or HealthConfigPatch()
+        fields = {
+            "health.height_mm": ("q", patch.height_mm),
+            "health.weight_dag": ("q", patch.weight_dag),
+            "health.tracking_enabled": ("b", patch.tracking_enabled),
+            "health.activity_insights_enabled": ("b", patch.activity_insights_enabled),
+            "health.sleep_insights_enabled": ("b", patch.sleep_insights_enabled),
+            "health.age": ("y", patch.age),
+            "health.gender": ("y", patch.gender),
+            "health.hrm.enabled": ("b", patch.hrm_enabled),
+            "health.hrm.measurement_interval": ("y", patch.hrm_measurement_interval),
+            "health.hrm.during_activity": ("b", patch.hrm_during_activity),
+        }
+        for key, (signature, value) in fields.items():
+            if value is not None:
+                wire[key] = Variant(signature, value)
+        if patch.distance_units is not None:
+            units = {"metric": 0, "imperial": 1}
+            if patch.distance_units not in units:
+                raise ValueError("distance_units must be 'metric' or 'imperial'")
+            wire["health.distance_units"] = Variant("y", units[patch.distance_units])
+        if patch.heart_rate_thresholds is not None:
+            value = patch.heart_rate_thresholds
+            for key, threshold in {
+                "resting": value.resting,
+                "elevated": value.elevated,
+                "maximum": value.maximum,
+                "zone1": value.zone_1,
+                "zone2": value.zone_2,
+                "zone3": value.zone_3,
+            }.items():
+                wire[f"health.thresholds.{key}"] = Variant("y", threshold)
+        for key, value in (preferences or {}).items():
+            if isinstance(value, bool):
+                wire[f"preference.{key}"] = Variant("b", value)
+            elif isinstance(value, int):
+                wire[f"preference.{key}"] = Variant("u", value)
+            elif isinstance(value, str):
+                wire[f"preference.{key}"] = Variant("s", value)
+            else:
+                raise TypeError(f"unsupported preference value for {key}")
+        try:
+            raw = await self._iface.call_update_device_config(expected_revision, wire)
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
+
+    async def reset_device_config_defaults(self, expected_revision: int) -> DeviceConfigSnapshot:
+        """Reset observed editable general preferences; health and unknown records are untouched."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_reset_device_config_defaults(expected_revision)
+        except DBusError as e:
+            raise self._translate(e) from e
+        return decode_device_config({k: _unwrap(v) for k, v in raw.items()})
 
     async def get_watch_version(self) -> dict:
         """Return the watch's version info as a dict.
@@ -481,6 +630,23 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
+    async def sync_wellness(self) -> None:
+        """Request an immediate configured wellness-provider reconciliation."""
+        self._require_iface()
+        try:
+            await self._iface.call_sync_wellness()
+        except DBusError as e:
+            raise self._translate(e) from e
+
+    async def get_wellness_sync_status(self) -> dict:
+        """Return the current wellness reconciliation status."""
+        self._require_iface()
+        try:
+            raw = await self._iface.call_get_wellness_sync_status()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return {k: _unwrap(v) for k, v in raw.items()}
+
     async def push_weather(
         self,
         location_name: str,
@@ -562,6 +728,18 @@ class CobbleClient:
         self._watch_setting_handlers.append(fn)
         return fn
 
+    def on_device_config_changed(
+        self, fn: DeviceConfigChangedHandler
+    ) -> DeviceConfigChangedHandler:
+        self._device_config_handlers.append(fn)
+        return fn
+
+    def on_daemon_config_changed(
+        self, fn: DaemonConfigChangedHandler
+    ) -> DaemonConfigChangedHandler:
+        self._daemon_config_handlers.append(fn)
+        return fn
+
     def on_battery(self, fn: BatteryHandler) -> BatteryHandler:
         self._battery_handlers.append(fn)
         return fn
@@ -588,6 +766,18 @@ class CobbleClient:
     def _dispatch_ack(self, txn: int) -> None:
         for h in self._ack_handlers:
             _safe(h, txn)
+
+    def _dispatch_device_config_changed(self, revision: int, state: str) -> None:
+        try:
+            parsed = DeviceConfigState(state)
+        except ValueError:
+            parsed = DeviceConfigState.INVALID
+        for handler in self._device_config_handlers:
+            _safe(handler, revision, parsed)
+
+    def _dispatch_daemon_config_changed(self, revision: int) -> None:
+        for handler in self._daemon_config_handlers:
+            _safe(handler, revision)
 
     def _dispatch_nack(self, txn: int) -> None:
         for h in self._nack_handlers:

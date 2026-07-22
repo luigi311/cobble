@@ -19,9 +19,13 @@
 //! For signal subscriptions, obtain a [`CobbleDaemonProxy`] via
 //! [`CobbleClient::proxy`] and call the generated `receive_*()` methods.
 
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+};
 
-use zbus::{proxy, Connection};
+pub use cobble_contracts::*;
+use zbus::{Connection, proxy};
 pub use zbus::{Error, Result};
 pub use zvariant::OwnedValue;
 
@@ -33,6 +37,446 @@ pub type WireDict = HashMap<i32, (String, OwnedValue)>;
 
 /// Self-describing `a{sv}` map (watch version/color/health-profile/settings).
 pub type VarDict = HashMap<String, OwnedValue>;
+
+fn xdg_path(variable: &str, home_suffix: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join(home_suffix))
+        })
+}
+
+fn database_path_from_config(
+    config_path: &Path,
+    default_database_path: PathBuf,
+) -> std::result::Result<PathBuf, String> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_database_path);
+        }
+        Err(error) => {
+            return Err(format!(
+                "read config file {}: {error}",
+                config_path.display()
+            ));
+        }
+    };
+    let config: cobble_config::Config = toml::from_str(&text)
+        .map_err(|error| format!("parse config file {}: {error}", config_path.display()))?;
+    Ok(config
+        .db
+        .map(PathBuf::from)
+        .unwrap_or(default_database_path))
+}
+
+/// Resolve the database used for offline read-only access from the standard
+/// daemon config. A running daemon's reported active path must take precedence.
+pub fn offline_database_path() -> std::result::Result<PathBuf, String> {
+    let config_base = xdg_path("XDG_CONFIG_HOME", ".config")
+        .ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set".to_string())?;
+    let data_base = xdg_path("XDG_DATA_HOME", ".local/share")
+        .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+    database_path_from_config(
+        &config_base.join("cobbled/config.toml"),
+        data_base.join("cobbled/cobbled.db"),
+    )
+}
+
+fn wire_value(value: impl Into<zvariant::Value<'static>>) -> Result<OwnedValue> {
+    OwnedValue::try_from(value.into()).map_err(Error::Variant)
+}
+
+fn required_string(map: &VarDict, key: &str) -> Result<String> {
+    map.get(key)
+        .and_then(|value| <&str>::try_from(value).ok())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_bool(map: &VarDict, key: &str) -> Result<bool> {
+    map.get(key)
+        .and_then(|value| bool::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_u16(map: &VarDict, key: &str) -> Result<u16> {
+    map.get(key)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn required_u8(map: &VarDict, key: &str) -> Result<u8> {
+    map.get(key)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid device-config field {key}")))
+}
+
+fn required_u64(map: &VarDict, key: &str) -> Result<u64> {
+    map.get(key)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| Error::Failure(format!("missing or invalid daemon-config field {key}")))
+}
+
+fn decode_daemon_config(map: &VarDict) -> Result<DaemonConfigSnapshot> {
+    let api_version = required_u16(map, "api_version")?;
+    if api_version != CONFIG_API_VERSION {
+        return Err(Error::Failure(format!(
+            "unsupported daemon-config API version {api_version}"
+        )));
+    }
+    let database_path = required_string(map, "database_path")?;
+    Ok(DaemonConfigSnapshot {
+        api_version,
+        revision: required_u64(map, "revision")?,
+        config_path: required_string(map, "config_path")?,
+        active_database_path: required_string(map, "active_database_path")?,
+        resolved_database_path: required_string(map, "resolved_database_path")?,
+        active_verbose: required_bool(map, "active_verbose")?,
+        error: map
+            .get("error_message")
+            .and_then(|value| <&str>::try_from(value).ok())
+            .map(|message| ConfigError {
+                kind: ConfigErrorKind::InvalidData,
+                field: None,
+                message: message.to_owned(),
+            }),
+        config: DaemonConfig {
+            address: required_string(map, "address")?,
+            adapter: required_string(map, "adapter")?,
+            verbose: required_bool(map, "verbose")?,
+            database_path: (!database_path.is_empty()).then_some(database_path),
+            intervals_icu: IntervalsIcuConfig {
+                enabled: required_bool(map, "intervals_enabled")?,
+                athlete_id: required_string(map, "intervals_athlete_id")?,
+                api_key_configured: required_bool(map, "intervals_api_key_configured")?,
+            },
+        },
+    })
+}
+
+fn field_availability(map: &VarDict, key: &str) -> FieldAvailability {
+    match map.get(key).and_then(|value| <&str>::try_from(value).ok()) {
+        Some("available") => FieldAvailability::Available,
+        Some("unsupported") => FieldAvailability::Unsupported,
+        Some("invalid") => FieldAvailability::Invalid,
+        _ => FieldAvailability::NotReceived,
+    }
+}
+
+fn device_config_error(map: &VarDict) -> Option<ConfigError> {
+    let message = map
+        .get("error_message")
+        .and_then(|value| <&str>::try_from(value).ok())?;
+    let kind = match map
+        .get("error_kind")
+        .and_then(|value| <&str>::try_from(value).ok())
+    {
+        Some("not_supported") => ConfigErrorKind::NotSupported,
+        Some("disconnected") => ConfigErrorKind::Disconnected,
+        Some("timeout") => ConfigErrorKind::Timeout,
+        Some("rejected") => ConfigErrorKind::Rejected,
+        Some("readback_mismatch") => ConfigErrorKind::ReadbackMismatch,
+        _ => ConfigErrorKind::Internal,
+    };
+    Some(ConfigError {
+        kind,
+        field: None,
+        message: message.to_owned(),
+    })
+}
+
+fn decode_device_config(map: &VarDict) -> Result<DeviceConfigSnapshot> {
+    let api_version = required_u16(map, "api_version")?;
+    if api_version != DEVICE_CONFIG_API_VERSION {
+        return Err(Error::Failure(format!(
+            "unsupported device-config API version {api_version}"
+        )));
+    }
+    let state = match required_string(map, "state")?.as_str() {
+        "disconnected" => DeviceConfigState::Disconnected,
+        "loading" => DeviceConfigState::Loading,
+        "ready" => DeviceConfigState::Ready,
+        "partial" => DeviceConfigState::Partial,
+        "error" => DeviceConfigState::Error,
+        "unsupported" => DeviceConfigState::Unsupported,
+        value => {
+            return Err(Error::Failure(format!(
+                "unknown device-config state {value}"
+            )));
+        }
+    };
+    let activity_availability = field_availability(map, "health.activity.availability");
+    let health = if activity_availability == FieldAvailability::Available {
+        let units_availability = field_availability(map, "health.units.availability");
+        let distance_units = map
+            .get("health.distance_units")
+            .and_then(|value| <&str>::try_from(value).ok())
+            .map(|value| match value {
+                "metric" => DistanceUnits::Metric,
+                "imperial" => DistanceUnits::Imperial,
+                _ => DistanceUnits::Unknown(255),
+            });
+        let hrm_availability = field_availability(map, "health.hrm.availability");
+        let hrm = if hrm_availability == FieldAvailability::Available {
+            Some(HrmConfig {
+                enabled: required_bool(map, "health.hrm.enabled")?,
+                measurement_interval: map
+                    .get("health.hrm.measurement_interval")
+                    .and_then(|value| u8::try_from(value).ok())
+                    .map(|value| match value {
+                        0 => HrmMeasurementInterval::TenMinutes,
+                        1 => HrmMeasurementInterval::ThirtyMinutes,
+                        2 => HrmMeasurementInterval::OneHour,
+                        3 => HrmMeasurementInterval::Off,
+                        other => HrmMeasurementInterval::Unknown(other),
+                    }),
+                during_activity: map
+                    .get("health.hrm.during_activity")
+                    .and_then(|value| bool::try_from(value).ok()),
+            })
+        } else {
+            None
+        };
+        let thresholds_availability = field_availability(map, "health.thresholds.availability");
+        let thresholds = if thresholds_availability == FieldAvailability::Available {
+            Some(HeartRateThresholds {
+                resting: required_u8(map, "health.thresholds.resting")?,
+                elevated: required_u8(map, "health.thresholds.elevated")?,
+                maximum: required_u8(map, "health.thresholds.maximum")?,
+                zone_1: required_u8(map, "health.thresholds.zone1")?,
+                zone_2: required_u8(map, "health.thresholds.zone2")?,
+                zone_3: required_u8(map, "health.thresholds.zone3")?,
+            })
+        } else {
+            None
+        };
+        Some(HealthConfig {
+            height_mm: required_u16(map, "health.height_mm")?,
+            weight_dag: required_u16(map, "health.weight_dag")?,
+            tracking_enabled: required_bool(map, "health.tracking_enabled")?,
+            activity_insights_enabled: required_bool(map, "health.activity_insights_enabled")?,
+            sleep_insights_enabled: required_bool(map, "health.sleep_insights_enabled")?,
+            age: required_u8(map, "health.age")?,
+            gender: required_u8(map, "health.gender")?,
+            distance_units: FieldValue {
+                availability: units_availability,
+                value: distance_units,
+                error: None,
+            },
+            hrm: FieldValue {
+                availability: hrm_availability,
+                value: hrm,
+                error: None,
+            },
+            heart_rate_thresholds: FieldValue {
+                availability: thresholds_availability,
+                value: thresholds,
+                error: None,
+            },
+        })
+    } else {
+        None
+    };
+
+    let mut preferences = BTreeMap::new();
+    for key in map.keys().filter_map(|key| {
+        key.strip_prefix("preference.")?
+            .strip_suffix(".availability")
+    }) {
+        let availability = field_availability(map, &format!("preference.{key}.availability"));
+        let value = map
+            .get(&format!("preference.{key}.value"))
+            .and_then(|value| {
+                if let Ok(value) = bool::try_from(value) {
+                    Some(PreferenceValue::Bool(value))
+                } else if let Ok(value) = u32::try_from(value) {
+                    Some(PreferenceValue::Unsigned(value))
+                } else {
+                    <&str>::try_from(value)
+                        .ok()
+                        .map(|value| PreferenceValue::Text(value.to_owned()))
+                }
+            });
+        let raw = map
+            .get(&format!("preference.{key}.raw"))
+            .and_then(|value| value.try_clone().ok())
+            .and_then(|value| Vec::<u8>::try_from(value).ok())
+            .unwrap_or_default();
+        preferences.insert(
+            key.to_owned(),
+            PreferenceField {
+                availability,
+                value,
+                raw,
+                error: None,
+            },
+        );
+    }
+
+    Ok(DeviceConfigSnapshot {
+        api_version,
+        revision: required_u64(map, "revision")?,
+        state,
+        watch: map
+            .get("watch_id")
+            .and_then(|value| <&str>::try_from(value).ok())
+            .map(|watch_id| WatchIdentity {
+                watch_id: watch_id.to_owned(),
+                display_name: None,
+                platform: map
+                    .get("watch_platform")
+                    .and_then(|value| <&str>::try_from(value).ok())
+                    .map(str::to_owned),
+                firmware: map
+                    .get("watch_firmware")
+                    .and_then(|value| <&str>::try_from(value).ok())
+                    .map(str::to_owned),
+            }),
+        capabilities: DeviceCapabilities {
+            blob_db_version: map
+                .get("blob_db_version")
+                .and_then(|value| u8::try_from(value).ok())
+                .unwrap_or(0),
+            supported: map
+                .iter()
+                .filter_map(|(key, value)| {
+                    (key.starts_with("capability.") && bool::try_from(value).ok() == Some(true))
+                        .then(|| key.trim_start_matches("capability.").to_owned())
+                })
+                .collect(),
+        },
+        last_read_at_ms: map
+            .get("last_read_at_ms")
+            .and_then(|value| i64::try_from(value).ok()),
+        health: FieldValue {
+            availability: activity_availability,
+            value: health,
+            error: None,
+        },
+        preferences,
+        error: device_config_error(map),
+    })
+}
+
+fn encode_daemon_config_patch(patch: DaemonConfigPatch) -> Result<VarDict> {
+    let mut wire = VarDict::new();
+    if let Some(value) = patch.address {
+        wire.insert("address".into(), wire_value(value)?);
+    }
+    if let Some(value) = patch.adapter {
+        wire.insert("adapter".into(), wire_value(value)?);
+    }
+    if let Some(value) = patch.verbose {
+        wire.insert("verbose".into(), wire_value(value)?);
+    }
+    if let Some(value) = patch.database_path {
+        wire.insert(
+            "database_path".into(),
+            wire_value(value.unwrap_or_default())?,
+        );
+    }
+    if let Some(intervals) = patch.intervals_icu {
+        if let Some(value) = intervals.enabled {
+            wire.insert("intervals_enabled".into(), wire_value(value)?);
+        }
+        if let Some(value) = intervals.athlete_id {
+            wire.insert("intervals_athlete_id".into(), wire_value(value)?);
+        }
+        match intervals.api_key {
+            Some(SecretPatch::Replace(value)) => {
+                wire.insert("intervals_api_key_replace".into(), wire_value(value)?);
+            }
+            Some(SecretPatch::Clear) => {
+                wire.insert("intervals_api_key_clear".into(), wire_value(true)?);
+            }
+            None => {}
+        }
+    }
+    Ok(wire)
+}
+
+fn encode_device_config_patch(patch: DeviceConfigPatch) -> Result<VarDict> {
+    let mut wire = VarDict::new();
+    for (key, value) in patch.preferences {
+        let value = match value {
+            PreferenceValue::Bool(value) => wire_value(value)?,
+            PreferenceValue::Unsigned(value) | PreferenceValue::Color(value) => wire_value(value)?,
+            PreferenceValue::Enum { code, .. } => wire_value(code)?,
+            PreferenceValue::Text(value) => wire_value(value)?,
+            PreferenceValue::Unknown => {
+                return Err(Error::Failure(format!(
+                    "cannot write unknown preference {key}"
+                )));
+            }
+        };
+        wire.insert(format!("preference.{key}"), value);
+    }
+    let Some(health) = patch.health else {
+        return Ok(wire);
+    };
+    macro_rules! insert {
+        ($key:literal, $value:expr) => {
+            if let Some(value) = $value {
+                wire.insert($key.into(), wire_value(value)?);
+            }
+        };
+    }
+    insert!("health.height_mm", health.height_mm);
+    insert!("health.weight_dag", health.weight_dag);
+    insert!("health.tracking_enabled", health.tracking_enabled);
+    insert!(
+        "health.activity_insights_enabled",
+        health.activity_insights_enabled
+    );
+    insert!(
+        "health.sleep_insights_enabled",
+        health.sleep_insights_enabled
+    );
+    insert!("health.age", health.age);
+    insert!("health.gender", health.gender);
+    if let Some(units) = health.distance_units {
+        let code = match units {
+            DistanceUnits::Metric => 0,
+            DistanceUnits::Imperial => 1,
+            DistanceUnits::Unknown(code) => code,
+        };
+        wire.insert("health.distance_units".into(), wire_value(code)?);
+    }
+    insert!("health.hrm.enabled", health.hrm_enabled);
+    if let Some(interval) = health.hrm_measurement_interval {
+        let code = match interval {
+            HrmMeasurementInterval::TenMinutes => 0,
+            HrmMeasurementInterval::ThirtyMinutes => 1,
+            HrmMeasurementInterval::OneHour => 2,
+            HrmMeasurementInterval::Off => 3,
+            HrmMeasurementInterval::Unknown(code) => code,
+        };
+        wire.insert("health.hrm.measurement_interval".into(), wire_value(code)?);
+    }
+    insert!("health.hrm.during_activity", health.hrm_during_activity);
+    if let Some(value) = health.heart_rate_thresholds {
+        wire.insert(
+            "health.thresholds.resting".into(),
+            wire_value(value.resting)?,
+        );
+        wire.insert(
+            "health.thresholds.elevated".into(),
+            wire_value(value.elevated)?,
+        );
+        wire.insert(
+            "health.thresholds.maximum".into(),
+            wire_value(value.maximum)?,
+        );
+        wire.insert("health.thresholds.zone1".into(), wire_value(value.zone_1)?);
+        wire.insert("health.thresholds.zone2".into(), wire_value(value.zone_2)?);
+        wire.insert("health.thresholds.zone3".into(), wire_value(value.zone_3)?);
+    }
+    Ok(wire)
+}
 
 /// Extract a string field from an `a{sv}` map, or `""` if absent/not a string.
 fn var_str(map: &VarDict, key: &str) -> String {
@@ -68,6 +512,12 @@ pub enum StatusEvent {
     Battery(i16),
     /// Fresh watch identity info (emitted after the link comes up).
     WatchInfo(WatchInfo),
+    /// The effective daemon configuration or its on-disk error changed.
+    DaemonConfigChanged(u64),
+    DeviceConfigChanged {
+        revision: u64,
+        state: DeviceConfigState,
+    },
 }
 
 /// Typed zbus proxy for `org.cobble.Daemon`.
@@ -98,12 +548,8 @@ pub trait CobbleDaemon {
 
     // ---- Methods ----
 
-    async fn send_app_message(
-        &self,
-        app_uuid: &str,
-        data: WireDict,
-        wait_ack: bool,
-    ) -> Result<u32>;
+    async fn send_app_message(&self, app_uuid: &str, data: WireDict, wait_ack: bool)
+    -> Result<u32>;
 
     async fn launch_app(&self, app_uuid: &str) -> Result<()>;
     async fn stop_app(&self, app_uuid: &str) -> Result<()>;
@@ -111,6 +557,20 @@ pub trait CobbleDaemon {
     async fn notify(&self, title: &str, body: &str, subtitle: &str) -> Result<u32>;
     async fn ping(&self) -> Result<bool>;
     async fn scan(&self, timeout_secs: f64) -> Result<Vec<(String, String)>>;
+    async fn get_daemon_config(&self) -> Result<VarDict>;
+    async fn update_daemon_config(&self, expected_revision: u64, patch: VarDict)
+    -> Result<VarDict>;
+    async fn get_device_config(&self) -> Result<VarDict>;
+    async fn refresh_device_config(&self) -> Result<VarDict>;
+    async fn update_device_config(&self, expected_revision: u64, patch: VarDict)
+    -> Result<VarDict>;
+    async fn reset_device_config_defaults(&self, expected_revision: u64) -> Result<VarDict>;
+
+    #[zbus(signal)]
+    fn daemon_config_changed(&self, revision: u64) -> Result<()>;
+
+    #[zbus(signal)]
+    fn device_config_changed(&self, revision: u64, state: &str) -> Result<()>;
 
     // ---- Health ----
 
@@ -281,7 +741,9 @@ impl CobbleClient {
 
     /// Returns `true` if the daemon is running and the watch BLE link is up.
     pub async fn connected(&self) -> bool {
-        let Ok(proxy) = self.proxy().await else { return false };
+        let Ok(proxy) = self.proxy().await else {
+            return false;
+        };
         proxy.connected().await.unwrap_or(false)
     }
 
@@ -311,7 +773,10 @@ impl CobbleClient {
         data: WireDict,
         wait_ack: bool,
     ) -> Result<u32> {
-        self.proxy().await?.send_app_message(app_uuid, data, wait_ack).await
+        self.proxy()
+            .await?
+            .send_app_message(app_uuid, data, wait_ack)
+            .await
     }
 
     pub async fn launch_app(&self, app_uuid: &str) -> Result<()> {
@@ -338,8 +803,49 @@ impl CobbleClient {
         self.proxy().await?.scan(timeout_secs).await
     }
 
+    pub async fn get_daemon_config(&self) -> Result<DaemonConfigSnapshot> {
+        let map = self.proxy().await?.get_daemon_config().await?;
+        decode_daemon_config(&map)
+    }
+
+    pub async fn update_daemon_config(
+        &self,
+        patch: DaemonConfigPatch,
+    ) -> Result<DaemonConfigUpdate> {
+        let expected_revision = patch.expected_revision;
+        let wire = encode_daemon_config_patch(patch)?;
+        let map = self
+            .proxy()
+            .await?
+            .update_daemon_config(expected_revision, wire)
+            .await?;
+        let snapshot = decode_daemon_config(&map)?;
+        let mut fields = BTreeMap::new();
+        for (key, value) in &map {
+            let Some(field) = key.strip_prefix("apply.") else {
+                continue;
+            };
+            let disposition = match <&str>::try_from(value).ok() {
+                Some("applied_live") => ApplyDisposition::AppliedLive,
+                Some("reconnecting") => ApplyDisposition::Reconnecting,
+                Some("gui_data_source_reopen_required") => {
+                    ApplyDisposition::GuiDataSourceReopenRequired
+                }
+                Some("daemon_restart_required") => ApplyDisposition::DaemonRestartRequired,
+                Some("daemon_and_gui_restart_required") => {
+                    ApplyDisposition::DaemonAndGuiRestartRequired
+                }
+                _ => continue,
+            };
+            fields.insert(field.to_owned(), disposition);
+        }
+        Ok(DaemonConfigUpdate { snapshot, fields })
+    }
+
     // ---- Health ----
 
+    /// Compatibility health activation API. The daemon refreshes current
+    /// settings and applies this as a lossless, confirmed patch.
     pub async fn activate_health(
         &self,
         height_cm: u16,
@@ -377,6 +883,42 @@ impl CobbleClient {
         self.proxy().await?.get_watch_settings().await
     }
 
+    pub async fn get_device_config(&self) -> Result<DeviceConfigSnapshot> {
+        let map = self.proxy().await?.get_device_config().await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn refresh_device_config(&self) -> Result<DeviceConfigSnapshot> {
+        let map = self.proxy().await?.refresh_device_config().await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn update_device_config(
+        &self,
+        patch: DeviceConfigPatch,
+    ) -> Result<DeviceConfigSnapshot> {
+        let expected_revision = patch.expected_revision;
+        let wire = encode_device_config_patch(patch)?;
+        let map = self
+            .proxy()
+            .await?
+            .update_device_config(expected_revision, wire)
+            .await?;
+        decode_device_config(&map)
+    }
+
+    pub async fn reset_device_config_defaults(
+        &self,
+        expected_revision: u64,
+    ) -> Result<DeviceConfigSnapshot> {
+        let map = self
+            .proxy()
+            .await?
+            .reset_device_config_defaults(expected_revision)
+            .await?;
+        decode_device_config(&map)
+    }
+
     pub async fn get_watch_version(&self) -> Result<VarDict> {
         self.proxy().await?.get_watch_version().await
     }
@@ -407,7 +949,14 @@ impl CobbleClient {
     ) -> Result<()> {
         self.proxy()
             .await?
-            .set_music_track(artist, album, title, track_length_ms, track_count, track_number)
+            .set_music_track(
+                artist,
+                album,
+                title,
+                track_length_ms,
+                track_count,
+                track_number,
+            )
             .await
     }
 
@@ -535,7 +1084,7 @@ impl CobbleClient {
     where
         F: FnMut(StatusEvent) + Send,
     {
-        use futures_util::stream::{select_all, StreamExt};
+        use futures_util::stream::{StreamExt, select_all};
 
         let proxy = self.proxy().await?;
 
@@ -545,10 +1094,10 @@ impl CobbleClient {
         if running {
             let connected = proxy.connected().await.unwrap_or(false);
             on_event(StatusEvent::Connected(connected));
-            on_event(StatusEvent::Battery(proxy.battery_level().await.unwrap_or(-1)));
-            if connected
-                && let Ok(info) = self.get_watch_info().await
-            {
+            on_event(StatusEvent::Battery(
+                proxy.battery_level().await.unwrap_or(-1),
+            ));
+            if connected && let Ok(info) = self.get_watch_info().await {
                 on_event(StatusEvent::WatchInfo(info));
             }
         }
@@ -564,14 +1113,45 @@ impl CobbleClient {
         let conn = proxy
             .receive_connection_changed()
             .await?
-            .filter_map(|s| async move { s.args().ok().map(|a| StatusEvent::Connected(a.connected)) })
+            .filter_map(
+                |s| async move { s.args().ok().map(|a| StatusEvent::Connected(a.connected)) },
+            )
             .boxed();
         let batt = proxy
             .receive_battery_changed()
             .await?
             .filter_map(|s| async move { s.args().ok().map(|a| StatusEvent::Battery(a.level)) })
             .boxed();
-        let mut events = select_all([owner, conn, batt]);
+        let config = proxy
+            .receive_daemon_config_changed()
+            .await?
+            .filter_map(|s| async move {
+                s.args()
+                    .ok()
+                    .map(|a| StatusEvent::DaemonConfigChanged(a.revision))
+            })
+            .boxed();
+        let device_config = proxy
+            .receive_device_config_changed()
+            .await?
+            .filter_map(|s| async move {
+                let args = s.args().ok()?;
+                let state = match args.state {
+                    "disconnected" => DeviceConfigState::Disconnected,
+                    "loading" => DeviceConfigState::Loading,
+                    "ready" => DeviceConfigState::Ready,
+                    "partial" => DeviceConfigState::Partial,
+                    "error" => DeviceConfigState::Error,
+                    "unsupported" => DeviceConfigState::Unsupported,
+                    _ => return None,
+                };
+                Some(StatusEvent::DeviceConfigChanged {
+                    revision: args.revision,
+                    state,
+                })
+            })
+            .boxed();
+        let mut events = select_all([owner, conn, batt, config, device_config]);
 
         while let Some(ev) = events.next().await {
             on_event(ev.clone());
@@ -580,10 +1160,10 @@ impl CobbleClient {
                 StatusEvent::DaemonRunning(true) => {
                     let connected = proxy.connected().await.unwrap_or(false);
                     on_event(StatusEvent::Connected(connected));
-                    on_event(StatusEvent::Battery(proxy.battery_level().await.unwrap_or(-1)));
-                    if connected
-                        && let Ok(info) = self.get_watch_info().await
-                    {
+                    on_event(StatusEvent::Battery(
+                        proxy.battery_level().await.unwrap_or(-1),
+                    ));
+                    if connected && let Ok(info) = self.get_watch_info().await {
                         on_event(StatusEvent::WatchInfo(info));
                     }
                 }
@@ -601,5 +1181,62 @@ impl CobbleClient {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_database_path_uses_configured_value() {
+        let path = std::env::temp_dir().join(format!(
+            "cobble-client-config-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, "db = '/tmp/custom-cobbled.db'\n").unwrap();
+        let resolved = database_path_from_config(&path, PathBuf::from("/tmp/default.db")).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/custom-cobbled.db"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn device_config_decoder_keeps_missing_health_absent() {
+        let map = HashMap::from([
+            (
+                "api_version".into(),
+                wire_value(DEVICE_CONFIG_API_VERSION).unwrap(),
+            ),
+            ("revision".into(), wire_value(3_u64).unwrap()),
+            ("state".into(), wire_value("loading").unwrap()),
+            ("blob_db_version".into(), wire_value(1_u8).unwrap()),
+            (
+                "capability.complete_refresh".into(),
+                wire_value(true).unwrap(),
+            ),
+            (
+                "health.activity.availability".into(),
+                wire_value("not_received").unwrap(),
+            ),
+            (
+                "health.hrm.availability".into(),
+                wire_value("not_received").unwrap(),
+            ),
+            (
+                "health.thresholds.availability".into(),
+                wire_value("not_received").unwrap(),
+            ),
+            (
+                "health.units.availability".into(),
+                wire_value("not_received").unwrap(),
+            ),
+        ]);
+
+        let snapshot = decode_device_config(&map).unwrap();
+        assert_eq!(snapshot.state, DeviceConfigState::Loading);
+        assert_eq!(snapshot.health.availability, FieldAvailability::NotReceived);
+        assert!(snapshot.health.value.is_none());
+        assert!(snapshot.capabilities.supported.contains("complete_refresh"));
     }
 }

@@ -49,19 +49,66 @@ pub struct ActivityPreferences {
     pub gender: u8,
 }
 
-/// Decode a 9-byte "activityPreferences" blob into an [`ActivityPreferences`].
-///
-/// Returns `None` if the blob is shorter than 9 bytes. Trailing bytes beyond
-/// the 9th are ignored so a longer firmware blob still parses.
-pub fn parse_activity_preferences(blob: &[u8]) -> Option<ActivityPreferences> {
+/// Lossless writable form of the activity-preferences record in native wire
+/// units. This is separate from the legacy centimetre/kilogram compatibility
+/// decoder above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthActivityConfig {
+    pub height_mm: u16,
+    pub weight_dag: u16,
+    pub tracking_enabled: bool,
+    pub activity_insights_enabled: bool,
+    pub sleep_insights_enabled: bool,
+    pub age: u8,
+    pub gender: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HealthConfigError {
+    #[error("height must be between 1000 and 2200 mm")]
+    Height,
+    #[error("weight must be between 3000 and 20000 dag")]
+    Weight,
+    #[error("age must be between 1 and 120")]
+    Age,
+    #[error("gender must be Female (0), Male (1), or Other (2)")]
+    Gender,
+}
+
+pub fn encode_activity_preferences(
+    config: &HealthActivityConfig,
+) -> Result<Vec<u8>, HealthConfigError> {
+    if !(1000..=2200).contains(&config.height_mm) {
+        return Err(HealthConfigError::Height);
+    }
+    if !(3000..=20_000).contains(&config.weight_dag) {
+        return Err(HealthConfigError::Weight);
+    }
+    if !(1..=120).contains(&config.age) {
+        return Err(HealthConfigError::Age);
+    }
+    if config.gender > 2 {
+        return Err(HealthConfigError::Gender);
+    }
+    let mut blob = Vec::with_capacity(9);
+    blob.extend_from_slice(&config.height_mm.to_le_bytes());
+    blob.extend_from_slice(&config.weight_dag.to_le_bytes());
+    blob.push(u8::from(config.tracking_enabled));
+    blob.push(u8::from(config.activity_insights_enabled));
+    blob.push(u8::from(config.sleep_insights_enabled));
+    blob.push(config.age);
+    blob.push(config.gender);
+    Ok(blob)
+}
+
+/// Losslessly decode a 9-byte "activityPreferences" blob in native wire units.
+pub fn parse_health_activity_config(blob: &[u8]) -> Option<HealthActivityConfig> {
     if blob.len() < 9 {
         return None;
     }
-    let height_mm = u16::from_le_bytes([blob[0], blob[1]]);
-    let weight_dag = u16::from_le_bytes([blob[2], blob[3]]);
-    Some(ActivityPreferences {
-        height_cm: height_mm / 10,  // stored in mm
-        weight_kg: weight_dag / 100, // stored in decagrams
+    Some(HealthActivityConfig {
+        height_mm: u16::from_le_bytes([blob[0], blob[1]]),
+        weight_dag: u16::from_le_bytes([blob[2], blob[3]]),
         tracking_enabled: blob[4] != 0,
         activity_insights_enabled: blob[5] != 0,
         sleep_insights_enabled: blob[6] != 0,
@@ -70,11 +117,32 @@ pub fn parse_activity_preferences(blob: &[u8]) -> Option<ActivityPreferences> {
     })
 }
 
+/// Decode a 9-byte "activityPreferences" blob into the legacy whole-unit model.
+///
+/// Returns `None` if the blob is shorter than 9 bytes. Trailing bytes beyond
+/// the 9th are ignored so a longer firmware blob still parses.
+pub fn parse_activity_preferences(blob: &[u8]) -> Option<ActivityPreferences> {
+    let config = parse_health_activity_config(blob)?;
+    Some(ActivityPreferences {
+        height_cm: config.height_mm / 10,
+        weight_kg: config.weight_dag / 100,
+        tracking_enabled: config.tracking_enabled,
+        activity_insights_enabled: config.activity_insights_enabled,
+        sleep_insights_enabled: config.sleep_insights_enabled,
+        age: config.age,
+        gender: config.gender,
+    })
+}
+
 /// Decode a "unitsDistance" blob (libpebble3 `DistanceUnitsBlobItem`): one byte.
 /// Returns `Some(true)` for imperial units (mi/lb), `Some(false)` for metric
 /// (km/kg), or `None` if empty.
 pub fn parse_units_distance(blob: &[u8]) -> Option<bool> {
     blob.first().map(|&b| b != 0)
+}
+
+pub fn encode_units_distance(imperial: bool) -> Vec<u8> {
+    vec![u8::from(imperial)]
 }
 
 /// Heart-rate monitoring interval (libpebble3 `HRMonitoringInterval`).
@@ -140,6 +208,24 @@ pub fn build_hrm_blob(enabled: bool) -> Vec<u8> {
     vec![if enabled { 0x01 } else { 0x00 }]
 }
 
+/// Encode the firmware-sized ActivityHRMSettings record. Firmware before
+/// 4.9.146 accepts one byte, 4.9.146–149 accepts two, and 4.9.150+ accepts three.
+pub fn encode_hrm_preferences(
+    enabled: bool,
+    measurement_interval: HrMonitoringInterval,
+    activity_tracking_enabled: bool,
+    firmware: (u8, u8, u16),
+) -> Vec<u8> {
+    let mut blob = vec![u8::from(enabled)];
+    if firmware >= (4, 9, 146) {
+        blob.push(measurement_interval.code());
+    }
+    if firmware >= (4, 9, 150) {
+        blob.push(u8::from(activity_tracking_enabled));
+    }
+    blob
+}
+
 /// Decoded "heartRatePreferences" blob (libpebble3 `HeartRatePreferencesBlobItem`):
 /// six little-endian `u8` BPM/threshold values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +253,17 @@ pub fn parse_heart_rate_preferences(blob: &[u8]) -> Option<HeartRatePreferences>
     })
 }
 
+pub fn encode_heart_rate_preferences(config: &HeartRatePreferences) -> Vec<u8> {
+    vec![
+        config.resting_hr,
+        config.elevated_hr,
+        config.max_hr,
+        config.zone1_threshold,
+        config.zone2_threshold,
+        config.zone3_threshold,
+    ]
+}
+
 /// Health sync request command (phone → watch, endpoint 911).
 pub const HEALTH_SYNC_CMD_SYNC: u8 = 0x01;
 /// Health sync ACK command (watch → phone, endpoint 911).
@@ -186,6 +283,24 @@ pub fn build_health_sync_request() -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn canonical_fixture(record: &str, variant: &str) -> Vec<u8> {
+        let line = include_str!("../../tests/fixtures/health_canonical.tsv")
+            .lines()
+            .find(|line| {
+                let mut columns = line.split_ascii_whitespace();
+                columns.next() == Some(record) && columns.next() == Some(variant)
+            })
+            .expect("canonical health fixture");
+        let hex = line.split_ascii_whitespace().nth(2).expect("fixture hex");
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
+                    .expect("valid fixture hex")
+            })
+            .collect()
+    }
+
     #[test]
     fn activity_preferences_round_trips() {
         let blob = build_activate_health_blob(180, 75, 30, 1);
@@ -197,6 +312,81 @@ mod tests {
         assert!(prefs.tracking_enabled);
         assert!(!prefs.activity_insights_enabled);
         assert!(!prefs.sleep_insights_enabled);
+
+        let precise = HealthActivityConfig {
+            height_mm: 1805,
+            weight_dag: 7555,
+            tracking_enabled: true,
+            activity_insights_enabled: true,
+            sleep_insights_enabled: false,
+            age: 30,
+            gender: 1,
+        };
+        let precise_blob = encode_activity_preferences(&precise).expect("encodes");
+        assert_eq!(parse_health_activity_config(&precise_blob), Some(precise));
+    }
+
+    #[test]
+    fn canonical_activity_and_units_fixtures_decode() {
+        let raw = canonical_fixture("activityPreferences", "defaults");
+        let activity = parse_activity_preferences(&raw).expect("decodes");
+        assert_eq!(activity.height_cm, 170);
+        assert_eq!(activity.weight_kg, 70);
+        assert_eq!(activity.age, 35);
+        assert_eq!(
+            encode_activity_preferences(&HealthActivityConfig {
+                height_mm: 1700,
+                weight_dag: 7000,
+                tracking_enabled: false,
+                activity_insights_enabled: false,
+                sleep_insights_enabled: false,
+                age: 35,
+                gender: 0,
+            })
+            .expect("encodes"),
+            raw
+        );
+        assert_eq!(
+            parse_units_distance(&canonical_fixture("unitsDistance", "metric")),
+            Some(false)
+        );
+        assert_eq!(
+            parse_units_distance(&canonical_fixture("unitsDistance", "imperial")),
+            Some(true)
+        );
+        assert_eq!(
+            encode_units_distance(false),
+            canonical_fixture("unitsDistance", "metric")
+        );
+        assert_eq!(
+            encode_units_distance(true),
+            canonical_fixture("unitsDistance", "imperial")
+        );
+    }
+
+    #[test]
+    fn native_activity_validation_rejects_out_of_range_values() {
+        let valid = HealthActivityConfig {
+            height_mm: 1700,
+            weight_dag: 7000,
+            tracking_enabled: true,
+            activity_insights_enabled: true,
+            sleep_insights_enabled: true,
+            age: 35,
+            gender: 2,
+        };
+        assert!(encode_activity_preferences(&valid).is_ok());
+        assert_eq!(
+            encode_activity_preferences(&HealthActivityConfig {
+                height_mm: 999,
+                ..valid
+            }),
+            Err(HealthConfigError::Height)
+        );
+        assert_eq!(
+            encode_activity_preferences(&HealthActivityConfig { gender: 3, ..valid }),
+            Err(HealthConfigError::Gender)
+        );
     }
 
     #[test]
@@ -206,31 +396,52 @@ mod tests {
 
     #[test]
     fn hrm_preferences_decodes() {
-        // 1-byte legacy blob: only `enabled`.
-        let one = parse_hrm_preferences(&build_hrm_blob(true)).expect("decodes");
+        let one = parse_hrm_preferences(&canonical_fixture("hrmPreferences", "pre-4.9.146"))
+            .expect("decodes");
         assert!(one.enabled);
         assert_eq!(one.measurement_interval, None);
         assert_eq!(one.activity_tracking_enabled, None);
 
-        // 3-byte blob observed from the watch: [enabled, interval=TenMin, activity=true].
-        let three = parse_hrm_preferences(&[1, 0, 1]).expect("decodes");
+        // Canonical current-firmware shape: enabled, interval, activity tracking.
+        let three = parse_hrm_preferences(&canonical_fixture("hrmPreferences", "4.9.150+"))
+            .expect("decodes");
         assert!(three.enabled);
-        assert_eq!(three.measurement_interval, Some(HrMonitoringInterval::TenMin));
+        assert_eq!(
+            three.measurement_interval,
+            Some(HrMonitoringInterval::ThirtyMin)
+        );
         assert_eq!(three.activity_tracking_enabled, Some(true));
 
         assert_eq!(parse_hrm_preferences(&[]), None);
+        assert_eq!(
+            encode_hrm_preferences(true, HrMonitoringInterval::ThirtyMin, true, (4, 9, 145)),
+            canonical_fixture("hrmPreferences", "pre-4.9.146")
+        );
+        assert_eq!(
+            encode_hrm_preferences(true, HrMonitoringInterval::ThirtyMin, true, (4, 9, 146)),
+            canonical_fixture("hrmPreferences", "4.9.146..4.9.149")
+        );
+        assert_eq!(
+            encode_hrm_preferences(true, HrMonitoringInterval::ThirtyMin, true, (4, 9, 150)),
+            canonical_fixture("hrmPreferences", "4.9.150+")
+        );
     }
 
     #[test]
     fn heart_rate_preferences_decodes() {
-        // Real value read from the watch (libpebble3 defaults).
-        let hr = parse_heart_rate_preferences(&[70, 100, 190, 130, 154, 172]).expect("decodes");
+        let hr =
+            parse_heart_rate_preferences(&canonical_fixture("heartRatePreferences", "defaults"))
+                .expect("decodes");
         assert_eq!(hr.resting_hr, 70);
         assert_eq!(hr.elevated_hr, 100);
         assert_eq!(hr.max_hr, 190);
         assert_eq!(hr.zone1_threshold, 130);
         assert_eq!(hr.zone2_threshold, 154);
         assert_eq!(hr.zone3_threshold, 172);
+        assert_eq!(
+            encode_heart_rate_preferences(&hr),
+            canonical_fixture("heartRatePreferences", "defaults")
+        );
         assert!(parse_heart_rate_preferences(&[1, 2, 3, 4, 5]).is_none());
     }
 }

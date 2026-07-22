@@ -15,7 +15,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
-use zbus::{zvariant::OwnedValue, Connection, MessageStream};
+use zbus::{Connection, MessageStream, zvariant::OwnedValue};
 
 use crate::service::CobbleDaemon;
 
@@ -35,7 +35,11 @@ pub struct MprisMonitor {
 impl MprisMonitor {
     pub async fn new(daemon: CobbleDaemon) -> anyhow::Result<Self> {
         let conn = Connection::session().await?;
-        Ok(Self { daemon, conn, active: Arc::new(Mutex::new(None)) })
+        Ok(Self {
+            daemon,
+            conn,
+            active: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Start watching for MPRIS players.  Blocks forever — spawn in a
@@ -55,14 +59,26 @@ impl MprisMonitor {
         while let Some(msg) = stream.next().await {
             let msg = match msg {
                 Ok(m) => m,
-                Err(e) => { debug!("mpris: stream error: {e}"); continue; }
+                Err(e) => {
+                    debug!("mpris: stream error: {e}");
+                    continue;
+                }
             };
             let hdr = msg.header();
-            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus") { continue; }
-            if hdr.member().map(|m| m.as_str()) != Some("NameOwnerChanged") { continue; }
+            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus") {
+                continue;
+            }
+            if hdr.member().map(|m| m.as_str()) != Some("NameOwnerChanged") {
+                continue;
+            }
             let body = msg.body();
-            let Ok((name, old_owner, new_owner)) = body.deserialize::<(String, String, String)>() else { continue; };
-            if !name.starts_with("org.mpris.MediaPlayer2.") { continue; }
+            let Ok((name, old_owner, new_owner)) = body.deserialize::<(String, String, String)>()
+            else {
+                continue;
+            };
+            if !name.starts_with("org.mpris.MediaPlayer2.") {
+                continue;
+            }
 
             if !old_owner.is_empty() {
                 debug!("mpris: player {name} disappeared");
@@ -94,8 +110,14 @@ impl MprisMonitor {
 
         // Volume controls the system sink — no active player needed.
         match action {
-            "volume_up" => { adjust_system_volume(5).await; return; }
-            "volume_down" => { adjust_system_volume(-5).await; return; }
+            "volume_up" => {
+                adjust_system_volume(5).await;
+                return;
+            }
+            "volume_down" => {
+                adjust_system_volume(-5).await;
+                return;
+            }
             _ => {}
         }
 
@@ -135,12 +157,20 @@ impl MprisMonitor {
     {
         let reply = self
             .conn
-            .call_method(Some(bus), "/org/mpris/MediaPlayer2", Some("org.freedesktop.DBus.Properties"), "Get", &(iface, prop))
+            .call_method(
+                Some(bus),
+                "/org/mpris/MediaPlayer2",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &(iface, prop),
+            )
             .await
             .ok()?;
         let body = reply.body();
         let v: zbus::zvariant::Value<'_> = body.deserialize().ok()?;
-        OwnedValue::try_from(v).ok().and_then(|ov| T::try_from(ov).ok())
+        OwnedValue::try_from(v)
+            .ok()
+            .and_then(|ov| T::try_from(ov).ok())
     }
 
     // ------------------------------------------------------------------
@@ -150,14 +180,24 @@ impl MprisMonitor {
     async fn list_players(&self) -> zbus::Result<Vec<String>> {
         let reply = self
             .conn
-            .call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "ListNames", &())
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "ListNames",
+                &(),
+            )
             .await?;
         let names: Vec<String> = reply.body().deserialize()?;
-        Ok(names.into_iter().filter(|n| n.starts_with("org.mpris.MediaPlayer2.")).collect())
+        Ok(names
+            .into_iter()
+            .filter(|n| n.starts_with("org.mpris.MediaPlayer2."))
+            .collect())
     }
 
     async fn read_identity(&self, bus_name: &str) -> Option<String> {
-        self.get_prop::<String>(bus_name, "org.mpris.MediaPlayer2", "Identity").await
+        self.get_prop::<String>(bus_name, "org.mpris.MediaPlayer2", "Identity")
+            .await
     }
 
     async fn read_player_state(&self, bus_name: &str) -> Option<PlayerState> {
@@ -167,7 +207,11 @@ impl MprisMonitor {
             .map(|s| s == "Playing")
             .unwrap_or(false);
         let identity = self.read_identity(bus_name).await.unwrap_or_default();
-        Some(PlayerState { bus_name: bus_name.to_string(), identity, playing })
+        Some(PlayerState {
+            bus_name: bus_name.to_string(),
+            identity,
+            playing,
+        })
     }
 
     async fn track_player(self: &Arc<Self>, bus_name: String) {
@@ -213,26 +257,78 @@ impl MprisMonitor {
         let artist = owned_str(meta.get("xesam:artist"));
         let album = owned_str(meta.get("xesam:album"));
         let title = owned_str(meta.get("xesam:title"));
-        let length_us: i64 = meta.get("mpris:length").and_then(|v| v.downcast_ref::<i64>().ok()).unwrap_or(0).max(0);
+        let length_us: i64 = meta
+            .get("mpris:length")
+            .and_then(|v| v.downcast_ref::<i64>().ok())
+            .unwrap_or(0)
+            .max(0);
         let track_length_ms = (length_us / 1000).min(u32::MAX as i64) as u32;
-        let track_number: i32 = meta.get("xesam:trackNumber").and_then(|v| v.downcast_ref::<i32>().ok()).unwrap_or(0);
+        let track_number: i32 = meta
+            .get("xesam:trackNumber")
+            .and_then(|v| v.downcast_ref::<i32>().ok())
+            .unwrap_or(0);
         let track_number = track_number.max(0) as u32;
 
         if !artist.is_empty() || !title.is_empty() {
-            let _ = self.daemon.set_music_track(artist, album, title, track_length_ms, 0, track_number).await;
+            let _ = self
+                .daemon
+                .set_music_track(artist, album, title, track_length_ms, 0, track_number)
+                .await;
         }
 
-        let status: String = self.get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "PlaybackStatus").await.unwrap_or_default();
+        let status: String = self
+            .get_prop(
+                &state.bus_name,
+                "org.mpris.MediaPlayer2.Player",
+                "PlaybackStatus",
+            )
+            .await
+            .unwrap_or_default();
         // Daemon contract: 0=paused 1=playing 2=rewinding 3=ffwd 4=unknown
-        let play_state = match status.as_str() { "Playing" => 1u8, "Paused" => 0u8, _ => 4u8 };
-        let position_us: i64 = self.get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Position").await.unwrap_or(0).max(0);
+        let play_state = match status.as_str() {
+            "Playing" => 1u8,
+            "Paused" => 0u8,
+            _ => 4u8,
+        };
+        let position_us: i64 = self
+            .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Position")
+            .await
+            .unwrap_or(0)
+            .max(0);
         let position_ms = (position_us / 1000).min(u32::MAX as i64) as u32;
-        let rate: f64 = self.get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Rate").await.unwrap_or(1.0);
-        let shuffle: bool = self.get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Shuffle").await.unwrap_or(false);
+        let rate: f64 = self
+            .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Rate")
+            .await
+            .unwrap_or(1.0);
+        let shuffle: bool = self
+            .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Shuffle")
+            .await
+            .unwrap_or(false);
         let shuffle_u8 = if shuffle { 2u8 } else { 1u8 };
-        let loop_status: String = self.get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "LoopStatus").await.unwrap_or_default();
-        let repeat = match loop_status.as_str() { "None" => 1u8, "Track" => 2u8, "Playlist" => 3u8, _ => 0u8 };
-        let _ = self.daemon.set_music_playback_state(play_state, position_ms, (rate * 100.0) as u32, shuffle_u8, repeat).await;
+        let loop_status: String = self
+            .get_prop(
+                &state.bus_name,
+                "org.mpris.MediaPlayer2.Player",
+                "LoopStatus",
+            )
+            .await
+            .unwrap_or_default();
+        let repeat = match loop_status.as_str() {
+            "None" => 1u8,
+            "Track" => 2u8,
+            "Playlist" => 3u8,
+            _ => 0u8,
+        };
+        let _ = self
+            .daemon
+            .set_music_playback_state(
+                play_state,
+                position_ms,
+                (rate * 100.0) as u32,
+                shuffle_u8,
+                repeat,
+            )
+            .await;
 
         if let Some(volume) = get_system_volume().await {
             let _ = self.daemon.set_music_volume(volume).await;
@@ -240,17 +336,29 @@ impl MprisMonitor {
     }
 
     async fn read_metadata(&self, state: &PlayerState) -> HashMap<String, OwnedValue> {
-        let reply = match self.conn.call_method(
-            Some(state.bus_name.as_str()), "/org/mpris/MediaPlayer2",
-            Some("org.freedesktop.DBus.Properties"), "Get",
-            &("org.mpris.MediaPlayer2.Player", "Metadata"),
-        ).await {
+        let reply = match self
+            .conn
+            .call_method(
+                Some(state.bus_name.as_str()),
+                "/org/mpris/MediaPlayer2",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.mpris.MediaPlayer2.Player", "Metadata"),
+            )
+            .await
+        {
             Ok(r) => r,
             Err(_) => return HashMap::new(),
         };
         let body = reply.body();
-        let v: zbus::zvariant::Value<'_> = match body.deserialize() { Ok(v) => v, Err(_) => return HashMap::new() };
-        let ov = match OwnedValue::try_from(v) { Ok(ov) => ov, Err(_) => return HashMap::new() };
+        let v: zbus::zvariant::Value<'_> = match body.deserialize() {
+            Ok(v) => v,
+            Err(_) => return HashMap::new(),
+        };
+        let ov = match OwnedValue::try_from(v) {
+            Ok(ov) => ov,
+            Err(_) => return HashMap::new(),
+        };
         HashMap::<String, OwnedValue>::try_from(ov).unwrap_or_default()
     }
 
@@ -268,14 +376,25 @@ impl MprisMonitor {
         debug!("mpris: listening for PropertiesChanged from {bus_name} ({unique})");
         let mut stream = MessageStream::from(&self.conn);
         while let Some(msg) = stream.next().await {
-            let msg = match msg { Ok(m) => m, Err(_) => continue };
+            let msg = match msg {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
             let hdr = msg.header();
-            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus.Properties") { continue; }
-            if hdr.member().map(|m| m.as_str()) != Some("PropertiesChanged") { continue; }
-            if hdr.path().map(|p| p.as_str()) != Some("/org/mpris/MediaPlayer2") { continue; }
+            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus.Properties") {
+                continue;
+            }
+            if hdr.member().map(|m| m.as_str()) != Some("PropertiesChanged") {
+                continue;
+            }
+            if hdr.path().map(|p| p.as_str()) != Some("/org/mpris/MediaPlayer2") {
+                continue;
+            }
             // Verify the sender against the resolved unique name so we don't
             // process another player's signals in this listener.
-            if hdr.sender().map(|s| s.as_str()) != Some(&unique) { continue; }
+            if hdr.sender().map(|s| s.as_str()) != Some(&unique) {
+                continue;
+            }
 
             debug!("mpris: PropertiesChanged from {bus_name}");
             if let Some(state) = self.read_player_state(bus_name).await {
@@ -329,17 +448,35 @@ async fn resolve_name(conn: &Connection, well_known: &str) -> Option<String> {
 }
 
 async fn add_match(conn: &Connection, rule: &str) -> zbus::Result<()> {
-    conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "AddMatch", &(rule,)).await.map(|_| ())
+    conn.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "AddMatch",
+        &(rule,),
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn call_method(conn: &Connection, bus: &str, path: &str, iface: &str, method: &str) {
-    let _ = conn.call_method(Some(bus), path, Some(iface), method, &()).await;
+    let _ = conn
+        .call_method(Some(bus), path, Some(iface), method, &())
+        .await;
 }
 
 fn owned_str(v_opt: Option<&OwnedValue>) -> String {
-    let v = match v_opt { Some(v) => v, None => return String::new() };
-    if let Ok(s) = v.downcast_ref::<String>() { return s; }
-    let arr: Vec<String> = match v.clone().try_into() { Ok(a) => a, Err(_) => return String::new() };
+    let v = match v_opt {
+        Some(v) => v,
+        None => return String::new(),
+    };
+    if let Ok(s) = v.downcast_ref::<String>() {
+        return s;
+    }
+    let arr: Vec<String> = match v.clone().try_into() {
+        Ok(a) => a,
+        Err(_) => return String::new(),
+    };
     arr.into_iter().next().unwrap_or_default()
 }
 
@@ -375,7 +512,10 @@ async fn try_pactl_set_volume(step: &str) -> std::io::Result<()> {
         .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        debug!("mpris: pactl set-sink-volume {step} failed: {}", stderr.trim());
+        debug!(
+            "mpris: pactl set-sink-volume {step} failed: {}",
+            stderr.trim()
+        );
         return Err(std::io::Error::other(stderr.into_owned()));
     }
     trace!("mpris: pactl set-sink-volume {step} ok");

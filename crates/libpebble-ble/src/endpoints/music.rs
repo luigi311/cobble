@@ -203,7 +203,9 @@ mod tests {
         let p = build_update_current_track("A", "B", "C", Some(10), Some(20), Some(30));
         assert_eq!(
             p,
-            vec![0x10, 1, 65, 1, 66, 1, 67, 10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0],
+            vec![
+                0x10, 1, 65, 1, 66, 1, 67, 10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0
+            ],
         );
     }
 
@@ -238,7 +240,10 @@ mod tests {
     #[test]
     fn parse_inbound_actions() {
         assert_eq!(parse_music_command(&[0x03]), Some(MusicAction::Play));
-        assert_eq!(parse_music_command(&[0x08]), Some(MusicAction::GetCurrentTrack));
+        assert_eq!(
+            parse_music_command(&[0x08]),
+            Some(MusicAction::GetCurrentTrack)
+        );
         assert_eq!(parse_music_command(&[0x10]), None); // an Update* command
         assert_eq!(parse_music_command(&[]), None);
         assert_eq!(parse_music_command(&[0x03, 0x00]), None); // trailing bytes rejected

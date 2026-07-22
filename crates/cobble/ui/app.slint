@@ -5,8 +5,8 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, WatchDevice, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
-import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl } from "widgets.slint";
+import { DaySteps, SleepBar, HealthSession, WatchDevice, DeviceConfigEntry, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
+import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl, ErrorBanner, LoadingBanner, EnumSetting, NumericSetting } from "widgets.slint";
 import { StepsChart, SleepChart, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
@@ -14,6 +14,8 @@ export component AppWindow inherits Window {
     background: Palette.bg;
     preferred-width: 400px;
     preferred-height: 780px;
+    min-width: 320px;
+    min-height: 480px;
 
     // ── Status ──
     in property <bool> daemon-running: false;
@@ -55,7 +57,7 @@ export component AppWindow inherits Window {
     in property <string> heart-trend-min-label;
     in property <bool> heart-trend-has-data: false;
 
-    // ── Config ──
+    // ── Daemon Config ──
     in-out property <string> cfg-address;
     in-out property <string> cfg-adapter: "hci0";
     in-out property <bool>   cfg-verbose: false;
@@ -73,8 +75,103 @@ export component AppWindow inherits Window {
     in property <string> cfg-intervals-status;
     in property <bool> cfg-intervals-status-error: false;
     in property <string> save-status: "";
+    in property <bool> save-status-error: false;
     in property <[WatchDevice]> scan-results;
     in property <bool> scan-in-progress: false;
+
+    // ── Device Config staged health editor ──
+    in property <string> dc-state: "disconnected";
+    in property <string> dc-status: "Connect a watch to inspect its settings.";
+    in property <bool> dc-status-error: false;
+    in property <bool> dc-loading: false;
+    in property <string> dc-watch-id;
+    in property <string> dc-platform;
+    in property <string> dc-firmware;
+    in property <string> dc-last-read;
+    in property <string> dc-height;
+    in property <string> dc-weight;
+    in property <string> dc-age;
+    in property <string> dc-sex;
+    in property <string> dc-tracking;
+    in property <string> dc-insights;
+    in property <string> dc-units;
+    in property <string> dc-hrm;
+    in property <[DeviceConfigEntry]> dc-preferences;
+    in-out property <int> dc-height-mm;
+    in-out property <int> dc-weight-dag;
+    in-out property <int> dc-age-value;
+    in-out property <int> dc-gender-index;
+    in-out property <bool> dc-tracking-value;
+    in-out property <bool> dc-activity-insights-value;
+    in-out property <bool> dc-sleep-insights-value;
+    in-out property <int> dc-units-index;
+    in-out property <bool> dc-hrm-enabled-value;
+    in-out property <int> dc-hrm-interval-index;
+    in-out property <bool> dc-hrm-during-activity-value;
+    in property <bool> dc-health-available: false;
+    in property <bool> dc-units-available: false;
+    in property <bool> dc-hrm-available: false;
+    in property <bool> dc-hrm-interval-available: false;
+    in property <bool> dc-hrm-during-activity-available: false;
+    in property <string> dc-height-display;
+    in property <string> dc-weight-display;
+    in-out property <bool> dc-dirty: false;
+    in-out property <bool> dc-applying: false;
+    in property <bool> dc-clock-24h-available: false;
+    in-out property <bool> dc-clock-24h-value;
+    in property <bool> dc-timezone-manual-available: false;
+    in-out property <bool> dc-timezone-manual-value;
+    in property <bool> dc-stationary-mode-available: false;
+    in-out property <bool> dc-stationary-mode-value;
+    in property <bool> dc-left-handed-available: false;
+    in-out property <bool> dc-left-handed-value;
+    in property <bool> dc-text-size-available: false;
+    in-out property <int> dc-text-size-index: 1;
+    in property <bool> dc-light-enabled-available; in-out property <bool> dc-light-enabled-value;
+    in property <bool> dc-light-ambient-available; in-out property <bool> dc-light-ambient-value;
+    in property <bool> dc-light-motion-available; in-out property <bool> dc-light-motion-value;
+    in property <bool> dc-light-timeout-available; in-out property <int> dc-light-timeout-ms: 3000;
+    in property <bool> dc-light-touch-available; in-out property <int> dc-light-touch-index;
+    in property <bool> dc-light-intensity-available; in-out property <int> dc-light-intensity-index: 1;
+    in property <bool> dc-light-dynamic-legacy-available; in-out property <bool> dc-light-dynamic-legacy-value;
+    in property <bool> dc-light-preset-available; in-out property <int> dc-light-preset-index: 1;
+    in property <bool> dc-light-dynamic-mode-available; in-out property <int> dc-light-dynamic-mode-index: 2;
+    in property <bool> dc-menu-wrap-available; in-out property <bool> dc-menu-wrap-value;
+    in property <bool> dc-menu-vibe-available; in-out property <int> dc-menu-vibe-index;
+    in property <bool> dc-notif-filter-available; in-out property <int> dc-notif-filter-index;
+    in property <bool> dc-notif-design-available; in-out property <bool> dc-notif-design-value;
+    in property <bool> dc-notif-delay-available; in-out property <bool> dc-notif-delay-value;
+    in property <bool> dc-notif-backlight-available; in-out property <bool> dc-notif-backlight-value;
+    in property <bool> dc-notif-timeout-available; in-out property <int> dc-notif-timeout-ms: 180000;
+    in property <bool> dc-vibe-intensity-available; in-out property <int> dc-vibe-intensity-index: 2;
+    in property <bool> dc-vibe-notifications-available; in-out property <int> dc-vibe-notifications-index;
+    in property <bool> dc-vibe-calls-available; in-out property <int> dc-vibe-calls-index;
+    in property <bool> dc-vibe-alarms-available; in-out property <int> dc-vibe-alarms-index;
+    in property <bool> dc-dnd-manual-available; in-out property <bool> dc-dnd-manual-value;
+    in property <bool> dc-dnd-smart-available; in-out property <bool> dc-dnd-smart-value;
+    in property <bool> dc-dnd-interruptions-available; in-out property <int> dc-dnd-interruptions-index;
+    in property <bool> dc-dnd-show-notifications-available; in-out property <int> dc-dnd-show-notifications-index: 1;
+    in property <bool> dc-dnd-motion-backlight-available; in-out property <bool> dc-dnd-motion-backlight-value;
+    in property <bool> dc-dnd-auto-dismiss-available; in-out property <bool> dc-dnd-auto-dismiss-value;
+    in property <bool> dc-timeline-quick-view-available; in-out property <bool> dc-timeline-quick-view-value;
+    in property <bool> dc-timeline-minutes-available; in-out property <int> dc-timeline-minutes: 10;
+    in property <bool> dc-music-volume-available; in-out property <bool> dc-music-volume-value;
+    in property <bool> dc-music-progress-available; in-out property <bool> dc-music-progress-value;
+    in property <bool> dc-ql-up-available; in-out property <int> dc-ql-up-index;
+    in property <bool> dc-ql-down-available; in-out property <int> dc-ql-down-index;
+    in property <bool> dc-ql-select-available; in-out property <int> dc-ql-select-index;
+    in property <bool> dc-ql-back-available; in-out property <int> dc-ql-back-index;
+    in property <bool> dc-ql-combo-back-up-available; in-out property <int> dc-ql-combo-back-up-index;
+    in property <bool> dc-ql-combo-up-down-available; in-out property <int> dc-ql-combo-up-down-index;
+    in property <bool> dc-ql-tap-up-available; in-out property <int> dc-ql-tap-up-index;
+    in property <bool> dc-ql-tap-down-available; in-out property <int> dc-ql-tap-down-index;
+    in property <bool> dc-language-available; in-out property <int> dc-language-index;
+    in property <bool> dc-language-english-available; in-out property <bool> dc-language-english-value;
+    in property <bool> dc-light-color-available; in-out property <int> dc-light-color-index;
+    in property <bool> dc-motion-sensitivity-available; in-out property <int> dc-motion-sensitivity-index: 3;
+    in property <bool> dc-light-ambient-threshold-available; in-out property <int> dc-light-ambient-threshold: 150;
+    in property <bool> dc-dynamic-backlight-threshold-available; in-out property <int> dc-dynamic-backlight-threshold: 5;
+    in-out property <bool> dc-backlight-advanced-expanded: false;
 
     // ── Period navigation ──
     in property <string> workout-period-label: "This Week";
@@ -90,6 +187,11 @@ export component AppWindow inherits Window {
     callback scan-watches();
     callback refresh-data();
     callback refresh-device();
+    callback refresh-device-config();
+    callback device-health-changed();
+    callback apply-device-config();
+    callback discard-device-config();
+    callback reset-device-config-defaults();
     // Device actions (Settings ▸ Device Actions)
     callback reboot-watch();
     callback reset-into-recovery();
@@ -112,9 +214,10 @@ export component AppWindow inherits Window {
 
     // ── Internal state ──
     property <int> active-tab: 0;
-    property <int> settings-page: 0;   // 0 = category list, 1 = config, 2 = device actions
-    property <bool> confirm-factory: false;
-    property <bool> confirm-recovery: false;
+    property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions, 3 = device config
+    in-out property <bool> action-busy: false;
+    in-out property <string> confirm-action: "";
+    in-out property <bool> confirm-device-defaults: false;
     property <int> workout-period: 1;
     property <int> sleep-period-val: 1;
     property <int> heart-period: 1;
@@ -341,7 +444,7 @@ export component AppWindow inherits Window {
             }
 
             // ── Settings tab ─────────────────────────────────────────────────
-            // settings-page 0 = category menu, 1 = Config detail.
+            // settings-page 0 = category menu, 1 = Daemon Config detail.
             if active-tab == 4 && root.settings-page == 0: Flickable {
                 viewport-height: settings-menu.preferred-height;
                 settings-menu := VerticalLayout {
@@ -369,19 +472,24 @@ export component AppWindow inherits Window {
 
                     // Category list
                     SettingsRow {
-                        label: "Config";
+                        label: "Daemon Config";
                         sublabel: "Watch address, BLE adapter, logging, database";
                         clicked => { root.settings-page = 1; }
                     }
                     SettingsRow {
+                        label: "Device Config";
+                        sublabel: "Read watch health and preference settings";
+                        clicked => { root.settings-page = 3; root.refresh-device-config(); }
+                    }
+                    SettingsRow {
                         label: "Device Actions";
                         sublabel: "Reboot, recovery, core dump, forget, factory reset";
-                        clicked => { root.action-status = ""; root.action-error = false; root.confirm-factory = false; root.confirm-recovery = false; root.settings-page = 2; }
+                        clicked => { root.action-status = ""; root.action-error = false; root.confirm-action = ""; root.settings-page = 2; }
                     }
                 }
             }
 
-            // ── Settings ▸ Config ─────────────────────────────────────────────
+            // ── Settings ▸ Daemon Config ──────────────────────────────────────
             if active-tab == 4 && root.settings-page == 1: Flickable {
                 viewport-height: config-page.preferred-height;
                 config-page := VerticalLayout {
@@ -395,7 +503,7 @@ export component AppWindow inherits Window {
                             Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
                             TouchArea { clicked => { root.settings-page = 0; } }
                         }
-                        Text { text: "Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                        Text { text: "Daemon Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
                     }
 
                     // Watch Address: scan button + device list
@@ -510,13 +618,384 @@ export component AppWindow inherits Window {
                     }
                     Rectangle {
                         height: 52px; border-radius: 10px; background: Palette.accent;
-                        Text { text: "Save & Apply"; color: white; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "Save Configuration"; color: white; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         TouchArea { clicked => { root.save-config(); } }
                     }
                     if root.save-status != "": Text {
                         text: root.save-status;
-                        color: root.save-status == "Saved." ? Palette.green : Palette.red;
+                        color: root.save-status-error ? Palette.red : Palette.green;
                         font-size: 13px; horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // ── Settings ▸ Device Config ──────────────────────────────────────
+            if active-tab == 4 && root.settings-page == 3: Flickable {
+                viewport-height: device-config-page.preferred-height;
+                device-config-page := VerticalLayout {
+                    padding: 20px; spacing: 12px; alignment: start;
+                    HorizontalLayout {
+                        height: 28px; spacing: 8px;
+                        Rectangle {
+                            width: 32px; height: 28px; border-radius: 6px; background: Palette.surface;
+                            Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea { clicked => { root.settings-page = 0; } }
+                        }
+                        Text { text: "Device Config"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Rectangle {
+                            width: 84px; height: 28px; border-radius: 6px;
+                            background: root.watch-connected && !root.dc-loading ? Palette.accent : Palette.muted;
+                            opacity: root.watch-connected && !root.dc-loading ? 1.0 : 0.5;
+                            Text { text: root.dc-loading ? "Loading…" : "Refresh"; color: white; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea {
+                                enabled: root.watch-connected && !root.dc-loading;
+                                clicked => { root.refresh-device-config(); }
+                            }
+                        }
+                    }
+
+                    if root.dc-loading: LoadingBanner { message: root.dc-status; }
+                    if !root.dc-loading && root.dc-status-error: ErrorBanner { message: root.dc-status; }
+                    if !root.dc-loading && !root.dc-status-error: Rectangle {
+                        background: Palette.surface; border-radius: 10px; min-height: 52px;
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
+                            Rectangle {
+                                width: 8px; vertical-stretch: 1; background: transparent;
+                                Rectangle {
+                                    width: 8px; height: 8px; border-radius: 4px;
+                                    y: (parent.height - self.height) / 2;
+                                    background: root.dc-status-error ? Palette.red
+                                        : root.dc-state == "ready" ? Palette.green : Palette.orange;
+                                }
+                            }
+                            Text {
+                                text: root.dc-status; color: root.dc-status-error ? Palette.red : Palette.muted;
+                                font-size: 12px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1;
+                            }
+                        }
+                    }
+
+                    if root.dc-watch-id != "": Text { text: "Watch"; color: Palette.muted; font-size: 12px; }
+                    if root.dc-watch-id != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            InfoRow { label: "Identity"; value: root.dc-watch-id; }
+                            InfoRow { label: "Platform"; value: root.dc-platform; }
+                            InfoRow { label: "Firmware"; value: root.dc-firmware; }
+                            InfoRow { label: "Last read"; value: root.dc-last-read; }
+                        }
+                    }
+
+                    if root.dc-height != "": Text { text: "Health & Profile"; color: Palette.muted; font-size: 12px; }
+                    if root.dc-height != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            EnumSetting {
+                                label: "Distance units"; options: ["Metric", "Imperial"];
+                                selected-index <=> root.dc-units-index;
+                                enabled: root.dc-units-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Height"; value <=> root.dc-height-mm; minimum: 1000; maximum: 2200;
+                                step: root.dc-units-index == 0 ? 5 : 25; display-value: root.dc-height-display;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Weight"; value <=> root.dc-weight-dag; minimum: 3000; maximum: 20000;
+                                step: root.dc-units-index == 0 ? 10 : 45; display-value: root.dc-weight-display;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; root.device-health-changed(); }
+                            }
+                            NumericSetting {
+                                label: "Age"; value <=> root.dc-age-value; minimum: 1; maximum: 120;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            EnumSetting {
+                                label: "Sex"; options: ["Female", "Male", "Other"];
+                                selected-index <=> root.dc-gender-index;
+                                enabled: root.dc-health-available && !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Health tracking"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-tracking-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Activity insights"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-activity-insights-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Sleep insights"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-sleep-insights-value; enabled: root.dc-health-available && !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-hrm-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Heart-rate monitor"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-hrm-enabled-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-hrm-interval-available: EnumSetting {
+                                label: "Background sampling"; options: ["10 minutes", "30 minutes", "1 hour", "Off"];
+                                selected-index <=> root.dc-hrm-interval-index; enabled: !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                            if root.dc-hrm-during-activity-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "HR during activities"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-hrm-during-activity-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                        }
+                    }
+
+                    if root.dc-clock-24h-available || root.dc-timezone-manual-available || root.dc-stationary-mode-available
+                        || root.dc-left-handed-available || root.dc-text-size-available: Text {
+                        text: "Time & Display"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-clock-24h-available || root.dc-timezone-manual-available || root.dc-stationary-mode-available
+                        || root.dc-left-handed-available || root.dc-text-size-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            if root.dc-clock-24h-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "24-hour clock"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-clock-24h-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-timezone-manual-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Manual timezone source"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-timezone-manual-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-stationary-mode-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Standby mode"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-stationary-mode-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-left-handed-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Left-handed orientation"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-left-handed-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-text-size-available: EnumSetting {
+                                label: "Text size"; options: ["Smaller", "Default", "Larger"];
+                                selected-index <=> root.dc-text-size-index; enabled: !root.dc-applying;
+                                changed => { root.dc-dirty = true; }
+                            }
+                        }
+                    }
+
+                    if root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
+                        || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
+                        || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
+                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: Text {
+                        text: "Backlight & Input"; color: Palette.muted; font-size: 12px;
+                    }
+
+                    if root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
+                        || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
+                        || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
+                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout {
+                            padding: 14px; spacing: 8px;
+                            if root.dc-light-enabled-available: HorizontalLayout { height: 36px; Text { text: "Backlight"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-light-enabled-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-light-ambient-available: HorizontalLayout { height: 36px; Text { text: "Ambient light sensor"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-light-ambient-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-light-motion-available: HorizontalLayout { height: 36px; Text { text: "Motion wake"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-light-motion-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-light-timeout-available: NumericSetting { label: "Backlight timeout"; value <=> root.dc-light-timeout-ms; minimum: 1000; maximum: 10000; step: 1000; suffix: "ms"; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-touch-available: EnumSetting { label: "Tap wake"; options: ["Double Tap", "Tap", "Off"]; selected-index <=> root.dc-light-touch-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-intensity-available: EnumSetting { label: "Intensity"; options: ["Low", "Medium", "High", "Blinding"]; selected-index <=> root.dc-light-intensity-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-dynamic-legacy-available: HorizontalLayout { height: 36px; Text { text: "Dynamic intensity"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-light-dynamic-legacy-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-light-preset-available: EnumSetting { label: "Preset"; options: ["Max Brightness", "Standard", "Battery Saver", "Advanced"]; selected-index <=> root.dc-light-preset-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-dynamic-mode-available: EnumSetting { label: "Dynamic mode"; options: ["Off", "Bright", "Standard", "Dim"]; selected-index <=> root.dc-light-dynamic-mode-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-menu-wrap-available: HorizontalLayout { height: 36px; Text { text: "Menu wrap-around"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-menu-wrap-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-menu-vibe-available: EnumSetting { label: "Menu vibration"; options: ["No Vibe", "On Wrap Around", "When Locked"]; selected-index <=> root.dc-menu-vibe-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-light-color-available: EnumSetting { label: "Backlight color"; options: ["Red", "Orange", "Yellow", "Lime", "Green", "Cyan", "Blue", "Purple", "Magenta", "Pink", "Warm White", "Cool White", "Existing custom color"]; selected-index <=> root.dc-light-color-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-motion-sensitivity-available || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Advanced backlight controls"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-backlight-advanced-expanded; enabled: !root.dc-applying; }
+                            }
+                            if root.dc-backlight-advanced-expanded && root.dc-motion-sensitivity-available: EnumSetting { label: "Motion sensitivity"; options: ["Very Low", "Low", "Medium-Low", "Medium", "Medium-High", "High", "Very High"]; selected-index <=> root.dc-motion-sensitivity-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-backlight-advanced-expanded && root.dc-light-ambient-threshold-available: NumericSetting { label: "Ambient light threshold"; value <=> root.dc-light-ambient-threshold; minimum: 1; maximum: 4096; step: 1; suffix: ""; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-backlight-advanced-expanded && root.dc-dynamic-backlight-threshold-available: NumericSetting { label: "Dynamic minimum threshold"; value <=> root.dc-dynamic-backlight-threshold; minimum: 0; maximum: 4096; step: 1; suffix: ""; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+
+                    if root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
+                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available: Text {
+                        text: "Notifications & Vibration"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
+                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-notif-filter-available: EnumSetting { label: "Notification filter"; options: ["All Off", "Phone Calls", "All On"]; selected-index <=> root.dc-notif-filter-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-notif-design-available: HorizontalLayout { height: 36px; Text { text: "Alternative B/W design"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-design-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-notif-delay-available: HorizontalLayout { height: 36px; Text { text: "Delay vibration"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-delay-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-notif-backlight-available: HorizontalLayout { height: 36px; Text { text: "Notification backlight"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-backlight-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-notif-timeout-available: NumericSetting { label: "Notification timeout"; value <=> root.dc-notif-timeout-ms; minimum: 0; maximum: 600000; step: 30000; suffix: "ms"; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-vibe-intensity-available: EnumSetting { label: "Vibration intensity"; options: ["Low", "Medium", "High"]; selected-index <=> root.dc-vibe-intensity-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-vibe-notifications-available: EnumSetting { label: "Notification pattern"; options: ["Disabled", "Short Low", "Short High", "Pulse", "Nudge Nudge", "Jackhammer", "Mario"]; selected-index <=> root.dc-vibe-notifications-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-vibe-calls-available: EnumSetting { label: "Call pattern"; options: ["Disabled", "Long Low", "Long High", "Pulse", "Nudge Nudge", "Jackhammer", "Mario"]; selected-index <=> root.dc-vibe-calls-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-vibe-alarms-available: EnumSetting { label: "Alarm pattern"; options: ["Long Low", "Long High", "Pulse", "Nudge Nudge", "Jackhammer", "Reveille", "Mario", "Gentle"]; selected-index <=> root.dc-vibe-alarms-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+
+                    if root.dc-dnd-manual-available || root.dc-dnd-smart-available || root.dc-dnd-interruptions-available
+                        || root.dc-dnd-show-notifications-available || root.dc-dnd-motion-backlight-available || root.dc-dnd-auto-dismiss-available: Text {
+                        text: "Quiet Time"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-dnd-manual-available || root.dc-dnd-smart-available || root.dc-dnd-interruptions-available
+                        || root.dc-dnd-show-notifications-available || root.dc-dnd-motion-backlight-available || root.dc-dnd-auto-dismiss-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-dnd-manual-available: HorizontalLayout { height: 36px; Text { text: "Manual Quiet Time"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-dnd-manual-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-dnd-smart-available: HorizontalLayout { height: 36px; Text { text: "Calendar-aware Quiet Time"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-dnd-smart-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-dnd-interruptions-available: EnumSetting { label: "Allowed interruptions"; options: ["None", "Phone Calls"]; selected-index <=> root.dc-dnd-interruptions-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-dnd-show-notifications-available: EnumSetting { label: "Notifications"; options: ["Hide", "Show"]; selected-index <=> root.dc-dnd-show-notifications-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-dnd-motion-backlight-available: HorizontalLayout { height: 36px; Text { text: "Motion backlight"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-dnd-motion-backlight-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-dnd-auto-dismiss-available: HorizontalLayout { height: 36px; Text { text: "Auto-dismiss notifications"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-dnd-auto-dismiss-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                        }
+                    }
+
+                    if root.dc-timeline-quick-view-available || root.dc-timeline-minutes-available: Text {
+                        text: "Timeline"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-timeline-quick-view-available || root.dc-timeline-minutes-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-timeline-quick-view-available: HorizontalLayout { height: 36px; Text { text: "Quick View"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-timeline-quick-view-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-timeline-minutes-available: NumericSetting { label: "Show before event"; value <=> root.dc-timeline-minutes; minimum: 0; maximum: 30; step: 1; suffix: "min"; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+
+                    if root.dc-music-volume-available || root.dc-music-progress-available: Text {
+                        text: "Music"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-music-volume-available || root.dc-music-progress-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-music-volume-available: HorizontalLayout { height: 36px; Text { text: "Volume controls"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-music-volume-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                            if root.dc-music-progress-available: HorizontalLayout { height: 36px; Text { text: "Progress bar"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-music-progress-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
+                        }
+                    }
+
+                    if root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available: Text {
+                        text: "Quick Launch"; color: Palette.muted; font-size: 12px;
+                    }
+
+                    if root.dc-language-available || root.dc-language-english-available: Text {
+                        text: "Language"; color: Palette.muted; font-size: 12px;
+                    }
+                    if root.dc-language-available || root.dc-language-english-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-language-available: EnumSetting { label: "Built-in language"; options: ["English", "Català", "Deutsch", "Español", "Français", "Italiano", "Nederlands", "Português", "Polski", "Custom language pack"]; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-language-english-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Use English"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-language-english-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                        }
+                    }
+                    if root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available: Rectangle {
+                        background: Palette.surface; border-radius: 10px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            if root.dc-ql-up-available: EnumSetting { label: "Hold Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-down-available: EnumSetting { label: "Hold Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-select-available: EnumSetting { label: "Hold Select"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-select-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-back-available: EnumSetting { label: "Hold Back"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-back-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-combo-back-up-available: EnumSetting { label: "Hold Back + Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-combo-back-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-combo-up-down-available: EnumSetting { label: "Hold Up + Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-combo-up-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-tap-up-available: EnumSetting { label: "Tap Up"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-tap-up-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-ql-tap-down-available: EnumSetting { label: "Tap Down"; options: ["None", "Quiet Time", "Backlight", "Motion Backlight", "Airplane Mode", "Timeline Past", "Timeline Future", "Health", "Existing app"]; selected-index <=> root.dc-ql-tap-down-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                        }
+                    }
+
+                    if root.dc-health-available || root.dc-clock-24h-available || root.dc-timezone-manual-available
+                        || root.dc-stationary-mode-available || root.dc-left-handed-available || root.dc-text-size-available
+                        || root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
+                        || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
+                        || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
+                        || root.dc-light-dynamic-mode-available || root.dc-menu-wrap-available || root.dc-menu-vibe-available
+                        || root.dc-light-color-available || root.dc-motion-sensitivity-available
+                        || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available
+                        || root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
+                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available
+                        || root.dc-dnd-manual-available || root.dc-dnd-smart-available || root.dc-dnd-interruptions-available
+                        || root.dc-dnd-show-notifications-available || root.dc-dnd-motion-backlight-available || root.dc-dnd-auto-dismiss-available
+                        || root.dc-timeline-quick-view-available || root.dc-timeline-minutes-available
+                        || root.dc-music-volume-available || root.dc-music-progress-available
+                        || root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
+                        || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
+                        || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available
+                        || root.dc-language-available || root.dc-language-english-available: HorizontalLayout {
+                        spacing: 8px;
+                        ActionButton { label: "Discard"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.discard-device-config(); } }
+                        ActionButton { label: root.dc-applying ? "Applying…" : "Apply"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.apply-device-config(); } }
+                    }
+
+                    if root.dc-state == "ready" || root.dc-state == "partial": ActionButton {
+                        label: root.confirm-device-defaults ? "Tap again to reset general settings" : "Reset General Settings to Defaults";
+                        danger: root.confirm-device-defaults;
+                        enabled: !root.dc-applying;
+                        clicked => {
+                            if (root.confirm-device-defaults) {
+                                root.confirm-device-defaults = false;
+                                root.reset-device-config-defaults();
+                            } else {
+                                root.confirm-device-defaults = true;
+                            }
+                        }
+                    }
+
+                    for entry in root.dc-preferences: VerticalLayout {
+                        spacing: 6px;
+                        if entry.group != "": Text { text: entry.group; color: Palette.muted; font-size: 12px; }
+                        Rectangle {
+                            background: Palette.surface; border-radius: 8px; min-height: 42px;
+                            HorizontalLayout {
+                                padding-left: 14px; padding-right: 14px;
+                                Text { text: entry.label; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: entry.status == "available" ? entry.value : entry.status;
+                                    color: entry.status == "available" ? Palette.text : Palette.orange;
+                                    font-size: 12px; vertical-alignment: center; horizontal-alignment: right;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -533,7 +1012,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             width: 32px; height: 28px; border-radius: 6px; background: Palette.surface;
                             Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
-                            TouchArea { clicked => { root.settings-page = 0; root.confirm-factory = false; root.confirm-recovery = false; root.action-status = ""; root.action-error = false; } }
+                            TouchArea { clicked => { if (!root.action-busy) { root.settings-page = 0; root.confirm-action = ""; root.action-status = ""; root.action-error = false; } } }
                         }
                         Text { text: "Device Actions"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
                     }
@@ -544,51 +1023,61 @@ export component AppWindow inherits Window {
                     }
 
                     ActionButton {
-                        label: "Reboot Watch"; enabled: root.watch-connected;
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Reboot sent."; root.reboot-watch(); }
+                        label: "Reboot Watch"; enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.reboot-watch(); }
                     }
                     ActionButton {
-                        label: root.confirm-recovery ? "Tap again to confirm Recovery" : "Reboot into Recovery";
-                        danger: root.confirm-recovery; enabled: root.watch-connected;
-                        clicked => {
-                            if (root.confirm-recovery) {
-                                root.confirm-recovery = false;
-                                root.action-error = false;
-                                root.action-status = "Entering recovery…";
-                                root.reset-into-recovery();
-                            } else {
-                                root.confirm-recovery = true;
-                                root.confirm-factory = false;
+                        label: "Reboot into Recovery"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "recovery"; }
+                    }
+                    ActionButton {
+                        label: "Create Core Dump"; enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.create-core-dump(); }
+                    }
+                    ActionButton {
+                        label: "Forget (Unpair)"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "forget"; }
+                    }
+                    ActionButton {
+                        label: "Factory Reset (erases watch)"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "factory"; }
+                    }
+
+                    if root.confirm-action != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px; border-width: 1px; border-color: Palette.red;
+                        VerticalLayout { padding: 16px; spacing: 10px;
+                            Text {
+                                text: root.confirm-action == "factory" ? "Factory reset the watch?"
+                                    : root.confirm-action == "forget" ? "Forget this watch?" : "Reboot into Recovery?";
+                                color: Palette.text; font-size: 16px; font-weight: 700; horizontal-alignment: center;
                             }
-                        }
-                    }
-                    ActionButton {
-                        label: "Create Core Dump"; enabled: root.watch-connected;
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Core dump requested…"; root.create-core-dump(); }
-                    }
-                    ActionButton {
-                        label: "Forget (Unpair)";
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Removing bond…"; root.forget-watch(); }
-                    }
-                    ActionButton {
-                        label: root.confirm-factory ? "Tap again to confirm Factory Reset" : "Factory Reset (erases watch)";
-                        danger: true; enabled: root.watch-connected;
-                        clicked => {
-                            if (root.confirm-factory) {
-                                root.confirm-factory = false;
-                                root.action-error = false;
-                                root.action-status = "Factory reset sent.";
-                                root.factory-reset();
-                            } else {
-                                root.confirm-factory = true;
-                                root.confirm-recovery = false;
+                            Text {
+                                text: root.confirm-action == "factory" ? "This erases all watch data and removes its pairing. This cannot be undone."
+                                    : root.confirm-action == "forget" ? "This removes the Bluetooth bond. The watch must pair again before reconnecting."
+                                    : "The watch will restart in recovery firmware and temporarily disconnect.";
+                                color: Palette.muted; font-size: 13px; wrap: word-wrap; horizontal-alignment: center;
+                            }
+                            HorizontalLayout { spacing: 8px;
+                                ActionButton { label: "Cancel"; enabled: !root.action-busy; clicked => { root.confirm-action = ""; } }
+                                ActionButton {
+                                    label: "Confirm"; danger: true; enabled: !root.action-busy;
+                                    clicked => {
+                                        if (root.confirm-action == "factory") { root.factory-reset(); }
+                                        else if (root.confirm-action == "forget") { root.forget-watch(); }
+                                        else { root.reset-into-recovery(); }
+                                        root.confirm-action = "";
+                                    }
+                                }
                             }
                         }
                     }
 
                     if root.action-status != "": Text {
                         text: root.action-status;
-                        color: root.action-error ? Palette.red : Palette.green;
+                        color: root.action-error ? Palette.red : root.action-busy ? Palette.accent : Palette.green;
                         font-size: 13px; horizontal-alignment: center;
                     }
                 }
@@ -651,7 +1140,7 @@ export component AppWindow inherits Window {
                         Text { text: "⚙"; font-size: 20px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
                         Text { text: "Settings"; font-size: 11px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
                     }
-                    TouchArea { clicked => { active-tab = 4; settings-page = 0; confirm-factory = false; confirm-recovery = false; action-status = ""; action-error = false; } }
+                    TouchArea { clicked => { if (!root.action-busy) { active-tab = 4; settings-page = 0; confirm-action = ""; action-status = ""; action-error = false; } } }
                 }
             }
         }

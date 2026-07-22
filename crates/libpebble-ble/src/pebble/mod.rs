@@ -19,58 +19,51 @@ use std::{
 
 use chrono::Local;
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{Mutex as AsyncMutex, oneshot, watch},
     time::timeout,
 };
 use tracing::{debug, warn};
 
 use crate::{
     endpoints::{
-        app_message::{
-            build_app_message_push,
-            AppMessageValue,
-        },
-        app_run_state::{build_app_run_state, AppRunStateCmd},
+        Endpoint,
+        app_message::{AppMessageValue, build_app_message_push},
+        app_run_state::{AppRunStateCmd, build_app_run_state},
         blob_db::{
-            build_blobdb2_mark_all_dirty,
-            build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_str_insert, build_notification,
-            build_weather_blob, build_weather_prefs_blob, BlobDBId, NotificationCategory, WeatherType,
+            BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
+            build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_raw_str_insert,
+            build_blobdb2_mark_all_dirty, build_notification, build_preference_insert,
+            build_weather_blob, build_weather_prefs_blob,
         },
         datalog::build_report_sessions,
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
         music::{
-            build_update_current_track, build_update_play_state, build_update_player_info,
-            build_update_volume, MusicPlaybackState,
-            MusicRepeat, MusicShuffle,
+            MusicPlaybackState, MusicRepeat, MusicShuffle, build_update_current_track,
+            build_update_play_state, build_update_player_info, build_update_volume,
         },
-        phone_control::{build_incoming_call, build_missed_call, build_call_start, build_call_end},
-        reset::{build_reset, ResetCommand},
-        screenshot::{
-            build_screenshot_request, decode_to_rgba,
-        },
+        pebble_pack,
+        phone_control::{build_call_end, build_call_start, build_incoming_call, build_missed_call},
+        reset::{ResetCommand, build_reset},
+        screenshot::{build_screenshot_request, decode_to_rgba},
         system::{
-            build_watch_color_request, build_watch_version_request, WatchColorInfo,
-            WatchVersionInfo,
+            WatchColorInfo, WatchVersionInfo, build_watch_color_request,
+            build_watch_version_request,
         },
         time::build_set_utc,
-        pebble_pack, Endpoint,
     },
     error::PebbleError,
 };
 
-mod inner;
 mod connection;
 mod dispatch;
+mod inner;
 
 use dispatch::rand_u16;
-pub(crate) use inner::{
-    PebbleInner, RawScreenshot, ScreenshotAccumulator,
-};
 pub use inner::{
-    AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler,
-    HealthDataHandler, MusicActionHandler, NackHandler, PhoneActionHandler,
-    Screenshot, WatchPrefHandler,
+    AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
+    MusicActionHandler, NackHandler, PhoneActionHandler, Screenshot, WatchPrefHandler,
 };
+pub(crate) use inner::{PebbleInner, RawScreenshot, ScreenshotAccumulator};
 
 pub struct Pebble {
     pub address: String,
@@ -78,6 +71,62 @@ pub struct Pebble {
     inner: Arc<Mutex<PebbleInner>>,
     connected_tx: Arc<watch::Sender<bool>>,
     connected_rx: watch::Receiver<bool>,
+    preference_operation: Arc<AsyncMutex<()>>,
+}
+
+#[cfg(test)]
+mod connection_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_connected_notification_is_not_a_disconnect() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let mut cloned = rx.clone();
+        let mut waiting = Box::pin(wait_for_disconnected(&mut cloned));
+
+        assert!(
+            timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        tx.send(false).unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), &mut waiting)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_connection_channel_is_a_disconnect() {
+        let (tx, mut rx) = watch::channel(true);
+        drop(tx);
+        assert!(
+            timeout(Duration::from_millis(100), wait_for_disconnected(&mut rx))
+                .await
+                .is_ok()
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceWriteConfirmation {
+    /// The watch accepted the BlobDB write; legacy watches cannot be refreshed.
+    Accepted,
+    /// The watch accepted the write and returned the exact bytes during readback.
+    ReadBack,
+}
+
+async fn wait_for_disconnected(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if !*rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 impl Pebble {
@@ -89,13 +138,18 @@ impl Pebble {
             inner: Arc::new(Mutex::new(PebbleInner::new())),
             connected_tx: Arc::new(tx),
             connected_rx: rx,
+            preference_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
     // ---- handler registration ----
 
     pub fn on_app_message(&self, handler: AppMessageHandler) {
-        self.inner.lock().unwrap().app_message_handlers.push(handler);
+        self.inner
+            .lock()
+            .unwrap()
+            .app_message_handlers
+            .push(handler);
     }
 
     pub fn on_ack(&self, handler: AckHandler) {
@@ -124,19 +178,31 @@ impl Pebble {
     /// Register a handler called when an app opens/closes on the watch:
     /// `(app_uuid, running)` where `running` is true on launch, false on exit.
     pub fn on_app_run_state(&self, handler: AppRunStateHandler) {
-        self.inner.lock().unwrap().app_run_state_handlers.push(handler);
+        self.inner
+            .lock()
+            .unwrap()
+            .app_run_state_handlers
+            .push(handler);
     }
 
     /// Register a handler called with each media-control action the watch sends
     /// (play/pause/next/volume/get-current-track).
     pub fn on_music_action(&self, handler: MusicActionHandler) {
-        self.inner.lock().unwrap().music_action_handlers.push(handler);
+        self.inner
+            .lock()
+            .unwrap()
+            .music_action_handlers
+            .push(handler);
     }
 
     /// Register a handler called when the watch sends a phone control action
     /// (answer / hangup).
     pub fn on_phone_action(&self, handler: PhoneActionHandler) {
-        self.inner.lock().unwrap().phone_action_handlers.push(handler);
+        self.inner
+            .lock()
+            .unwrap()
+            .phone_action_handlers
+            .push(handler);
     }
 
     pub fn on_watch_pref(&self, handler: WatchPrefHandler) {
@@ -151,14 +217,7 @@ impl Pebble {
 
     pub async fn wait_disconnected(&self) {
         let mut rx = self.connected_rx.clone();
-        loop {
-            if !*rx.borrow() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
+        wait_for_disconnected(&mut rx).await;
     }
 
     // ---- connect / disconnect ----
@@ -178,6 +237,11 @@ impl Pebble {
 
     // ---- public API ----
 
+    /// Negotiated BlobDB protocol version for the active connection.
+    pub fn blob_db_version(&self) -> u8 {
+        self.inner.lock().unwrap().blob_db_version
+    }
+
     /// Query the watch's version info (endpoint 16): firmware versions, board,
     /// serial, BT address, language, and protocol capabilities. Times out after
     /// 10s if the watch doesn't reply.
@@ -187,7 +251,8 @@ impl Pebble {
         }
         let (tx, rx) = oneshot::channel::<WatchVersionInfo>();
         self.inner.lock().unwrap().watch_version_pending.push(tx);
-        let result = match self.send_pebble(Endpoint::WatchVersion, &build_watch_version_request()) {
+        let result = match self.send_pebble(Endpoint::WatchVersion, &build_watch_version_request())
+        {
             Err(e) => {
                 drop(rx); // cancel our waiter
                 Err(e)
@@ -199,7 +264,11 @@ impl Pebble {
         };
         // Drop our now-cancelled waiter (and any other dead ones); live waiters
         // from concurrent requests are kept.
-        self.inner.lock().unwrap().watch_version_pending.retain(|s| !s.is_closed());
+        self.inner
+            .lock()
+            .unwrap()
+            .watch_version_pending
+            .retain(|s| !s.is_closed());
         result
     }
 
@@ -213,7 +282,8 @@ impl Pebble {
         }
         let (tx, rx) = oneshot::channel::<Option<&'static WatchColorInfo>>();
         self.inner.lock().unwrap().watch_color_pending.push(tx);
-        let result = match self.send_pebble(Endpoint::FactoryRegistry, &build_watch_color_request()) {
+        let result = match self.send_pebble(Endpoint::FactoryRegistry, &build_watch_color_request())
+        {
             Err(e) => {
                 drop(rx); // cancel our waiter
                 Err(e)
@@ -223,7 +293,11 @@ impl Pebble {
                 _ => Err(PebbleError::Other("watch color request timed out".into())),
             },
         };
-        self.inner.lock().unwrap().watch_color_pending.retain(|s| !s.is_closed());
+        self.inner
+            .lock()
+            .unwrap()
+            .watch_color_pending
+            .retain(|s| !s.is_closed());
         result
     }
 
@@ -238,7 +312,9 @@ impl Pebble {
         let request_id = {
             let mut guard = self.inner.lock().unwrap();
             if guard.screenshot.is_some() {
-                return Err(PebbleError::Other("a screenshot is already in progress".into()));
+                return Err(PebbleError::Other(
+                    "a screenshot is already in progress".into(),
+                ));
             }
             guard.screenshot_seq += 1;
             let request_id = guard.screenshot_seq;
@@ -424,10 +500,13 @@ impl Pebble {
         let now = Local::now();
         let utc_ts = now.timestamp() as u32;
         let offset_minutes = (now.offset().local_minus_utc() / 60) as i16;
-        let tz_name = iana_time_zone::get_timezone()
-            .unwrap_or_else(|_| now.format("%Z").to_string());
+        let tz_name =
+            iana_time_zone::get_timezone().unwrap_or_else(|_| now.format("%Z").to_string());
         debug!("setting watch time: utc={utc_ts} offset={offset_minutes}min tz={tz_name:?}");
-        self.send_pebble(Endpoint::Time, &build_set_utc(utc_ts, offset_minutes, &tz_name))
+        self.send_pebble(
+            Endpoint::Time,
+            &build_set_utc(utc_ts, offset_minutes, &tz_name),
+        )
     }
 
     pub async fn launch_app(&self, app_uuid: &str) -> Result<(), PebbleError> {
@@ -519,7 +598,6 @@ impl Pebble {
         Ok(token)
     }
 
-
     /// Push weather data to the Pebble built-in weather app via BlobDB.
     ///
     /// Uses `InsertWithTimestamp` (cmd=0x0D) when BlobDB2 v1 was negotiated at
@@ -579,15 +657,23 @@ impl Pebble {
         // "no location information" even though the Weather BlobDB insert succeeds.
         let prefs_token = rand_u16();
         let prefs_blob = build_weather_prefs_blob(&[*location_key]);
-        let prefs_payload =
-            build_blobdb_str_insert(BlobDBId::AppConfigs, "weatherApp", &prefs_blob, prefs_token)
-                .map_err(|e| PebbleError::Other(e.to_string()))?;
+        let prefs_payload = build_blobdb_raw_str_insert(
+            BlobDBId::AppConfigs,
+            "weatherApp",
+            &prefs_blob,
+            prefs_token,
+        )
+        .map_err(|e| PebbleError::Other(e.to_string()))?;
         debug!("push_weather prefs token={prefs_token}");
         self.send_pebble(Endpoint::BlobDb, &prefs_payload)
     }
 
     /// Write "activityPreferences" (and optionally "hrmPreferences") to the
     /// BlobDB PREFERENCES store, then trigger a DataLog sync from the watch.
+    /// Legacy whole-record health writer. Prefer
+    /// [`Pebble::write_preference_confirmed`] with a freshly read, patched raw
+    /// record so existing insight and firmware-specific fields are preserved.
+    #[deprecated(note = "use a refreshed, lossless preference patch")]
     pub async fn activate_health(
         &self,
         height_cm: u16,
@@ -601,18 +687,209 @@ impl Pebble {
         }
         let token = rand_u16();
         let blob = build_activate_health_blob(height_cm, weight_kg, age, gender);
-        let payload = build_blobdb_str_insert(BlobDBId::HealthParams, "activityPreferences", &blob, token)
-            .map_err(|e| PebbleError::Other(e.to_string()))?;
+        let payload =
+            build_preference_insert(BlobDBId::HealthParams, "activityPreferences", &blob, token)
+                .map_err(|e| PebbleError::Other(e.to_string()))?;
         self.send_pebble(Endpoint::BlobDb, &payload)?;
 
         let hrm_token = rand_u16();
         let hrm_blob = build_hrm_blob(hrm_enabled);
-        let hrm_payload = build_blobdb_str_insert(BlobDBId::HealthParams, "hrmPreferences", &hrm_blob, hrm_token)
-            .map_err(|e| PebbleError::Other(e.to_string()))?;
+        let hrm_payload = build_preference_insert(
+            BlobDBId::HealthParams,
+            "hrmPreferences",
+            &hrm_blob,
+            hrm_token,
+        )
+        .map_err(|e| PebbleError::Other(e.to_string()))?;
         self.send_pebble(Endpoint::BlobDb, &hrm_payload)?;
 
         debug!("health preferences written; triggering sync");
         self.fetch_health_data()
+    }
+
+    /// Write one known device preference using official libpebble database
+    /// routing, wait for the watch's BlobDB status, then verify readback when
+    /// BlobDB2 synchronization is available.
+    pub async fn write_preference_confirmed(
+        &self,
+        key: &str,
+        value: &[u8],
+    ) -> Result<PreferenceWriteConfirmation, PebbleError> {
+        use crate::endpoints::blob_db::outgoing_preference_database;
+
+        let _operation = self.preference_operation.lock().await;
+        let db = outgoing_preference_database(key);
+        self.write_blobdb_record(db, key, value).await?;
+
+        if self.inner.lock().unwrap().blob_db_version < 1 {
+            return Ok(PreferenceWriteConfirmation::Accepted);
+        }
+
+        self.refresh_watch_preferences_unlocked().await?;
+        let readback = self
+            .inner
+            .lock()
+            .unwrap()
+            .observed_preferences
+            .get(&(BlobDBId::WatchPrefs as u8, key.to_owned()))
+            .cloned();
+        match readback {
+            Some(raw) if raw == value => Ok(PreferenceWriteConfirmation::ReadBack),
+            Some(raw) => Err(PebbleError::Other(format!(
+                "preference {key} readback mismatch: wrote {} bytes, received {} bytes",
+                value.len(),
+                raw.len()
+            ))),
+            None => Err(PebbleError::Other(format!(
+                "preference {key} was not returned during readback"
+            ))),
+        }
+    }
+
+    async fn write_blobdb_record(
+        &self,
+        db: BlobDBId,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let token = rand_u16();
+        let payload = build_preference_insert(db, key, value, token)
+            .map_err(|error| PebbleError::Other(error.into()))?;
+        let status = self.send_blobdb_confirmed(token, key, &payload).await?;
+        if status == BlobDBStatus::Success {
+            Ok(())
+        } else {
+            Err(PebbleError::Other(format!(
+                "watch rejected preference {key}: {status:?}"
+            )))
+        }
+    }
+
+    async fn send_blobdb_confirmed(
+        &self,
+        token: u16,
+        key: &str,
+        payload: &[u8],
+    ) -> Result<BlobDBStatus, PebbleError> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .lock()
+            .unwrap()
+            .blobdb_pending
+            .insert(token, sender);
+        if let Err(error) = self.send_pebble(Endpoint::BlobDb, payload) {
+            self.inner.lock().unwrap().blobdb_pending.remove(&token);
+            return Err(error);
+        }
+        let mut connected = self.connected_rx.clone();
+        let status = match timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                response = receiver => response.map_err(|_| PebbleError::Other("BlobDB response channel closed".into())),
+                _ = wait_for_disconnected(&mut connected) => Err(PebbleError::NotConnected),
+            }
+        }).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                self.inner.lock().unwrap().blobdb_pending.remove(&token);
+                return Err(error);
+            }
+            Err(_) => {
+                self.inner.lock().unwrap().blobdb_pending.remove(&token);
+                return Err(PebbleError::Timeout(format!("BlobDB write for {key}")));
+            }
+        };
+        Ok(status)
+    }
+
+    /// Request a full WatchPrefs refresh and wait for both command acceptance
+    /// and the matching database's SyncDone notification.
+    pub async fn refresh_watch_preferences(&self) -> Result<(), PebbleError> {
+        let _operation = self.preference_operation.lock().await;
+        self.refresh_watch_preferences_unlocked().await
+    }
+
+    async fn refresh_watch_preferences_unlocked(&self) -> Result<(), PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        if self.inner.lock().unwrap().blob_db_version < 1 {
+            return Err(PebbleError::Other(
+                "watch does not support BlobDB2 WatchPrefs refresh".into(),
+            ));
+        }
+
+        let token = rand_u16();
+        let mut sync_done = self.inner.lock().unwrap().sync_done_tx.subscribe();
+        let baseline_generation = sync_done.borrow().0;
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .lock()
+            .unwrap()
+            .blobdb2_pending
+            .insert(token, sender);
+        if let Err(error) = self.send_pebble(
+            Endpoint::BlobDbV2,
+            &build_blobdb2_mark_all_dirty(token, BlobDBId::WatchPrefs),
+        ) {
+            self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+            return Err(error);
+        }
+        let mut connected = self.connected_rx.clone();
+        let response = match timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                response = receiver => response.map_err(|_| PebbleError::Other("BlobDB2 response channel closed".into())),
+                _ = wait_for_disconnected(&mut connected) => Err(PebbleError::NotConnected),
+            }
+        }).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+                return Err(error);
+            }
+            Err(_) => {
+                self.inner.lock().unwrap().blobdb2_pending.remove(&token);
+                return Err(PebbleError::Timeout("BlobDB2 MarkAllDirty".into()));
+            }
+        };
+        match response {
+            BlobDB2Incoming::MarkAllDirtyResponse { status, .. }
+                if status == BlobDBStatus::Success as u8 => {}
+            BlobDB2Incoming::MarkAllDirtyResponse { status, .. } => {
+                let status = BlobDBStatus::from_u8(status).map_or_else(
+                    || format!("unknown status {status}"),
+                    |status| format!("{status:?}"),
+                );
+                return Err(PebbleError::Other(format!(
+                    "WatchPrefs refresh rejected: {status}"
+                )));
+            }
+            other => {
+                return Err(PebbleError::Other(format!(
+                    "unexpected BlobDB2 response: {other:?}"
+                )));
+            }
+        }
+
+        let mut connected = self.connected_rx.clone();
+        match timeout(Duration::from_secs(30), async {
+            loop {
+                let (generation, db) = *sync_done.borrow_and_update();
+                if generation > baseline_generation && db == BlobDBId::WatchPrefs as u8 {
+                    return Ok::<(), PebbleError>(());
+                }
+                tokio::select! {
+                    changed = sync_done.changed() => changed.map_err(|_| PebbleError::Other("WatchPrefs sync channel closed".into()))?,
+                    _ = wait_for_disconnected(&mut connected) => return Err(PebbleError::NotConnected),
+                }
+            }
+        }).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(PebbleError::Timeout("WatchPrefs SyncDone".into())),
+        }
     }
 
     /// Ask the watch to flush pending health records via DataLog sessions.
@@ -647,10 +924,7 @@ impl Pebble {
             ));
         }
         debug!("requesting WatchPrefs BlobDB2 re-sync (MarkAllDirty)");
-        self.send_pebble(
-            Endpoint::BlobDbV2,
-            &build_blobdb2_mark_all_dirty(rand_u16(), BlobDBId::WatchPrefs),
-        )
+        self.refresh_watch_preferences().await
     }
 
     fn send_pebble(&self, endpoint: Endpoint, payload: &[u8]) -> Result<(), PebbleError> {

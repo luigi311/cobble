@@ -13,18 +13,15 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
-use super::{dispatch, Pebble};
-use crate::endpoints::blob_db::{
-    build_blobdb2_mark_all_dirty, build_blobdb2_version,
-    BlobDB2Incoming, BlobDBId, BlobDBStatus,
-};
+use super::{Pebble, dispatch};
 use crate::endpoints::Endpoint;
+use crate::endpoints::blob_db::{BlobDB2Incoming, BlobDBStatus, build_blobdb2_version};
 use crate::error::PebbleError;
 use crate::transport::agent::build_pairing_agent;
 use crate::transport::gatt_server::start_gatt_server;
 use crate::uuids::{
-    BATTERY_LEVEL_CHARACTERISTIC, CONNECTION_PARAMS_CHARACTERISTIC,
-    CONNECTIVITY_CHARACTERISTIC, MTU_CHARACTERISTIC, PAIRING_TRIGGER_CHARACTERISTIC,
+    BATTERY_LEVEL_CHARACTERISTIC, CONNECTION_PARAMS_CHARACTERISTIC, CONNECTIVITY_CHARACTERISTIC,
+    MTU_CHARACTERISTIC, PAIRING_TRIGGER_CHARACTERISTIC,
 };
 
 impl Pebble {
@@ -33,13 +30,18 @@ impl Pebble {
     /// Scan for nearby Pebble devices for `timeout_secs` seconds.
     /// Returns a list of `(address, name)` pairs for every device whose
     /// Bluetooth name contains "pebble" (case-insensitive).
-    pub async fn scan(adapter_name: &str, timeout_secs: f64) -> Result<Vec<(String, String)>, PebbleError> {
+    pub async fn scan(
+        adapter_name: &str,
+        timeout_secs: f64,
+    ) -> Result<Vec<(String, String)>, PebbleError> {
         let session = bluer::Session::new().await?;
         let adapter = session
             .adapter(adapter_name)
             .map_err(|e| PebbleError::Other(format!("adapter {adapter_name}: {e}")))?;
 
-        adapter.set_discoverable_timeout(timeout_secs as u32).await?;
+        adapter
+            .set_discoverable_timeout(timeout_secs as u32)
+            .await?;
         let mut stream = adapter.discover_devices().await?;
         let mut found: Vec<(String, String)> = Vec::new();
 
@@ -138,7 +140,13 @@ impl Pebble {
 
         // 3. Connect to the watch (with retries).
         let device = self
-            .connect_client(&adapter, address, conn_timeout, connect_attempts, retry_delay)
+            .connect_client(
+                &adapter,
+                address,
+                conn_timeout,
+                connect_attempts,
+                retry_delay,
+            )
             .await?;
 
         // 4. Pairing / bonding.
@@ -187,23 +195,29 @@ impl Pebble {
                 debug!("PPoGATT data channel established");
                 match timeout(Duration::from_secs(10), session_ready_notify.notified()).await {
                     Ok(()) => debug!("PPoGATT session ready"),
-                    Err(_) => warn!("PPoGATT session not confirmed ready; early sends may be dropped"),
+                    Err(_) => {
+                        warn!("PPoGATT session not confirmed ready; early sends may be dropped")
+                    }
                 }
             }
             Err(_) => {
-                warn!("watch did not connect back within {conn_timeout}s; sends may not reach watch")
+                warn!(
+                    "watch did not connect back within {conn_timeout}s; sends may not reach watch"
+                )
             }
         }
+
+        // Startup synchronization uses the same connected guard as later API calls.
+        let _ = self.connected_tx.send(true);
 
         // 8. BlobDB2 version handshake.
         let blob_db_version = self.negotiate_blobdb2_version().await;
         self.inner.lock().unwrap().blob_db_version = blob_db_version;
         if blob_db_version >= 1 {
-            let _ = self.send_pebble(
-                Endpoint::BlobDbV2,
-                &build_blobdb2_mark_all_dirty(dispatch::rand_u16(), BlobDBId::WatchPrefs),
-            );
-            debug!("BlobDB2 v{blob_db_version}: MarkAllDirty sent for WatchPrefs");
+            match self.refresh_watch_preferences().await {
+                Ok(()) => debug!("BlobDB2 v{blob_db_version}: WatchPrefs sync complete"),
+                Err(error) => warn!("initial WatchPrefs sync failed: {error}"),
+            }
         }
 
         // 9. Monitor device events for disconnect, with a keepalive poll fallback.
@@ -211,7 +225,9 @@ impl Pebble {
         tokio::spawn(async move {
             match device.events().await {
                 Err(e) => {
-                    warn!("could not subscribe to device events: {e}; falling back to keepalive polling");
+                    warn!(
+                        "could not subscribe to device events: {e}; falling back to keepalive polling"
+                    );
                     let mut poll = tokio::time::interval(Duration::from_secs(60));
                     poll.tick().await;
                     loop {
@@ -261,8 +277,6 @@ impl Pebble {
                 }
             }
         });
-
-        let _ = self.connected_tx.send(true);
         info!("Pebble connected and ready");
         Ok(())
     }
@@ -307,7 +321,9 @@ impl Pebble {
             }
             if i < attempts {
                 let _ = adapter.device(address).map(|d| {
-                    tokio::spawn(async move { let _ = d.disconnect().await; });
+                    tokio::spawn(async move {
+                        let _ = d.disconnect().await;
+                    });
                 });
                 tokio::time::sleep(Duration::from_secs_f64(retry_delay * i as f64)).await;
             }
@@ -430,14 +446,17 @@ impl Pebble {
         let token = dispatch::rand_u16();
         let (tx, rx) = tokio::sync::oneshot::channel::<BlobDB2Incoming>();
         self.inner.lock().unwrap().blobdb2_pending.insert(token, tx);
-        if self.send_pebble(Endpoint::BlobDbV2, &build_blobdb2_version(token)).is_err() {
+        if self
+            .send_pebble(Endpoint::BlobDbV2, &build_blobdb2_version(token))
+            .is_err()
+        {
             self.inner.lock().unwrap().blobdb2_pending.remove(&token);
             return 0;
         }
         match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(BlobDB2Incoming::VersionResponse { status, version, .. }))
-                if status == BlobDBStatus::Success as u8 =>
-            {
+            Ok(Ok(BlobDB2Incoming::VersionResponse {
+                status, version, ..
+            })) if status == BlobDBStatus::Success as u8 => {
                 debug!("BlobDB2 version: {version}");
                 version
             }
