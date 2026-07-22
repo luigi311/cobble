@@ -507,7 +507,7 @@ async fn adjust_system_volume(delta_pct: i32) {
 
 async fn try_pactl_set_volume(step: &str) -> std::io::Result<()> {
     let output = tokio::process::Command::new("pactl")
-        .args(["set-sink-volume", "@DEFAULT_SINK@", "--", step])
+        .args(["set-sink-volume", "@DEFAULT_SINK@", step])
         .output()
         .await?;
     if !output.status.success() {
