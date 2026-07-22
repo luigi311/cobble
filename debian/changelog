@@ -1,3 +1,19 @@
+cobbled (0.6.0-1) unstable; urgency=medium
+
+  * Reorganize structure, update to rust 2024, fix ip address caching, adjust logging by @luigi311 in #32
+  * Separate out db so queries are unified, shift sleep label to categorize on wakeup date and not sleep date by @luigi311 in #33
+  * Redesign Sleep GUI and fix fetching data consistency issues by @luigi311 in #34
+  * Add health sync stats for intervals.icu by @luigi311 in #35
+  * Add estimated resting heart rate by @luigi311 in #36
+  * CI: pinact by @luigi311 in #37
+  * Cobble: Update averages for selected, and sleeping key stats by @luigi311 in #38
+  * Add heart-rate trends and health dashboard UI by @luigi311 in #39
+  * Add Cobble desktop launcher by @luigi311 in #40
+  * Expand settings and allow for device configuration by @luigi311 in #41
+  * cobbled: fix pactl relative volume controls by @luigi311 in #42
+
+ -- Luis Garcia <git@luigi311.com>  Wed, 22 Jul 2026 17:56:32 +0000
+
 cobbled (0.5.0-1) unstable; urgency=medium
 
   * Gui by @luigi311 in https://github.com/luigi311/cobble/pull/24
@@ -7,7 +23,7 @@ cobbled (0.5.0-1) unstable; urgency=medium
   * Daemon: Add weather fetching by @luigi311 in https://github.com/luigi311/cobble/pull/28
   * Add phonecall support by @luigi311 in https://github.com/luigi311/cobble/pull/29
 
- -- Luis Garcia <luigi311@Luigi311-Desktop>  Thu, 02 Jul 2026 19:16:52 +0000
+ -- Luis Garcia <git@luigi311.com>  Thu, 02 Jul 2026 19:16:52 +0000
 
 cobbled (0.4.0-1) unstable; urgency=medium
 
@@ -21,14 +37,14 @@ cobbled (0.4.0-1) unstable; urgency=medium
   * Add screenshot support by @luigi311 in https://github.com/luigi311/libpebble-ble/pull/22
   * Add music control endpoint (push now-playing + inbound actions) by @luigi311 in https://github.com/luigi311/libpebble-ble/pull/23
 
- -- Luis Garcia <luigi311@Luigi311-Desktop>  Mon, 29 Jun 2026 22:02:36 +0000
+ -- Luis Garcia <git@luigi311.com>  Mon, 29 Jun 2026 22:02:36 +0000
 
 cobbled (0.3.0-1) unstable; urgency=medium
 
   * Rename project to cobble/cobbled
   * Fix health sync issues
 
- -- Luis Garcia <luigi311@Luigi311-Desktop>  Sat, 27 Jun 2026 20:36:16 +0000
+ -- Luis Garcia <git@luigi311.com>  Sat, 27 Jun 2026 20:36:16 +0000
 
 pebble-le (0.2.0-1) unstable; urgency=medium
 
@@ -38,7 +54,7 @@ pebble-le (0.2.0-1) unstable; urgency=medium
   * Add Weather
   * Add timezone sync
 
- -- Luis Garcia <luigi311@Luigi311-Desktop>  Tue, 23 Jun 2026 05:39:08 +0000
+ -- Luis Garcia <git@luigi311.com>  Tue, 23 Jun 2026 05:39:08 +0000
 
 cobbled (0.1.0-1) unstable; urgency=medium
 

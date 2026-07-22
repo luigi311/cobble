@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "cobble"
-version = "0.7.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cobble-client",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "cobble-client"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "cobble-config",
  "cobble-contracts",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "cobble-config"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "cobble-contracts"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "cobbled"
-version = "0.7.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",

@@ -1,6 +1,6 @@
 [package]
 name = "cobble-contracts"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
 description = "Transport-neutral public API models shared by cobbled and Cobble clients."
 
