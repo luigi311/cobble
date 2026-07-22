@@ -18,7 +18,7 @@ use std::{
 
 use futures::StreamExt;
 use tracing::{debug, info, trace, warn};
-use zbus::{zvariant::OwnedValue, Connection, Message, MessageStream};
+use zbus::{Connection, Message, MessageStream, zvariant::OwnedValue};
 
 const NOTIFICATIONS_IFACE: &str = "org.freedesktop.Notifications";
 
@@ -29,7 +29,10 @@ pub struct NotificationMonitor {
 
 impl NotificationMonitor {
     pub fn new() -> Self {
-        Self { conn: None, task: None }
+        Self {
+            conn: None,
+            task: None,
+        }
     }
 
     pub async fn start(
@@ -38,9 +41,7 @@ impl NotificationMonitor {
     ) -> anyhow::Result<()> {
         let conn = zbus::connection::Builder::session()?.build().await?;
 
-        let rule = format!(
-            "type='method_call',interface='{NOTIFICATIONS_IFACE}',member='Notify'"
-        );
+        let rule = format!("type='method_call',interface='{NOTIFICATIONS_IFACE}',member='Notify'");
 
         // BecomeMonitor is the modern approach: works with dbus-broker and avoids
         // the need for eavesdrop=true which dbus-broker rejects.
@@ -133,14 +134,14 @@ fn handle_message(
     // Notify signature: susssasa{sv}i
     // 0:app_name 1:replaces_id 2:app_icon 3:summary 4:body 5:actions 6:hints 7:expire_timeout
     let body = match msg.body().deserialize::<(
-        String,                         // app_name
-        u32,                            // replaces_id
-        String,                         // app_icon
-        String,                         // summary
-        String,                         // body
-        Vec<String>,                    // actions
-        HashMap<String, OwnedValue>,    // hints
-        i32,                            // expire_timeout
+        String,                      // app_name
+        u32,                         // replaces_id
+        String,                      // app_icon
+        String,                      // summary
+        String,                      // body
+        Vec<String>,                 // actions
+        HashMap<String, OwnedValue>, // hints
+        i32,                         // expire_timeout
     )>() {
         Ok(b) => b,
         Err(e) => {
@@ -168,7 +169,10 @@ fn handle_message(
     // because the serials differ; content + time-window dedup is the right fix.
     let now = Instant::now();
     seen.retain(|(_, _, t)| now.duration_since(*t) < Duration::from_secs(1));
-    if seen.iter().any(|(s, b, _)| *s == summary && *b == notif_body) {
+    if seen
+        .iter()
+        .any(|(s, b, _)| *s == summary && *b == notif_body)
+    {
         trace!("suppressing duplicate notification: {summary:?}");
         return;
     }

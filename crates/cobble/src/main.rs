@@ -17,7 +17,9 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     let initial_snapshot = rt.block_on(async {
         let client = CobbleClient::new().await.ok()?;
         client.get_daemon_config().await.ok()
@@ -61,13 +63,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── Shared filter state (main-thread only) ───────────────────────────────
-    let period_workout  = Rc::new(Cell::new(1i32));
-    let offset_workout  = Rc::new(Cell::new(0i32));
-    let bar_range_w     = Rc::new(Cell::new((-1i64, -1i64)));
-    let period_sleep    = Rc::new(Cell::new(1i32));
-    let offset_sleep    = Rc::new(Cell::new(0i32));
-    let period_heart    = Rc::new(Cell::new(1i32));
-    let offset_heart    = Rc::new(Cell::new(0i32));
+    let period_workout = Rc::new(Cell::new(1i32));
+    let offset_workout = Rc::new(Cell::new(0i32));
+    let bar_range_w = Rc::new(Cell::new((-1i64, -1i64)));
+    let period_sleep = Rc::new(Cell::new(1i32));
+    let offset_sleep = Rc::new(Cell::new(0i32));
+    let period_heart = Rc::new(Cell::new(1i32));
+    let offset_heart = Rc::new(Cell::new(0i32));
 
     // ── Set initial period labels ────────────────────────────────────────────
     window.set_workout_period_label(cobble_db::period_label(1, 0).into());
@@ -195,7 +197,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 .await;
                 slint::invoke_from_event_loop(move || {
-                    let Some(window) = weak2.upgrade() else { return };
+                    let Some(window) = weak2.upgrade() else {
+                        return;
+                    };
                     window.set_dc_loading(false);
                     match result {
                         Ok(snapshot) => {
@@ -218,7 +222,9 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         window.on_device_health_changed(move || {
-            if let Some(window) = weak.upgrade() { update_health_display(&window); }
+            if let Some(window) = weak.upgrade() {
+                update_health_display(&window);
+            }
         });
     }
 
@@ -414,7 +420,9 @@ fn main() -> anyhow::Result<()> {
         let weak = window.as_weak();
         let baseline = device_baseline.clone();
         window.on_discard_device_config(move || {
-            if let (Some(window), Some(snapshot)) = (weak.upgrade(), baseline.lock().unwrap().clone()) {
+            if let (Some(window), Some(snapshot)) =
+                (weak.upgrade(), baseline.lock().unwrap().clone())
+            {
                 apply_device_config(&window, &snapshot);
             }
         });
@@ -471,10 +479,14 @@ fn main() -> anyhow::Result<()> {
     // ── Refresh ──────────────────────────────────────────────────────────────
     {
         let weak = window.as_weak();
-        let db2  = effective_db_path.clone();
-        let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
-        let ps = period_sleep.clone();  let os = offset_sleep.clone();
-        let ph = period_heart.clone();  let oh = offset_heart.clone();
+        let db2 = effective_db_path.clone();
+        let pw = period_workout.clone();
+        let ow = offset_workout.clone();
+        let brw = bar_range_w.clone();
+        let ps = period_sleep.clone();
+        let os = offset_sleep.clone();
+        let ph = period_heart.clone();
+        let oh = offset_heart.clone();
         window.on_refresh_data(move || {
             if let Ok(conn) = cobble_db::connect_readonly(&db2) {
                 cobble_db::set_watch_offset(cobble_db::watch_tz_offset(&conn));
@@ -493,9 +505,13 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
+        let pw = period_workout.clone();
+        let ow = offset_workout.clone();
+        let brw = bar_range_w.clone();
         window.on_workout_period_changed(move |p| {
-            pw.set(p); ow.set(0); brw.set((-1, -1));
+            pw.set(p);
+            ow.set(0);
+            brw.set((-1, -1));
             if let Some(w) = weak.upgrade() {
                 update_workout_nav(&w, p, 0);
                 reload_workout_chart(&w, &db2, p, 0);
@@ -508,10 +524,13 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
+        let pw = period_workout.clone();
+        let ow = offset_workout.clone();
+        let brw = bar_range_w.clone();
         window.on_workout_go_back(move || {
             let new_off = ow.get() + 1;
-            ow.set(new_off); brw.set((-1, -1));
+            ow.set(new_off);
+            brw.set((-1, -1));
             let p = pw.get();
             if let Some(w) = weak.upgrade() {
                 update_workout_nav(&w, p, new_off);
@@ -525,10 +544,13 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
+        let pw = period_workout.clone();
+        let ow = offset_workout.clone();
+        let brw = bar_range_w.clone();
         window.on_workout_go_forward(move || {
             let new_off = (ow.get() - 1).max(0);
-            ow.set(new_off); brw.set((-1, -1));
+            ow.set(new_off);
+            brw.set((-1, -1));
             let p = pw.get();
             if let Some(w) = weak.upgrade() {
                 update_workout_nav(&w, p, new_off);
@@ -542,9 +564,15 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let pw = period_workout.clone(); let ow = offset_workout.clone(); let brw = bar_range_w.clone();
+        let pw = period_workout.clone();
+        let ow = offset_workout.clone();
+        let brw = bar_range_w.clone();
         window.on_bar_tapped(move |s, e| {
-            let range = if s < 0 { (-1i64, -1i64) } else { (s as i64, e as i64) };
+            let range = if s < 0 {
+                (-1i64, -1i64)
+            } else {
+                (s as i64, e as i64)
+            };
             brw.set(range);
             if let Some(w) = weak.upgrade() {
                 reload_workout_sessions(&w, &db2, pw.get(), ow.get(), range);
@@ -565,9 +593,11 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        let ps = period_sleep.clone();
+        let os = offset_sleep.clone();
         window.on_sleep_period_changed(move |p| {
-            ps.set(p); os.set(0);
+            ps.set(p);
+            os.set(0);
             if let Some(w) = weak.upgrade() {
                 update_sleep_nav(&w, p, 0);
                 reload_sleep_chart(&w, &db2, p, 0);
@@ -580,7 +610,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        let ps = period_sleep.clone();
+        let os = offset_sleep.clone();
         window.on_sleep_bar_tapped(move |s, e| {
             if let Some(w) = weak.upgrade() {
                 if s < 0 {
@@ -606,7 +637,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        let ps = period_sleep.clone();
+        let os = offset_sleep.clone();
         window.on_sleep_go_back(move || {
             let new_off = os.get() + 1;
             os.set(new_off);
@@ -623,7 +655,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ps = period_sleep.clone(); let os = offset_sleep.clone();
+        let ps = period_sleep.clone();
+        let os = offset_sleep.clone();
         window.on_sleep_go_forward(move || {
             let new_off = (os.get() - 1).max(0);
             os.set(new_off);
@@ -640,9 +673,11 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        let ph = period_heart.clone();
+        let oh = offset_heart.clone();
         window.on_heart_period_changed(move |p| {
-            ph.set(p); oh.set(0);
+            ph.set(p);
+            oh.set(0);
             if let Some(w) = weak.upgrade() {
                 update_heart_nav(&w, p, 0);
                 reload_heart_stats(&w, &db2, p, 0);
@@ -654,7 +689,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        let ph = period_heart.clone();
+        let oh = offset_heart.clone();
         window.on_heart_go_back(move || {
             let new_off = oh.get() + 1;
             oh.set(new_off);
@@ -670,7 +706,8 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = window.as_weak();
         let db2 = effective_db_path.clone();
-        let ph = period_heart.clone(); let oh = offset_heart.clone();
+        let ph = period_heart.clone();
+        let oh = offset_heart.clone();
         window.on_heart_go_forward(move || {
             let new_off = (oh.get() - 1).max(0);
             oh.set(new_off);
@@ -810,7 +847,8 @@ fn main() -> anyhow::Result<()> {
                 if let Some(w) = weak_for_ui.upgrade() {
                     w.set_scan_in_progress(true);
                 }
-            }).ok();
+            })
+            .ok();
             rt.spawn(async move {
                 let results = match CobbleClient::new().await {
                     Err(e) => {
@@ -837,7 +875,8 @@ fn main() -> anyhow::Result<()> {
                         w.set_scan_results(ModelRc::new(model));
                         w.set_scan_in_progress(false);
                     }
-                }).ok();
+                })
+                .ok();
             });
         });
     }
@@ -849,7 +888,9 @@ fn main() -> anyhow::Result<()> {
         window.on_refresh_device(move || {
             let weak2 = weak.clone();
             rt_handle.spawn(async move {
-                let Ok(client) = CobbleClient::new().await else { return };
+                let Ok(client) = CobbleClient::new().await else {
+                    return;
+                };
                 if !client.connected().await {
                     return;
                 }
@@ -875,27 +916,67 @@ fn main() -> anyhow::Result<()> {
         window.on_reboot_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), "Rebooting watch…", "Reboot command accepted.", |c| async move { c.reboot_watch().await })
+            move || {
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Rebooting watch…",
+                    "Reboot command accepted.",
+                    |c| async move { c.reboot_watch().await },
+                )
+            }
         });
         window.on_reset_into_recovery({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), "Rebooting into recovery…", "Recovery command accepted.", |c| async move { c.reset_into_recovery().await })
+            move || {
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Rebooting into recovery…",
+                    "Recovery command accepted.",
+                    |c| async move { c.reset_into_recovery().await },
+                )
+            }
         });
         window.on_create_core_dump({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), "Requesting core dump…", "Core dump request accepted.", |c| async move { c.create_core_dump().await })
+            move || {
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Requesting core dump…",
+                    "Core dump request accepted.",
+                    |c| async move { c.create_core_dump().await },
+                )
+            }
         });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), "Removing Bluetooth bond…", "Bluetooth bond removed.", |c| async move { c.forget().await })
+            move || {
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Removing Bluetooth bond…",
+                    "Bluetooth bond removed.",
+                    |c| async move { c.forget().await },
+                )
+            }
         });
         window.on_factory_reset({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), "Factory resetting watch…", "Factory reset command accepted.", |c| async move { c.factory_reset(true).await })
+            move || {
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Factory resetting watch…",
+                    "Factory reset command accepted.",
+                    |c| async move { c.factory_reset(true).await },
+                )
+            }
         });
     }
 
@@ -905,13 +986,20 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Run one device action at a time and report only completed outcomes.
-fn spawn_action<F, Fut>(rt: &tokio::runtime::Handle, weak: slint::Weak<AppWindow>, pending: &'static str, success: &'static str, f: F)
-where
+fn spawn_action<F, Fut>(
+    rt: &tokio::runtime::Handle,
+    weak: slint::Weak<AppWindow>,
+    pending: &'static str,
+    success: &'static str,
+    f: F,
+) where
     F: FnOnce(CobbleClient) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = cobble_client::Result<()>> + Send + 'static,
 {
     let Some(window) = weak.upgrade() else { return };
-    if window.get_action_busy() { return; }
+    if window.get_action_busy() {
+        return;
+    }
     window.set_action_busy(true);
     window.set_action_error(false);
     window.set_action_status(pending.into());
@@ -922,11 +1010,18 @@ where
             if let Some(w) = weak.upgrade() {
                 w.set_action_busy(false);
                 match result {
-                    Ok(()) => { w.set_action_error(false); w.set_action_status(success.into()); }
-                    Err(error) => { w.set_action_error(true); w.set_action_status(action_error_message(&error.to_string()).into()); }
+                    Ok(()) => {
+                        w.set_action_error(false);
+                        w.set_action_status(success.into());
+                    }
+                    Err(error) => {
+                        w.set_action_error(true);
+                        w.set_action_status(action_error_message(&error.to_string()).into());
+                    }
                 }
             }
-        }).ok();
+        })
+        .ok();
     });
 }
 
@@ -1021,9 +1116,7 @@ fn apply_wellness_status(w: &AppWindow, status: &VarDict) {
         }
     };
     w.set_cfg_intervals_status(message.into());
-    w.set_cfg_intervals_status_error(
-        enabled && (!valid || (!running && !last_error.is_empty())),
-    );
+    w.set_cfg_intervals_status_error(enabled && (!valid || (!running && !last_error.is_empty())));
 }
 
 fn wellness_status_string(status: &VarDict, key: &str) -> String {
@@ -1120,9 +1213,13 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_dc_state(state.into());
     w.set_dc_loading(snapshot.state == DeviceConfigState::Loading);
     let status = match snapshot.state {
-        DeviceConfigState::Disconnected => "Watch disconnected; no device settings are available.".to_string(),
+        DeviceConfigState::Disconnected => {
+            "Watch disconnected; no device settings are available.".to_string()
+        }
         DeviceConfigState::Loading => "Reading settings from the watch…".to_string(),
-        DeviceConfigState::Ready => "Settings read successfully from the connected watch.".to_string(),
+        DeviceConfigState::Ready => {
+            "Settings read successfully from the connected watch.".to_string()
+        }
         DeviceConfigState::Partial => snapshot.error.as_ref().map_or_else(
             || "Only part of the watch configuration was received.".to_string(),
             |error| format!("Partial settings: {}", error.message),
@@ -1148,7 +1245,13 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_platform("".into());
         w.set_dc_firmware("".into());
     }
-    w.set_dc_last_read(snapshot.last_read_at_ms.map(|value| value.to_string()).unwrap_or_default().into());
+    w.set_dc_last_read(
+        snapshot
+            .last_read_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+            .into(),
+    );
 
     if let Some(health) = &snapshot.health.value {
         w.set_dc_health_available(true);
@@ -1159,43 +1262,83 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_tracking_value(health.tracking_enabled);
         w.set_dc_activity_insights_value(health.activity_insights_enabled);
         w.set_dc_sleep_insights_value(health.sleep_insights_enabled);
-        w.set_dc_units_available(health.distance_units.availability == FieldAvailability::Available);
-        w.set_dc_units_index(i32::from(matches!(health.distance_units.value, Some(DistanceUnits::Imperial))));
+        w.set_dc_units_available(
+            health.distance_units.availability == FieldAvailability::Available,
+        );
+        w.set_dc_units_index(i32::from(matches!(
+            health.distance_units.value,
+            Some(DistanceUnits::Imperial)
+        )));
         let hrm = health.hrm.value.as_ref();
         w.set_dc_hrm_available(hrm.is_some());
         w.set_dc_hrm_enabled_value(hrm.is_some_and(|value| value.enabled));
         w.set_dc_hrm_interval_available(hrm.and_then(|value| value.measurement_interval).is_some());
-        w.set_dc_hrm_interval_index(hrm.and_then(|value| value.measurement_interval).map_or(0, |value| match value {
-            HrmMeasurementInterval::TenMinutes => 0,
-            HrmMeasurementInterval::ThirtyMinutes => 1,
-            HrmMeasurementInterval::OneHour => 2,
-            HrmMeasurementInterval::Off => 3,
-            HrmMeasurementInterval::Unknown(_) => 0,
-        }));
-        w.set_dc_hrm_during_activity_available(hrm.and_then(|value| value.during_activity).is_some());
-        w.set_dc_hrm_during_activity_value(hrm.and_then(|value| value.during_activity).unwrap_or(false));
+        w.set_dc_hrm_interval_index(hrm.and_then(|value| value.measurement_interval).map_or(
+            0,
+            |value| match value {
+                HrmMeasurementInterval::TenMinutes => 0,
+                HrmMeasurementInterval::ThirtyMinutes => 1,
+                HrmMeasurementInterval::OneHour => 2,
+                HrmMeasurementInterval::Off => 3,
+                HrmMeasurementInterval::Unknown(_) => 0,
+            },
+        ));
+        w.set_dc_hrm_during_activity_available(
+            hrm.and_then(|value| value.during_activity).is_some(),
+        );
+        w.set_dc_hrm_during_activity_value(
+            hrm.and_then(|value| value.during_activity).unwrap_or(false),
+        );
         w.set_dc_height(format!("{} mm", health.height_mm).into());
         w.set_dc_weight(format!("{} dag", health.weight_dag).into());
         w.set_dc_age(health.age.to_string().into());
-        w.set_dc_sex(match health.gender { 0 => "Female", 1 => "Male", 2 => "Other", _ => "Unknown" }.into());
-        w.set_dc_tracking(if health.tracking_enabled { "Enabled" } else { "Disabled" }.into());
-        let insights = match (health.activity_insights_enabled, health.sleep_insights_enabled) {
+        w.set_dc_sex(
+            match health.gender {
+                0 => "Female",
+                1 => "Male",
+                2 => "Other",
+                _ => "Unknown",
+            }
+            .into(),
+        );
+        w.set_dc_tracking(
+            if health.tracking_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+            .into(),
+        );
+        let insights = match (
+            health.activity_insights_enabled,
+            health.sleep_insights_enabled,
+        ) {
             (true, true) => "Activity and sleep",
             (true, false) => "Activity only",
             (false, true) => "Sleep only",
             (false, false) => "Disabled",
         };
         w.set_dc_insights(insights.into());
-        w.set_dc_units(match health.distance_units.value {
-            Some(DistanceUnits::Metric) => "Metric",
-            Some(DistanceUnits::Imperial) => "Imperial",
-            Some(DistanceUnits::Unknown(_)) => "Unknown",
-            None => availability_label(health.distance_units.availability),
-        }.into());
-        w.set_dc_hrm(health.hrm.value.as_ref().map_or_else(
-            || availability_label(health.hrm.availability),
-            |hrm| if hrm.enabled { "Enabled" } else { "Disabled" },
-        ).into());
+        w.set_dc_units(
+            match health.distance_units.value {
+                Some(DistanceUnits::Metric) => "Metric",
+                Some(DistanceUnits::Imperial) => "Imperial",
+                Some(DistanceUnits::Unknown(_)) => "Unknown",
+                None => availability_label(health.distance_units.availability),
+            }
+            .into(),
+        );
+        w.set_dc_hrm(
+            health
+                .hrm
+                .value
+                .as_ref()
+                .map_or_else(
+                    || availability_label(health.hrm.availability),
+                    |hrm| if hrm.enabled { "Enabled" } else { "Disabled" },
+                )
+                .into(),
+        );
         update_health_display(w);
     } else {
         w.set_dc_health_available(false);
@@ -1213,18 +1356,28 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_hrm("".into());
     }
     w.set_dc_dirty(false);
-    let pref_bool = |key: &str| snapshot.preferences.get(key).and_then(|field| match field.value {
-        Some(PreferenceValue::Bool(value)) => Some(value), _ => None,
-    });
+    let pref_bool = |key: &str| {
+        snapshot
+            .preferences
+            .get(key)
+            .and_then(|field| match field.value {
+                Some(PreferenceValue::Bool(value)) => Some(value),
+                _ => None,
+            })
+    };
     let clock = pref_bool("clock24h");
     w.set_dc_clock_24h_available(clock.is_some());
     w.set_dc_clock_24h_value(clock.unwrap_or(false));
     let left = pref_bool("displayOrientationLeftHanded");
     w.set_dc_left_handed_available(left.is_some());
     w.set_dc_left_handed_value(left.unwrap_or(false));
-    let text_size = snapshot.preferences.get("textStyle").and_then(|field| match field.value {
-        Some(PreferenceValue::Unsigned(value @ 0..=2)) => Some(value as i32), _ => None,
-    });
+    let text_size = snapshot
+        .preferences
+        .get("textStyle")
+        .and_then(|field| match field.value {
+            Some(PreferenceValue::Unsigned(value @ 0..=2)) => Some(value as i32),
+            _ => None,
+        });
     w.set_dc_text_size_available(text_size.is_some());
     w.set_dc_text_size_index(text_size.unwrap_or(1));
     let set_bool = |key: &str, available: fn(&AppWindow, bool), value: fn(&AppWindow, bool)| {
@@ -1232,68 +1385,166 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         available(w, current.is_some());
         value(w, current.unwrap_or(false));
     };
-    set_bool("lightEnabled", AppWindow::set_dc_light_enabled_available, AppWindow::set_dc_light_enabled_value);
-    set_bool("lightAmbientSensorEnabled", AppWindow::set_dc_light_ambient_available, AppWindow::set_dc_light_ambient_value);
-    set_bool("lightMotion", AppWindow::set_dc_light_motion_available, AppWindow::set_dc_light_motion_value);
-    set_bool("lightDynamicIntensity", AppWindow::set_dc_light_dynamic_legacy_available, AppWindow::set_dc_light_dynamic_legacy_value);
-    set_bool("menuScrollWrapAround", AppWindow::set_dc_menu_wrap_available, AppWindow::set_dc_menu_wrap_value);
-    set_bool("notifDesignStyle", AppWindow::set_dc_notif_design_available, AppWindow::set_dc_notif_design_value);
-    set_bool("notifVibeDelay", AppWindow::set_dc_notif_delay_available, AppWindow::set_dc_notif_delay_value);
-    set_bool("notifBacklight", AppWindow::set_dc_notif_backlight_available, AppWindow::set_dc_notif_backlight_value);
-    set_bool("dndManuallyEnabled", AppWindow::set_dc_dnd_manual_available, AppWindow::set_dc_dnd_manual_value);
-    set_bool("dndSmartEnabled", AppWindow::set_dc_dnd_smart_available, AppWindow::set_dc_dnd_smart_value);
-    set_bool("dndMotionBacklight", AppWindow::set_dc_dnd_motion_backlight_available, AppWindow::set_dc_dnd_motion_backlight_value);
-    set_bool("dndAutoDismiss", AppWindow::set_dc_dnd_auto_dismiss_available, AppWindow::set_dc_dnd_auto_dismiss_value);
-    set_bool("timelineQuickViewEnabled", AppWindow::set_dc_timeline_quick_view_available, AppWindow::set_dc_timeline_quick_view_value);
-    set_bool("musicShowVolumeControls", AppWindow::set_dc_music_volume_available, AppWindow::set_dc_music_volume_value);
-    set_bool("musicShowProgressBar", AppWindow::set_dc_music_progress_available, AppWindow::set_dc_music_progress_value);
-    let pref_number = |key: &str| snapshot.preferences.get(key).and_then(|field| match field.value {
-        Some(PreferenceValue::Unsigned(value)) => Some(value), _ => None,
-    });
+    set_bool(
+        "lightEnabled",
+        AppWindow::set_dc_light_enabled_available,
+        AppWindow::set_dc_light_enabled_value,
+    );
+    set_bool(
+        "lightAmbientSensorEnabled",
+        AppWindow::set_dc_light_ambient_available,
+        AppWindow::set_dc_light_ambient_value,
+    );
+    set_bool(
+        "lightMotion",
+        AppWindow::set_dc_light_motion_available,
+        AppWindow::set_dc_light_motion_value,
+    );
+    set_bool(
+        "lightDynamicIntensity",
+        AppWindow::set_dc_light_dynamic_legacy_available,
+        AppWindow::set_dc_light_dynamic_legacy_value,
+    );
+    set_bool(
+        "menuScrollWrapAround",
+        AppWindow::set_dc_menu_wrap_available,
+        AppWindow::set_dc_menu_wrap_value,
+    );
+    set_bool(
+        "notifDesignStyle",
+        AppWindow::set_dc_notif_design_available,
+        AppWindow::set_dc_notif_design_value,
+    );
+    set_bool(
+        "notifVibeDelay",
+        AppWindow::set_dc_notif_delay_available,
+        AppWindow::set_dc_notif_delay_value,
+    );
+    set_bool(
+        "notifBacklight",
+        AppWindow::set_dc_notif_backlight_available,
+        AppWindow::set_dc_notif_backlight_value,
+    );
+    set_bool(
+        "dndManuallyEnabled",
+        AppWindow::set_dc_dnd_manual_available,
+        AppWindow::set_dc_dnd_manual_value,
+    );
+    set_bool(
+        "dndSmartEnabled",
+        AppWindow::set_dc_dnd_smart_available,
+        AppWindow::set_dc_dnd_smart_value,
+    );
+    set_bool(
+        "dndMotionBacklight",
+        AppWindow::set_dc_dnd_motion_backlight_available,
+        AppWindow::set_dc_dnd_motion_backlight_value,
+    );
+    set_bool(
+        "dndAutoDismiss",
+        AppWindow::set_dc_dnd_auto_dismiss_available,
+        AppWindow::set_dc_dnd_auto_dismiss_value,
+    );
+    set_bool(
+        "timelineQuickViewEnabled",
+        AppWindow::set_dc_timeline_quick_view_available,
+        AppWindow::set_dc_timeline_quick_view_value,
+    );
+    set_bool(
+        "musicShowVolumeControls",
+        AppWindow::set_dc_music_volume_available,
+        AppWindow::set_dc_music_volume_value,
+    );
+    set_bool(
+        "musicShowProgressBar",
+        AppWindow::set_dc_music_progress_available,
+        AppWindow::set_dc_music_progress_value,
+    );
+    let pref_number = |key: &str| {
+        snapshot
+            .preferences
+            .get(key)
+            .and_then(|field| match field.value {
+                Some(PreferenceValue::Unsigned(value)) => Some(value),
+                _ => None,
+            })
+    };
     let timeout = pref_number("lightTimeoutMs").filter(|value| (1000..=10000).contains(value));
-    w.set_dc_light_timeout_available(timeout.is_some()); w.set_dc_light_timeout_ms(timeout.unwrap_or(3000) as i32);
+    w.set_dc_light_timeout_available(timeout.is_some());
+    w.set_dc_light_timeout_ms(timeout.unwrap_or(3000) as i32);
     let touch = pref_number("lightTouch").filter(|value| *value <= 2);
-    w.set_dc_light_touch_available(touch.is_some()); w.set_dc_light_touch_index(touch.unwrap_or(0) as i32);
-    let intensity = pref_number("lightIntensity").and_then(|value| [10, 25, 50, 100].iter().position(|code| *code == value));
-    w.set_dc_light_intensity_available(intensity.is_some()); w.set_dc_light_intensity_index(intensity.unwrap_or(1) as i32);
+    w.set_dc_light_touch_available(touch.is_some());
+    w.set_dc_light_touch_index(touch.unwrap_or(0) as i32);
+    let intensity = pref_number("lightIntensity")
+        .and_then(|value| [10, 25, 50, 100].iter().position(|code| *code == value));
+    w.set_dc_light_intensity_available(intensity.is_some());
+    w.set_dc_light_intensity_index(intensity.unwrap_or(1) as i32);
     let preset = pref_number("lightPreset").filter(|value| *value <= 3);
-    w.set_dc_light_preset_available(preset.is_some()); w.set_dc_light_preset_index(preset.unwrap_or(1) as i32);
+    w.set_dc_light_preset_available(preset.is_some());
+    w.set_dc_light_preset_index(preset.unwrap_or(1) as i32);
     let dynamic = pref_number("lightDynamicMode").filter(|value| *value <= 3);
-    w.set_dc_light_dynamic_mode_available(dynamic.is_some()); w.set_dc_light_dynamic_mode_index(dynamic.unwrap_or(2) as i32);
+    w.set_dc_light_dynamic_mode_available(dynamic.is_some());
+    w.set_dc_light_dynamic_mode_index(dynamic.unwrap_or(2) as i32);
     let menu_vibe = pref_number("menuScrollVibeBehavior").filter(|value| *value <= 2);
-    w.set_dc_menu_vibe_available(menu_vibe.is_some()); w.set_dc_menu_vibe_index(menu_vibe.unwrap_or(0) as i32);
-    let filter = pref_number("mask").and_then(|value| [0, 2, 15].iter().position(|code| *code == value));
-    w.set_dc_notif_filter_available(filter.is_some()); w.set_dc_notif_filter_index(filter.unwrap_or(2) as i32);
+    w.set_dc_menu_vibe_available(menu_vibe.is_some());
+    w.set_dc_menu_vibe_index(menu_vibe.unwrap_or(0) as i32);
+    let filter =
+        pref_number("mask").and_then(|value| [0, 2, 15].iter().position(|code| *code == value));
+    w.set_dc_notif_filter_available(filter.is_some());
+    w.set_dc_notif_filter_index(filter.unwrap_or(2) as i32);
     let notif_timeout = pref_number("notifWindowTimeout").filter(|value| *value <= 600000);
-    w.set_dc_notif_timeout_available(notif_timeout.is_some()); w.set_dc_notif_timeout_ms(notif_timeout.unwrap_or(180000) as i32);
+    w.set_dc_notif_timeout_available(notif_timeout.is_some());
+    w.set_dc_notif_timeout_ms(notif_timeout.unwrap_or(180000) as i32);
     let vibe_intensity = pref_number("vibeIntensity").filter(|value| *value <= 2);
-    w.set_dc_vibe_intensity_available(vibe_intensity.is_some()); w.set_dc_vibe_intensity_index(vibe_intensity.unwrap_or(2) as i32);
-    let option_index = |key: &str, codes: &[u32]| pref_number(key).and_then(|value| codes.iter().position(|code| *code == value));
+    w.set_dc_vibe_intensity_available(vibe_intensity.is_some());
+    w.set_dc_vibe_intensity_index(vibe_intensity.unwrap_or(2) as i32);
+    let option_index = |key: &str, codes: &[u32]| {
+        pref_number(key).and_then(|value| codes.iter().position(|code| *code == value))
+    };
     let vibe_notifications = option_index("vibeScoreNotifications", &[1, 2, 4, 8, 9, 10, 12]);
-    w.set_dc_vibe_notifications_available(vibe_notifications.is_some()); w.set_dc_vibe_notifications_index(vibe_notifications.unwrap_or(4) as i32);
+    w.set_dc_vibe_notifications_available(vibe_notifications.is_some());
+    w.set_dc_vibe_notifications_index(vibe_notifications.unwrap_or(4) as i32);
     let vibe_calls = option_index("vibeScoreIncomingCalls", &[1, 3, 5, 8, 9, 10, 12]);
-    w.set_dc_vibe_calls_available(vibe_calls.is_some()); w.set_dc_vibe_calls_index(vibe_calls.unwrap_or(3) as i32);
+    w.set_dc_vibe_calls_available(vibe_calls.is_some());
+    w.set_dc_vibe_calls_index(vibe_calls.unwrap_or(3) as i32);
     let vibe_alarms = option_index("vibeScoreAlarms", &[3, 5, 8, 9, 10, 11, 12, 14]);
-    w.set_dc_vibe_alarms_available(vibe_alarms.is_some()); w.set_dc_vibe_alarms_index(vibe_alarms.unwrap_or(5) as i32);
+    w.set_dc_vibe_alarms_available(vibe_alarms.is_some());
+    w.set_dc_vibe_alarms_index(vibe_alarms.unwrap_or(5) as i32);
     let dnd_interruptions = option_index("dndInterruptionsMask", &[0, 2]);
-    w.set_dc_dnd_interruptions_available(dnd_interruptions.is_some()); w.set_dc_dnd_interruptions_index(dnd_interruptions.unwrap_or(0) as i32);
+    w.set_dc_dnd_interruptions_available(dnd_interruptions.is_some());
+    w.set_dc_dnd_interruptions_index(dnd_interruptions.unwrap_or(0) as i32);
     let dnd_show = pref_number("dndShowNotifications").filter(|value| *value <= 1);
-    w.set_dc_dnd_show_notifications_available(dnd_show.is_some()); w.set_dc_dnd_show_notifications_index(dnd_show.unwrap_or(1) as i32);
-    let timeline_minutes = pref_number("timelineQuickViewBeforeTimeMin").filter(|value| *value <= 30);
-    w.set_dc_timeline_minutes_available(timeline_minutes.is_some()); w.set_dc_timeline_minutes(timeline_minutes.unwrap_or(10) as i32);
+    w.set_dc_dnd_show_notifications_available(dnd_show.is_some());
+    w.set_dc_dnd_show_notifications_index(dnd_show.unwrap_or(1) as i32);
+    let timeline_minutes =
+        pref_number("timelineQuickViewBeforeTimeMin").filter(|value| *value <= 30);
+    w.set_dc_timeline_minutes_available(timeline_minutes.is_some());
+    w.set_dc_timeline_minutes(timeline_minutes.unwrap_or(10) as i32);
     let backlight_colors = [
-        0xff0000, 0xff7f00, 0xffff00, 0x7fff00, 0x00ff00, 0x00ffff,
-        0x0000ff, 0x7f00ff, 0xff00ff, 0xff66cc, 0xffbfa2, 0xffffff,
+        0xff0000, 0xff7f00, 0xffff00, 0x7fff00, 0x00ff00, 0x00ffff, 0x0000ff, 0x7f00ff, 0xff00ff,
+        0xff66cc, 0xffbfa2, 0xffffff,
     ];
     let light_color = pref_number("lightColor");
     w.set_dc_light_color_available(light_color.is_some());
-    w.set_dc_light_color_index(light_color.and_then(|value| backlight_colors.iter().position(|known| *known == value)).unwrap_or(12) as i32);
-    let motion_sensitivity = pref_number("motionSensitivity").and_then(|value| [10, 25, 40, 55, 70, 85, 100].iter().position(|known| *known == value));
-    w.set_dc_motion_sensitivity_available(motion_sensitivity.is_some()); w.set_dc_motion_sensitivity_index(motion_sensitivity.unwrap_or(3) as i32);
-    let ambient_threshold = pref_number("lightAmbientThreshold").filter(|value| (1..=4096).contains(value));
-    w.set_dc_light_ambient_threshold_available(ambient_threshold.is_some()); w.set_dc_light_ambient_threshold(ambient_threshold.unwrap_or(150) as i32);
+    w.set_dc_light_color_index(
+        light_color
+            .and_then(|value| backlight_colors.iter().position(|known| *known == value))
+            .unwrap_or(12) as i32,
+    );
+    let motion_sensitivity = pref_number("motionSensitivity").and_then(|value| {
+        [10, 25, 40, 55, 70, 85, 100]
+            .iter()
+            .position(|known| *known == value)
+    });
+    w.set_dc_motion_sensitivity_available(motion_sensitivity.is_some());
+    w.set_dc_motion_sensitivity_index(motion_sensitivity.unwrap_or(3) as i32);
+    let ambient_threshold =
+        pref_number("lightAmbientThreshold").filter(|value| (1..=4096).contains(value));
+    w.set_dc_light_ambient_threshold_available(ambient_threshold.is_some());
+    w.set_dc_light_ambient_threshold(ambient_threshold.unwrap_or(150) as i32);
     let dynamic_threshold = pref_number("dynBacklightMinThreshold").filter(|value| *value <= 4096);
-    w.set_dc_dynamic_backlight_threshold_available(dynamic_threshold.is_some()); w.set_dc_dynamic_backlight_threshold(dynamic_threshold.unwrap_or(5) as i32);
+    w.set_dc_dynamic_backlight_threshold_available(dynamic_threshold.is_some());
+    w.set_dc_dynamic_backlight_threshold(dynamic_threshold.unwrap_or(5) as i32);
     let quick_launch_values = [
         "off",
         "2220d805-cf9a-4e12-92b9-5ca778aff6bb",
@@ -1304,62 +1555,209 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         "79c76b48-6111-4e80-8deb-3119eebef33e",
         "36d8c6ed-4c83-4fa1-a9e2-8f12dc941f8c",
     ];
-    let set_quick_launch = |key: &str, available: fn(&AppWindow, bool), index: fn(&AppWindow, i32)| {
-        let current = snapshot.preferences.get(key).and_then(|field| match field.value.as_ref() {
-            Some(PreferenceValue::Text(value)) => Some(value.as_str()), _ => None,
-        });
+    let set_quick_launch = |key: &str,
+                            available: fn(&AppWindow, bool),
+                            index: fn(&AppWindow, i32)| {
+        let current = snapshot
+            .preferences
+            .get(key)
+            .and_then(|field| match field.value.as_ref() {
+                Some(PreferenceValue::Text(value)) => Some(value.as_str()),
+                _ => None,
+            });
         available(w, current.is_some());
-        index(w, current.and_then(|value| quick_launch_values.iter().position(|known| *known == value)).unwrap_or(8) as i32);
+        index(
+            w,
+            current
+                .and_then(|value| quick_launch_values.iter().position(|known| *known == value))
+                .unwrap_or(8) as i32,
+        );
     };
-    set_quick_launch("qlUp", AppWindow::set_dc_ql_up_available, AppWindow::set_dc_ql_up_index);
-    set_quick_launch("qlDown", AppWindow::set_dc_ql_down_available, AppWindow::set_dc_ql_down_index);
-    set_quick_launch("qlSelect", AppWindow::set_dc_ql_select_available, AppWindow::set_dc_ql_select_index);
-    set_quick_launch("qlBack", AppWindow::set_dc_ql_back_available, AppWindow::set_dc_ql_back_index);
-    set_quick_launch("qlComboBackUp", AppWindow::set_dc_ql_combo_back_up_available, AppWindow::set_dc_ql_combo_back_up_index);
-    set_quick_launch("qlComboUpDown", AppWindow::set_dc_ql_combo_up_down_available, AppWindow::set_dc_ql_combo_up_down_index);
-    set_quick_launch("qlSingleClickUp", AppWindow::set_dc_ql_tap_up_available, AppWindow::set_dc_ql_tap_up_index);
-    set_quick_launch("qlSingleClickDown", AppWindow::set_dc_ql_tap_down_available, AppWindow::set_dc_ql_tap_down_index);
+    set_quick_launch(
+        "qlUp",
+        AppWindow::set_dc_ql_up_available,
+        AppWindow::set_dc_ql_up_index,
+    );
+    set_quick_launch(
+        "qlDown",
+        AppWindow::set_dc_ql_down_available,
+        AppWindow::set_dc_ql_down_index,
+    );
+    set_quick_launch(
+        "qlSelect",
+        AppWindow::set_dc_ql_select_available,
+        AppWindow::set_dc_ql_select_index,
+    );
+    set_quick_launch(
+        "qlBack",
+        AppWindow::set_dc_ql_back_available,
+        AppWindow::set_dc_ql_back_index,
+    );
+    set_quick_launch(
+        "qlComboBackUp",
+        AppWindow::set_dc_ql_combo_back_up_available,
+        AppWindow::set_dc_ql_combo_back_up_index,
+    );
+    set_quick_launch(
+        "qlComboUpDown",
+        AppWindow::set_dc_ql_combo_up_down_available,
+        AppWindow::set_dc_ql_combo_up_down_index,
+    );
+    set_quick_launch(
+        "qlSingleClickUp",
+        AppWindow::set_dc_ql_tap_up_available,
+        AppWindow::set_dc_ql_tap_up_index,
+    );
+    set_quick_launch(
+        "qlSingleClickDown",
+        AppWindow::set_dc_ql_tap_down_available,
+        AppWindow::set_dc_ql_tap_down_index,
+    );
     let language = pref_number("language");
     w.set_dc_language_available(language.is_some());
-    w.set_dc_language_index(language.filter(|value| (1..=9).contains(value)).map_or(9, |value| value as i32 - 1));
+    w.set_dc_language_index(
+        language
+            .filter(|value| (1..=9).contains(value))
+            .map_or(9, |value| value as i32 - 1),
+    );
 
     let mut entries = Vec::new();
     if let Some(watch) = &snapshot.watch {
-        entries.push(DeviceConfigEntry { group: "Capabilities & Diagnostics".into(), label: "Platform".into(), value: watch.platform.clone().unwrap_or_else(|| "Unknown".into()).into(), status: "available".into() });
-        entries.push(DeviceConfigEntry { group: "".into(), label: "Firmware".into(), value: watch.firmware.clone().unwrap_or_else(|| "Unknown".into()).into(), status: "available".into() });
+        entries.push(DeviceConfigEntry {
+            group: "Capabilities & Diagnostics".into(),
+            label: "Platform".into(),
+            value: watch
+                .platform
+                .clone()
+                .unwrap_or_else(|| "Unknown".into())
+                .into(),
+            status: "available".into(),
+        });
+        entries.push(DeviceConfigEntry {
+            group: "".into(),
+            label: "Firmware".into(),
+            value: watch
+                .firmware
+                .clone()
+                .unwrap_or_else(|| "Unknown".into())
+                .into(),
+            status: "available".into(),
+        });
     }
-    entries.push(DeviceConfigEntry { group: if entries.is_empty() { "Capabilities & Diagnostics".into() } else { "".into() }, label: "BlobDB version".into(), value: snapshot.capabilities.blob_db_version.to_string().into(), status: "available".into() });
-    entries.push(DeviceConfigEntry { group: "".into(), label: "Complete readback".into(), value: if snapshot.capabilities.supported.iter().any(|capability| capability == "complete_refresh") { "Yes" } else { "No" }.into(), status: "available".into() });
+    entries.push(DeviceConfigEntry {
+        group: if entries.is_empty() {
+            "Capabilities & Diagnostics".into()
+        } else {
+            "".into()
+        },
+        label: "BlobDB version".into(),
+        value: snapshot.capabilities.blob_db_version.to_string().into(),
+        status: "available".into(),
+    });
+    entries.push(DeviceConfigEntry {
+        group: "".into(),
+        label: "Complete readback".into(),
+        value: if snapshot
+            .capabilities
+            .supported
+            .iter()
+            .any(|capability| capability == "complete_refresh")
+        {
+            "Yes"
+        } else {
+            "No"
+        }
+        .into(),
+        status: "available".into(),
+    });
     let mut previous_group = "Capabilities & Diagnostics".to_owned();
     for (key, field) in &snapshot.preferences {
-        if matches!(key.as_str(), "clock24h" | "displayOrientationLeftHanded" | "textStyle"
-            | "lightEnabled" | "lightAmbientSensorEnabled" | "lightMotion" | "lightTimeoutMs"
-            | "lightTouch" | "lightIntensity" | "lightDynamicIntensity" | "lightPreset"
-            | "lightDynamicMode" | "menuScrollWrapAround" | "menuScrollVibeBehavior"
-            | "mask" | "notifDesignStyle" | "notifVibeDelay" | "notifBacklight"
-            | "notifWindowTimeout" | "vibeIntensity" | "vibeScoreNotifications"
-            | "vibeScoreIncomingCalls" | "vibeScoreAlarms" | "dndManuallyEnabled"
-            | "dndSmartEnabled" | "dndInterruptionsMask" | "dndShowNotifications"
-            | "dndMotionBacklight" | "dndAutoDismiss" | "timelineQuickViewEnabled"
-            | "timelineQuickViewBeforeTimeMin" | "musicShowVolumeControls"
-            | "musicShowProgressBar" | "qlUp" | "qlDown" | "qlSelect" | "qlBack"
-            | "qlComboBackUp" | "qlComboUpDown" | "qlSingleClickUp" | "qlSingleClickDown"
-            | "language" | "lightColor" | "motionSensitivity" | "lightAmbientThreshold"
-            | "dynBacklightMinThreshold") {
+        if matches!(
+            key.as_str(),
+            "clock24h"
+                | "displayOrientationLeftHanded"
+                | "textStyle"
+                | "lightEnabled"
+                | "lightAmbientSensorEnabled"
+                | "lightMotion"
+                | "lightTimeoutMs"
+                | "lightTouch"
+                | "lightIntensity"
+                | "lightDynamicIntensity"
+                | "lightPreset"
+                | "lightDynamicMode"
+                | "menuScrollWrapAround"
+                | "menuScrollVibeBehavior"
+                | "mask"
+                | "notifDesignStyle"
+                | "notifVibeDelay"
+                | "notifBacklight"
+                | "notifWindowTimeout"
+                | "vibeIntensity"
+                | "vibeScoreNotifications"
+                | "vibeScoreIncomingCalls"
+                | "vibeScoreAlarms"
+                | "dndManuallyEnabled"
+                | "dndSmartEnabled"
+                | "dndInterruptionsMask"
+                | "dndShowNotifications"
+                | "dndMotionBacklight"
+                | "dndAutoDismiss"
+                | "timelineQuickViewEnabled"
+                | "timelineQuickViewBeforeTimeMin"
+                | "musicShowVolumeControls"
+                | "musicShowProgressBar"
+                | "qlUp"
+                | "qlDown"
+                | "qlSelect"
+                | "qlBack"
+                | "qlComboBackUp"
+                | "qlComboUpDown"
+                | "qlSingleClickUp"
+                | "qlSingleClickDown"
+                | "language"
+                | "lightColor"
+                | "motionSensitivity"
+                | "lightAmbientThreshold"
+                | "dynBacklightMinThreshold"
+        ) {
             continue;
         }
         let group = preference_group(key);
-        let heading = if group == previous_group { String::new() } else { group.to_owned() };
+        let heading = if group == previous_group {
+            String::new()
+        } else {
+            group.to_owned()
+        };
         previous_group = group.to_owned();
         let decoded = match &field.value {
-            Some(PreferenceValue::Bool(value)) => if *value { "On".to_string() } else { "Off".to_string() },
-            Some(PreferenceValue::Unsigned(value)) | Some(PreferenceValue::Color(value)) => value.to_string(),
+            Some(PreferenceValue::Bool(value)) => {
+                if *value {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            Some(PreferenceValue::Unsigned(value)) | Some(PreferenceValue::Color(value)) => {
+                value.to_string()
+            }
             Some(PreferenceValue::Text(value)) => value.clone(),
-            Some(PreferenceValue::Enum { code, label }) => label.clone().unwrap_or_else(|| format!("Unknown ({code})")),
+            Some(PreferenceValue::Enum { code, label }) => {
+                label.clone().unwrap_or_else(|| format!("Unknown ({code})"))
+            }
             Some(PreferenceValue::Unknown) | None => "—".to_string(),
         };
-        let raw = field.raw.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
-        let value = if raw.is_empty() { decoded } else { format!("{decoded} · raw {raw}") };
+        let raw = field
+            .raw
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let value = if raw.is_empty() {
+            decoded
+        } else {
+            format!("{decoded} · raw {raw}")
+        };
         entries.push(DeviceConfigEntry {
             group: heading.into(),
             label: humanize_preference_key(key).into(),
@@ -1399,31 +1797,53 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_clock_24h_available(false);
     w.set_dc_left_handed_available(false);
     w.set_dc_text_size_available(false);
-    w.set_dc_light_enabled_available(false); w.set_dc_light_ambient_available(false);
-    w.set_dc_light_motion_available(false); w.set_dc_light_timeout_available(false);
-    w.set_dc_light_touch_available(false); w.set_dc_light_intensity_available(false);
-    w.set_dc_light_dynamic_legacy_available(false); w.set_dc_light_preset_available(false);
-    w.set_dc_light_dynamic_mode_available(false); w.set_dc_menu_wrap_available(false);
+    w.set_dc_light_enabled_available(false);
+    w.set_dc_light_ambient_available(false);
+    w.set_dc_light_motion_available(false);
+    w.set_dc_light_timeout_available(false);
+    w.set_dc_light_touch_available(false);
+    w.set_dc_light_intensity_available(false);
+    w.set_dc_light_dynamic_legacy_available(false);
+    w.set_dc_light_preset_available(false);
+    w.set_dc_light_dynamic_mode_available(false);
+    w.set_dc_menu_wrap_available(false);
     w.set_dc_menu_vibe_available(false);
-    w.set_dc_notif_filter_available(false); w.set_dc_notif_design_available(false);
-    w.set_dc_notif_delay_available(false); w.set_dc_notif_backlight_available(false);
-    w.set_dc_notif_timeout_available(false); w.set_dc_vibe_intensity_available(false);
-    w.set_dc_vibe_notifications_available(false); w.set_dc_vibe_calls_available(false);
+    w.set_dc_notif_filter_available(false);
+    w.set_dc_notif_design_available(false);
+    w.set_dc_notif_delay_available(false);
+    w.set_dc_notif_backlight_available(false);
+    w.set_dc_notif_timeout_available(false);
+    w.set_dc_vibe_intensity_available(false);
+    w.set_dc_vibe_notifications_available(false);
+    w.set_dc_vibe_calls_available(false);
     w.set_dc_vibe_alarms_available(false);
-    w.set_dc_dnd_manual_available(false); w.set_dc_dnd_smart_available(false);
-    w.set_dc_dnd_interruptions_available(false); w.set_dc_dnd_show_notifications_available(false);
-    w.set_dc_dnd_motion_backlight_available(false); w.set_dc_dnd_auto_dismiss_available(false);
-    w.set_dc_timeline_quick_view_available(false); w.set_dc_timeline_minutes_available(false);
-    w.set_dc_music_volume_available(false); w.set_dc_music_progress_available(false);
-    w.set_dc_ql_up_available(false); w.set_dc_ql_down_available(false);
-    w.set_dc_ql_select_available(false); w.set_dc_ql_back_available(false);
-    w.set_dc_ql_combo_back_up_available(false); w.set_dc_ql_combo_up_down_available(false);
-    w.set_dc_ql_tap_up_available(false); w.set_dc_ql_tap_down_available(false);
+    w.set_dc_dnd_manual_available(false);
+    w.set_dc_dnd_smart_available(false);
+    w.set_dc_dnd_interruptions_available(false);
+    w.set_dc_dnd_show_notifications_available(false);
+    w.set_dc_dnd_motion_backlight_available(false);
+    w.set_dc_dnd_auto_dismiss_available(false);
+    w.set_dc_timeline_quick_view_available(false);
+    w.set_dc_timeline_minutes_available(false);
+    w.set_dc_music_volume_available(false);
+    w.set_dc_music_progress_available(false);
+    w.set_dc_ql_up_available(false);
+    w.set_dc_ql_down_available(false);
+    w.set_dc_ql_select_available(false);
+    w.set_dc_ql_back_available(false);
+    w.set_dc_ql_combo_back_up_available(false);
+    w.set_dc_ql_combo_up_down_available(false);
+    w.set_dc_ql_tap_up_available(false);
+    w.set_dc_ql_tap_down_available(false);
     w.set_dc_language_available(false);
-    w.set_dc_light_color_available(false); w.set_dc_motion_sensitivity_available(false);
-    w.set_dc_light_ambient_threshold_available(false); w.set_dc_dynamic_backlight_threshold_available(false);
+    w.set_dc_light_color_available(false);
+    w.set_dc_motion_sensitivity_available(false);
+    w.set_dc_light_ambient_threshold_available(false);
+    w.set_dc_dynamic_backlight_threshold_available(false);
     w.set_dc_backlight_advanced_expanded(false);
-    w.set_dc_preferences(ModelRc::new(VecModel::from(Vec::<DeviceConfigEntry>::new())));
+    w.set_dc_preferences(ModelRc::new(
+        VecModel::from(Vec::<DeviceConfigEntry>::new()),
+    ));
 }
 
 fn availability_label(value: FieldAvailability) -> &'static str {
@@ -1445,13 +1865,21 @@ fn availability_wire(value: FieldAvailability) -> &'static str {
 }
 
 fn preference_group(key: &str) -> &'static str {
-    if key.contains("quiet") || key.contains("dnd") { "Quiet Time" }
-    else if key.contains("light") || key.contains("backlight") { "Backlight & Input" }
-    else if key.contains("notif") || key.contains("vibr") { "Notifications" }
-    else if key.contains("timeline") { "Timeline" }
-    else if key.contains("music") { "Music" }
-    else if key.contains("clock") || key.contains("time") { "Time & Display" }
-    else { "Other Preferences" }
+    if key.contains("quiet") || key.contains("dnd") {
+        "Quiet Time"
+    } else if key.contains("light") || key.contains("backlight") {
+        "Backlight & Input"
+    } else if key.contains("notif") || key.contains("vibr") {
+        "Notifications"
+    } else if key.contains("timeline") {
+        "Timeline"
+    } else if key.contains("music") {
+        "Music"
+    } else if key.contains("clock") || key.contains("time") {
+        "Time & Display"
+    } else {
+        "Other Preferences"
+    }
 }
 
 fn humanize_preference_key(key: &str) -> String {
@@ -1463,7 +1891,10 @@ fn humanize_preference_key(key: &str) -> String {
         result.push(character);
     }
     let mut characters = result.chars();
-    characters.next().map(|first| first.to_uppercase().collect::<String>() + characters.as_str()).unwrap_or(result)
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or(result)
 }
 
 fn clear_watch_info(w: &AppWindow) {
@@ -1505,13 +1936,17 @@ fn reload_workout_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offs
                 window.set_steps_avg_label(chart.avg_label.into());
                 window.set_steps_delta_positive(chart.delta_positive);
                 window.set_steps_delta_label(chart.delta_label.into());
-                let slint_steps: Vec<DaySteps> = chart.bars.into_iter().map(|s| DaySteps {
-                    label: s.label.into(),
-                    steps_label: s.steps_label.into(),
-                    fraction: s.fraction,
-                    bar_start: s.bar_start as i32,
-                    bar_end: s.bar_end as i32,
-                }).collect();
+                let slint_steps: Vec<DaySteps> = chart
+                    .bars
+                    .into_iter()
+                    .map(|s| DaySteps {
+                        label: s.label.into(),
+                        steps_label: s.steps_label.into(),
+                        fraction: s.fraction,
+                        bar_start: s.bar_start as i32,
+                        bar_end: s.bar_end as i32,
+                    })
+                    .collect();
                 window.set_daily_steps(ModelRc::new(VecModel::from(slint_steps)));
             }
         },
@@ -1577,15 +2012,19 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
                 window.set_sleep_avg_label(chart.avg_label.into());
                 window.set_sleep_delta_positive(chart.delta_positive);
                 window.set_sleep_delta_label(chart.delta_label.into());
-                let slint_bars: Vec<SleepBar> = chart.bars.into_iter().map(|b| SleepBar {
-                    label: b.label.into(),
-                    bar_start: b.bar_start as i32,
-                    bar_end: b.bar_end as i32,
-                    light_fraction: b.light_fraction,
-                    deep_fraction: b.deep_fraction,
-                    total_label: b.total_label.into(),
-                    deep_label: b.deep_label.into(),
-                }).collect();
+                let slint_bars: Vec<SleepBar> = chart
+                    .bars
+                    .into_iter()
+                    .map(|b| SleepBar {
+                        label: b.label.into(),
+                        bar_start: b.bar_start as i32,
+                        bar_end: b.bar_end as i32,
+                        light_fraction: b.light_fraction,
+                        deep_fraction: b.deep_fraction,
+                        total_label: b.total_label.into(),
+                        deep_label: b.deep_label.into(),
+                    })
+                    .collect();
                 window.set_sleep_bars(ModelRc::new(VecModel::from(slint_bars)));
             }
         },
@@ -1669,9 +2108,7 @@ fn clear_heart_data(window: &AppWindow) {
     window.set_heart_trend_mid_label("".into());
     window.set_heart_trend_min_label("".into());
     window.set_heart_trend_has_data(false);
-    window.set_heart_trend_points(ModelRc::new(VecModel::from(
-        Vec::<HeartTrendPoint>::new(),
-    )));
+    window.set_heart_trend_points(ModelRc::new(VecModel::from(Vec::<HeartTrendPoint>::new())));
 }
 
 fn reload_heart_stats(window: &AppWindow, db_path: &PathBuf, period: i32, offset: i32) {
@@ -1718,15 +2155,13 @@ fn apply_heart_trend(window: &AppWindow, trend: cobble_db::HeartTrend) {
     let points: Vec<HeartTrendPoint> = trend
         .points
         .iter()
-        .map(|point| HeartTrendPoint { label: point.label.clone().into() })
+        .map(|point| HeartTrendPoint {
+            label: point.label.clone().into(),
+        })
         .collect();
 
-    window.set_heart_average_path(
-        heart_trend_path(&trend.points, min_bpm, max_bpm, false).into(),
-    );
-    window.set_heart_resting_path(
-        heart_trend_path(&trend.points, min_bpm, max_bpm, true).into(),
-    );
+    window.set_heart_average_path(heart_trend_path(&trend.points, min_bpm, max_bpm, false).into());
+    window.set_heart_resting_path(heart_trend_path(&trend.points, min_bpm, max_bpm, true).into());
     window.set_heart_trend_max_label(format!("{} bpm", max_bpm.round() as i32).into());
     window.set_heart_trend_mid_label(
         format!("{} bpm", ((min_bpm + max_bpm) / 2.0).round() as i32).into(),
@@ -1770,14 +2205,20 @@ fn heart_trend_path(
         };
         let y = ((max_bpm - value) / span * 100.0).clamp(0.0, 100.0);
         if let Some((previous_x, previous_y)) = previous {
-            path.push_str(&format!("M {previous_x:.2} {previous_y:.2} L {x:.2} {y:.2}"));
+            path.push_str(&format!(
+                "M {previous_x:.2} {previous_y:.2} L {x:.2} {y:.2}"
+            ));
         }
         let marker_start = (x - MARKER_HALF_WIDTH).max(0.0);
         let marker_end = (x + MARKER_HALF_WIDTH).min(100.0);
         if path.is_empty() {
-            path.push_str(&format!("M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+            path.push_str(&format!(
+                "M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"
+            ));
         } else {
-            path.push_str(&format!(" M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"));
+            path.push_str(&format!(
+                " M {marker_start:.2} {y:.2} L {marker_end:.2} {y:.2}"
+            ));
         }
         previous = Some((x, y));
     }
@@ -1787,11 +2228,14 @@ fn heart_trend_path(
 // ─── Conversion ───────────────────────────────────────────────────────────────
 
 fn to_slint_sessions(sessions: Vec<cobble_db::HealthSessionData>) -> Vec<HealthSession> {
-    sessions.into_iter().map(|s| HealthSession {
-        type_name: s.type_name.into(),
-        start_label: s.start_label.into(),
-        duration_label: s.duration_label.into(),
-        has_metrics: s.has_metrics,
-        metrics_label: s.metrics_label.into(),
-    }).collect()
+    sessions
+        .into_iter()
+        .map(|s| HealthSession {
+            type_name: s.type_name.into(),
+            start_label: s.start_label.into(),
+            duration_label: s.duration_label.into(),
+            has_metrics: s.has_metrics,
+            metrics_label: s.metrics_label.into(),
+        })
+        .collect()
 }

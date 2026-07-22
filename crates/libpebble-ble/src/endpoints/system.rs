@@ -212,7 +212,10 @@ impl WatchType {
 
     /// Whether this watch has a color display (libpebble3 `WatchType.isColor`).
     pub fn is_color(self) -> bool {
-        matches!(self, Self::Basalt | Self::Chalk | Self::Emery | Self::Gabbro)
+        matches!(
+            self,
+            Self::Basalt | Self::Chalk | Self::Emery | Self::Gabbro
+        )
     }
 
     /// Whether this watch supports Bluetooth Classic (libpebble3 `supportsBtClassic`).
@@ -505,48 +508,300 @@ macro_rules! watch_colors {
 /// All known watch colors (libpebble3 `WatchColor`). The two polished-PTR remap
 /// targets (protocol -999) are omitted since they're never reported by the watch.
 const WATCH_COLORS: &[WatchColorInfo] = watch_colors![
-    (1, "pebble_black", "Pebble Classic - Black", WatchType::Aplite, false),
-    (2, "pebble_white", "Pebble Classic - White", WatchType::Aplite, false),
-    (3, "pebble_red", "Pebble Classic - Red", WatchType::Aplite, false),
-    (4, "pebble_orange", "Pebble Classic - Orange", WatchType::Aplite, false),
-    (5, "pebble_pink", "Pebble Classic - Pink", WatchType::Aplite, false),
-    (6, "pebble_steel_silver", "Pebble Steel - Silver", WatchType::Aplite, false),
-    (7, "pebble_steel_gunmetal", "Pebble Steel - Gunmetal", WatchType::Aplite, false),
-    (8, "pebble_fly_blue", "Pebble Classic - Fly Blue", WatchType::Aplite, false),
-    (9, "pebble_fresh_green", "Pebble Classic - Fresh Green", WatchType::Aplite, false),
-    (10, "pebble_hot_pink", "Pebble Classic - Hot Pink", WatchType::Aplite, false),
-    (11, "pebble_time_white", "Pebble Time - White", WatchType::Basalt, false),
-    (12, "pebble_time_black", "Pebble Time - Black", WatchType::Basalt, false),
-    (13, "pebble_time_red", "Pebble Time - Red", WatchType::Basalt, false),
-    (14, "pebble_time_steel_silver", "Pebble Time Steel - Silver", WatchType::Basalt, false),
-    (15, "pebble_time_steel_black", "Pebble Time Steel - Black", WatchType::Basalt, false),
-    (16, "pebble_time_steel_gold", "Pebble Time Steel - Gold", WatchType::Basalt, false),
-    (17, "pebble_time_round_silver", "Pebble Time Round - Silver", WatchType::Chalk, false),
-    (18, "pebble_time_round_black", "Pebble Time Round - Black", WatchType::Chalk, false),
-    (19, "pebble_time_round_silver_20", "Pebble Time Round - Silver", WatchType::Chalk, false),
-    (20, "pebble_time_round_black_20", "Pebble Time Round - Black", WatchType::Chalk, false),
-    (21, "pebble_time_round_rose_gold", "Pebble Time Round - Rose Gold", WatchType::Chalk, false),
-    (22, "pebble_time_round_silver_rainbow", "Pebble Time Round - Silver Rainbow", WatchType::Chalk, false),
-    (23, "pebble_time_round_black_rainbow", "Pebble Time Round - Black Rainbow", WatchType::Chalk, false),
-    (24, "pebble_2_se_black_charcoal", "Pebble 2 SE - Black Charcoal", WatchType::Diorite, false),
-    (25, "pebble_2_hr_black_charcoal", "Pebble 2 HR - Black Charcoal", WatchType::Diorite, true),
-    (26, "pebble_2_se_white_gray", "Pebble 2 SE - White/Gray", WatchType::Diorite, false),
-    (27, "pebble_2_hr_charcoal_sorbet_green", "Pebble 2 HR - Sorbet Green", WatchType::Diorite, true),
-    (28, "pebble_2_hr_charcoal_red", "Pebble 2 HR - Charcoal Red", WatchType::Diorite, true),
-    (29, "pebble_2_hr_white_gray", "Pebble 2 HR - White Gray", WatchType::Diorite, true),
-    (30, "pebble_2_hr_white_turquoise", "Pebble 2 HR - White Turquoise", WatchType::Diorite, true),
-    (31, "pebble_time_2_black", "Pebble Time 2 - Black", WatchType::Emery, true),
-    (32, "pebble_time_2_silver", "Pebble Time 2 - Silver", WatchType::Emery, true),
-    (33, "pebble_time_2_gold", "Pebble Time 2 - Gold", WatchType::Emery, true),
-    (34, "pebble_2_duo_black", "Pebble 2 Duo - Black", WatchType::Flint, false),
-    (35, "pebble_2_duo_white", "Pebble 2 Duo - White", WatchType::Flint, false),
-    (36, "pebble_time_2_black_gray", "Pebble Time 2 - Black/Gray", WatchType::Emery, true),
-    (37, "pebble_time_2_black_red", "Pebble Time 2 - Black/Red", WatchType::Emery, true),
-    (38, "pebble_time_2_silver_blue", "Pebble Time 2 - Silver/Blue", WatchType::Emery, true),
-    (39, "pebble_time_2_silver_gray", "Pebble Time 2 - Silver/Gray", WatchType::Emery, true),
-    (40, "pebble_round_2_black", "Pebble Round 2 - Black", WatchType::Gabbro, false),
-    (41, "pebble_round_2_silver", "Pebble Round 2 - Silver", WatchType::Gabbro, false),
-    (42, "pebble_round_2_gold", "Pebble Round 2 - Gold", WatchType::Gabbro, false),
+    (
+        1,
+        "pebble_black",
+        "Pebble Classic - Black",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        2,
+        "pebble_white",
+        "Pebble Classic - White",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        3,
+        "pebble_red",
+        "Pebble Classic - Red",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        4,
+        "pebble_orange",
+        "Pebble Classic - Orange",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        5,
+        "pebble_pink",
+        "Pebble Classic - Pink",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        6,
+        "pebble_steel_silver",
+        "Pebble Steel - Silver",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        7,
+        "pebble_steel_gunmetal",
+        "Pebble Steel - Gunmetal",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        8,
+        "pebble_fly_blue",
+        "Pebble Classic - Fly Blue",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        9,
+        "pebble_fresh_green",
+        "Pebble Classic - Fresh Green",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        10,
+        "pebble_hot_pink",
+        "Pebble Classic - Hot Pink",
+        WatchType::Aplite,
+        false
+    ),
+    (
+        11,
+        "pebble_time_white",
+        "Pebble Time - White",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        12,
+        "pebble_time_black",
+        "Pebble Time - Black",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        13,
+        "pebble_time_red",
+        "Pebble Time - Red",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        14,
+        "pebble_time_steel_silver",
+        "Pebble Time Steel - Silver",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        15,
+        "pebble_time_steel_black",
+        "Pebble Time Steel - Black",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        16,
+        "pebble_time_steel_gold",
+        "Pebble Time Steel - Gold",
+        WatchType::Basalt,
+        false
+    ),
+    (
+        17,
+        "pebble_time_round_silver",
+        "Pebble Time Round - Silver",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        18,
+        "pebble_time_round_black",
+        "Pebble Time Round - Black",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        19,
+        "pebble_time_round_silver_20",
+        "Pebble Time Round - Silver",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        20,
+        "pebble_time_round_black_20",
+        "Pebble Time Round - Black",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        21,
+        "pebble_time_round_rose_gold",
+        "Pebble Time Round - Rose Gold",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        22,
+        "pebble_time_round_silver_rainbow",
+        "Pebble Time Round - Silver Rainbow",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        23,
+        "pebble_time_round_black_rainbow",
+        "Pebble Time Round - Black Rainbow",
+        WatchType::Chalk,
+        false
+    ),
+    (
+        24,
+        "pebble_2_se_black_charcoal",
+        "Pebble 2 SE - Black Charcoal",
+        WatchType::Diorite,
+        false
+    ),
+    (
+        25,
+        "pebble_2_hr_black_charcoal",
+        "Pebble 2 HR - Black Charcoal",
+        WatchType::Diorite,
+        true
+    ),
+    (
+        26,
+        "pebble_2_se_white_gray",
+        "Pebble 2 SE - White/Gray",
+        WatchType::Diorite,
+        false
+    ),
+    (
+        27,
+        "pebble_2_hr_charcoal_sorbet_green",
+        "Pebble 2 HR - Sorbet Green",
+        WatchType::Diorite,
+        true
+    ),
+    (
+        28,
+        "pebble_2_hr_charcoal_red",
+        "Pebble 2 HR - Charcoal Red",
+        WatchType::Diorite,
+        true
+    ),
+    (
+        29,
+        "pebble_2_hr_white_gray",
+        "Pebble 2 HR - White Gray",
+        WatchType::Diorite,
+        true
+    ),
+    (
+        30,
+        "pebble_2_hr_white_turquoise",
+        "Pebble 2 HR - White Turquoise",
+        WatchType::Diorite,
+        true
+    ),
+    (
+        31,
+        "pebble_time_2_black",
+        "Pebble Time 2 - Black",
+        WatchType::Emery,
+        true
+    ),
+    (
+        32,
+        "pebble_time_2_silver",
+        "Pebble Time 2 - Silver",
+        WatchType::Emery,
+        true
+    ),
+    (
+        33,
+        "pebble_time_2_gold",
+        "Pebble Time 2 - Gold",
+        WatchType::Emery,
+        true
+    ),
+    (
+        34,
+        "pebble_2_duo_black",
+        "Pebble 2 Duo - Black",
+        WatchType::Flint,
+        false
+    ),
+    (
+        35,
+        "pebble_2_duo_white",
+        "Pebble 2 Duo - White",
+        WatchType::Flint,
+        false
+    ),
+    (
+        36,
+        "pebble_time_2_black_gray",
+        "Pebble Time 2 - Black/Gray",
+        WatchType::Emery,
+        true
+    ),
+    (
+        37,
+        "pebble_time_2_black_red",
+        "Pebble Time 2 - Black/Red",
+        WatchType::Emery,
+        true
+    ),
+    (
+        38,
+        "pebble_time_2_silver_blue",
+        "Pebble Time 2 - Silver/Blue",
+        WatchType::Emery,
+        true
+    ),
+    (
+        39,
+        "pebble_time_2_silver_gray",
+        "Pebble Time 2 - Silver/Gray",
+        WatchType::Emery,
+        true
+    ),
+    (
+        40,
+        "pebble_round_2_black",
+        "Pebble Round 2 - Black",
+        WatchType::Gabbro,
+        false
+    ),
+    (
+        41,
+        "pebble_round_2_silver",
+        "Pebble Round 2 - Silver",
+        WatchType::Gabbro,
+        false
+    ),
+    (
+        42,
+        "pebble_round_2_gold",
+        "Pebble Round 2 - Gold",
+        WatchType::Gabbro,
+        false
+    ),
 ];
 
 #[cfg(test)]

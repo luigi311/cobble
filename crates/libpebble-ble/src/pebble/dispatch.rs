@@ -9,28 +9,26 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 use super::PebbleInner;
-use crate::endpoints::app_message::{
-    build_app_message_ack, parse_app_message, AppMessageCmd,
-};
-use crate::endpoints::app_run_state::{parse_app_run_state, AppRunStateCmd};
+use crate::endpoints::app_message::{AppMessageCmd, build_app_message_ack, parse_app_message};
+use crate::endpoints::app_run_state::{AppRunStateCmd, parse_app_run_state};
 use crate::endpoints::blob_db::{
-    build_blobdb2_syncdone_response, build_blobdb2_write_response,
-    build_blobdb2_writeback_response, parse_blobdb2_incoming, parse_blobdb_response,
-    BlobDB2Incoming, BlobDBStatus,
+    BlobDB2Incoming, BlobDBStatus, build_blobdb2_syncdone_response, build_blobdb2_write_response,
+    build_blobdb2_writeback_response, parse_blobdb_response, parse_blobdb2_incoming,
 };
-use crate::endpoints::datalog::{self, build_reply, DatalogData, DATALOG_CLOSE, DATALOG_OPENSESSION, DATALOG_SENDDATA, DATALOG_TIMEOUT};
+use crate::endpoints::datalog::{
+    self, DATALOG_CLOSE, DATALOG_OPENSESSION, DATALOG_SENDDATA, DATALOG_TIMEOUT, DatalogData,
+    build_reply,
+};
 use crate::endpoints::music::parse_music_command;
 use crate::endpoints::phone_control::parse_phone_action;
 use crate::endpoints::phone_version::build_phone_version_response;
 use crate::endpoints::ping::{build_pong, parse_ping};
-use crate::endpoints::screenshot::{
-    parse_screenshot_header, ScreenshotResponseCode,
-};
+use crate::endpoints::screenshot::{ScreenshotResponseCode, parse_screenshot_header};
 use crate::endpoints::system::{
-    parse_factory_data_response, parse_watch_color, parse_watch_version_response,
-    system_message_type, WATCH_VERSION_RESPONSE,
+    WATCH_VERSION_RESPONSE, parse_factory_data_response, parse_watch_color,
+    parse_watch_version_response, system_message_type,
 };
-use crate::endpoints::{pebble_pack, pebble_unpack, Endpoint};
+use crate::endpoints::{Endpoint, pebble_pack, pebble_unpack};
 
 use super::inner::RawScreenshot;
 
@@ -47,7 +45,8 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
 
     match Endpoint::from_u16(endpoint_raw) {
         Some(Endpoint::PhoneVersion) => {
-            if let Some(reply) = pebble_pack(Endpoint::PhoneVersion, &build_phone_version_response())
+            if let Some(reply) =
+                pebble_pack(Endpoint::PhoneVersion, &build_phone_version_response())
                 && let Some(srv) = &inner.lock().unwrap().gatt_server
             {
                 srv.send(reply);
@@ -69,7 +68,10 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
                         }
                     }
                     None => {
-                        warn!("WatchVersion: failed to parse response ({} bytes)", payload.len());
+                        warn!(
+                            "WatchVersion: failed to parse response ({} bytes)",
+                            payload.len()
+                        );
                         inner.lock().unwrap().watch_version_pending.clear();
                     }
                 }
@@ -176,7 +178,9 @@ fn on_app_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     match parsed.cmd {
         AppMessageCmd::Push => {
             if let (Some(uuid), Some(data)) = (parsed.app_uuid, parsed.data) {
-                if let Some(ack) = pebble_pack(Endpoint::AppMessage, &build_app_message_ack(parsed.txn)) {
+                if let Some(ack) =
+                    pebble_pack(Endpoint::AppMessage, &build_app_message_ack(parsed.txn))
+                {
                     let inner_g = inner.lock().unwrap();
                     if let Some(srv) = &inner_g.gatt_server {
                         srv.send(ack);
@@ -210,7 +214,10 @@ fn on_app_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
 
 fn on_datalog_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     let Some((cmd, handle, rest)) = datalog::parse_header(&payload) else {
-        debug!("DataLog: failed to parse header from {} bytes", payload.len());
+        debug!(
+            "DataLog: failed to parse header from {} bytes",
+            payload.len()
+        );
         return;
     };
 
@@ -224,7 +231,11 @@ fn on_datalog_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
                 "DataLog OPENSESSION handle={handle} tag={} item_size={}",
                 session.tag, session.item_size
             );
-            inner.lock().unwrap().datalog_sessions.insert(handle, session);
+            inner
+                .lock()
+                .unwrap()
+                .datalog_sessions
+                .insert(handle, session);
             let ack = pebble_pack(Endpoint::DataLog, &build_reply(handle, true));
             if let Some(pkt) = ack
                 && let Some(srv) = &inner.lock().unwrap().gatt_server
@@ -409,11 +420,14 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
 
     match msg {
         BlobDB2Incoming::Write(w) => {
-            let key = String::from_utf8_lossy(&w.key).trim_end_matches('\0').to_owned();
+            let key = String::from_utf8_lossy(&w.key)
+                .trim_end_matches('\0')
+                .to_owned();
             debug!(
                 "BlobDB2 {}: db={} key={key:?} val_len={}",
                 if w.is_writeback { "WriteBack" } else { "Write" },
-                w.db, w.value.len()
+                w.db,
+                w.value.len()
             );
             let resp = if w.is_writeback {
                 build_blobdb2_writeback_response(w.token, BlobDBStatus::Success)
@@ -423,7 +437,9 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
             blobdb2_send(inner, resp);
             let handlers: Vec<_> = {
                 let mut state = inner.lock().unwrap();
-                state.observed_preferences.insert((w.db, key.clone()), w.value.clone());
+                state
+                    .observed_preferences
+                    .insert((w.db, key.clone()), w.value.clone());
                 state.watch_pref_handlers.clone()
             };
             for h in handlers {
@@ -432,11 +448,18 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
         }
         BlobDB2Incoming::SyncDone { token, db } => {
             debug!("BlobDB2 SyncDone db={db}");
-            blobdb2_send(inner, build_blobdb2_syncdone_response(token, BlobDBStatus::Success));
-            inner.lock().unwrap().sync_done_tx.send_modify(|(generation, completed_db)| {
-                *generation = generation.wrapping_add(1);
-                *completed_db = db;
-            });
+            blobdb2_send(
+                inner,
+                build_blobdb2_syncdone_response(token, BlobDBStatus::Success),
+            );
+            inner
+                .lock()
+                .unwrap()
+                .sync_done_tx
+                .send_modify(|(generation, completed_db)| {
+                    *generation = generation.wrapping_add(1);
+                    *completed_db = db;
+                });
         }
         other => {
             if let Some(token) = other.response_token() {
@@ -465,7 +488,10 @@ fn blobdb2_send(inner: &Arc<Mutex<PebbleInner>>, payload: Vec<u8>) {
 mod helpers {
     use bluer::Device;
 
-    pub(crate) async fn find_char(device: &Device, uuid: bluer::Uuid) -> Option<bluer::gatt::remote::Characteristic> {
+    pub(crate) async fn find_char(
+        device: &Device,
+        uuid: bluer::Uuid,
+    ) -> Option<bluer::gatt::remote::Characteristic> {
         for service in device.services().await.ok()? {
             for c in service.characteristics().await.ok()? {
                 if c.uuid().await.map(|u| u == uuid).unwrap_or(false) {

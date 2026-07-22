@@ -15,22 +15,24 @@ use std::{
 };
 
 use bluer::{
-    gatt::{
-        local::{
-            characteristic_control, Application, Characteristic, CharacteristicControlEvent,
-            CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead,
-            CharacteristicWrite, CharacteristicWriteMethod, Service,
-        },
-        CharacteristicWriter,
-    },
     Adapter,
+    gatt::{
+        CharacteristicWriter,
+        local::{
+            Application, Characteristic, CharacteristicControlEvent, CharacteristicNotify,
+            CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite,
+            CharacteristicWriteMethod, Service, characteristic_control,
+        },
+    },
 };
 use futures::StreamExt;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, trace, warn};
 
 use crate::{
-    transport::ppogatt::{ppogatt_header, parse_ppogatt_header, PPoGATTSession, PPoGATTType, PPOGATT_WINDOW},
+    transport::ppogatt::{
+        PPOGATT_WINDOW, PPoGATTSession, PPoGATTType, parse_ppogatt_header, ppogatt_header,
+    },
     uuids::{
         PPOGATT_BADBAD_SERVICE, PPOGATT_SERVER_READ_CHARACTERISTIC, PPOGATT_SERVER_SERVICE,
         PPOGATT_SERVER_WRITE_CHARACTERISTIC,
@@ -50,7 +52,11 @@ struct ServerState {
 
 impl ServerState {
     fn new() -> Self {
-        Self { mtu: 23, session: PPoGATTSession::new(), tx_queue: VecDeque::new() }
+        Self {
+            mtu: 23,
+            session: PPoGATTSession::new(),
+            tx_queue: VecDeque::new(),
+        }
     }
 
     fn max_body(&self) -> usize {
@@ -271,7 +277,10 @@ fn handle_ppogatt_in(
     }
     let (cmd_byte, serial) = parse_ppogatt_header(packet[0]);
     let body = &packet[1..];
-    trace!("PPoGATT rx cmd={cmd_byte} serial={serial} len={}", body.len());
+    trace!(
+        "PPoGATT rx cmd={cmd_byte} serial={serial} len={}",
+        body.len()
+    );
 
     match cmd_byte {
         c if c == PPoGATTType::ResetRequest as u8 => {
@@ -318,10 +327,7 @@ fn handle_ppogatt_in(
     }
 }
 
-fn pump_tx(
-    state: &mut ServerState,
-    notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>,
-) {
+fn pump_tx(state: &mut ServerState, notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>) {
     while !state.tx_queue.is_empty() && state.session.can_send() {
         let chunk = state.tx_queue.pop_front().unwrap();
         let seq = state.session.next_tx_seq();
@@ -336,10 +342,7 @@ fn pump_tx(
     }
 }
 
-fn send_raw(
-    packet: Vec<u8>,
-    notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>,
-) {
+fn send_raw(packet: Vec<u8>, notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>) {
     if let Some(tx) = notify_tx
         && tx.send(packet).is_err()
     {

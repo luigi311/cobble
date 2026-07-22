@@ -67,7 +67,7 @@ pub fn watch_config(config_path: PathBuf, daemon: CobbleDaemon) {
                         debug!("config watcher error: {e}");
                     }
                     None => return, // channel closed
-                    _ => {} // ignore access / remove / other events
+                    _ => {}         // ignore access / remove / other events
                 }
             };
 
@@ -79,14 +79,10 @@ pub fn watch_config(config_path: PathBuf, daemon: CobbleDaemon) {
             // Debounce: keep draining events for 200ms.  If another relevant
             // event arrives, reset the timer so we only reload once per burst.
             loop {
-                match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
-                {
+                match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
                     // Another relevant event → reset debounce timer.
                     Ok(Some(Ok(e)))
-                        if matches!(
-                            e.kind,
-                            EventKind::Modify(_) | EventKind::Create(_)
-                        ) =>
+                        if matches!(e.kind, EventKind::Modify(_) | EventKind::Create(_)) =>
                     {
                         debug!("additional config event ({:?}); resetting debounce", e.kind);
                         continue;

@@ -2,7 +2,9 @@
 
 pub fn parse_ping(payload: &[u8]) -> Option<u32> {
     if payload.len() >= 5 && payload[0] == 0x00 {
-        Some(u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]))
+        Some(u32::from_be_bytes([
+            payload[1], payload[2], payload[3], payload[4],
+        ]))
     } else {
         None
     }

@@ -96,7 +96,9 @@ struct Forecast {
 }
 
 impl Forecast {
-    fn temp_unit(&self) -> &'static str { "°F" }
+    fn temp_unit(&self) -> &'static str {
+        "°F"
+    }
 }
 
 async fn fetch_forecast(lat: f64, lon: f64) -> anyhow::Result<Forecast> {
@@ -110,29 +112,45 @@ async fn fetch_forecast(lat: f64, lon: f64) -> anyhow::Result<Forecast> {
     );
 
     let body = http::http_get(&url).await?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("Open-Meteo parse: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("Open-Meteo parse: {e}"))?;
 
     let current = &json["current"];
     let daily = &json["daily"];
 
     // Validate response shape before extracting values.
     if current.is_null() || daily.is_null() {
-        return Err(anyhow::anyhow!("Open-Meteo: missing current or daily section"));
+        return Err(anyhow::anyhow!(
+            "Open-Meteo: missing current or daily section"
+        ));
     }
-    if daily["temperature_2m_max"].as_array().map_or(0, |a| a.len()) < 2 {
+    if daily["temperature_2m_max"]
+        .as_array()
+        .map_or(0, |a| a.len())
+        < 2
+    {
         return Err(anyhow::anyhow!("Open-Meteo: expected 2 forecast days"));
     }
 
-    let current_temp = current["temperature_2m"].as_f64().map_or(0, |v| v.round() as i16);
+    let current_temp = current["temperature_2m"]
+        .as_f64()
+        .map_or(0, |v| v.round() as i16);
     let current_wmo: u16 = current["weather_code"].as_u64().unwrap_or(0) as u16;
     let current_condition = wmo_description(current_wmo).to_string();
 
-    let today_high = daily["temperature_2m_max"][0].as_f64().map_or(0, |v| v.round() as i16);
-    let today_low = daily["temperature_2m_min"][0].as_f64().map_or(0, |v| v.round() as i16);
+    let today_high = daily["temperature_2m_max"][0]
+        .as_f64()
+        .map_or(0, |v| v.round() as i16);
+    let today_low = daily["temperature_2m_min"][0]
+        .as_f64()
+        .map_or(0, |v| v.round() as i16);
 
-    let tomorrow_high = daily["temperature_2m_max"][1].as_f64().map_or(0, |v| v.round() as i16);
-    let tomorrow_low = daily["temperature_2m_min"][1].as_f64().map_or(0, |v| v.round() as i16);
+    let tomorrow_high = daily["temperature_2m_max"][1]
+        .as_f64()
+        .map_or(0, |v| v.round() as i16);
+    let tomorrow_low = daily["temperature_2m_min"][1]
+        .as_f64()
+        .map_or(0, |v| v.round() as i16);
     let tomorrow_wmo: u16 = daily["weather_code"][1].as_u64().unwrap_or(0) as u16;
 
     Ok(Forecast {
@@ -168,18 +186,18 @@ fn wmo_description(code: u16) -> &'static str {
 
 fn wmo_to_pebble(code: u16) -> u8 {
     match code {
-        0 => 7,   // Sun
-        1 => 0,   // PartlyCloudy
-        2 => 1,   // CloudyDay
-        3 => 1,   // CloudyDay
-        45 | 48 => 6, // Generic (fog)
-        51 | 53 | 55 | 56 | 57 => 3, // LightRain
-        61 => 3,  // LightRain
+        0 => 7,                                // Sun
+        1 => 0,                                // PartlyCloudy
+        2 => 1,                                // CloudyDay
+        3 => 1,                                // CloudyDay
+        45 | 48 => 6,                          // Generic (fog)
+        51 | 53 | 55 | 56 | 57 => 3,           // LightRain
+        61 => 3,                               // LightRain
         63 | 65 | 66 | 67 | 80 | 81 | 82 => 4, // HeavyRain
-        71 | 73 | 77 | 85 => 2, // LightSnow
-        75 | 86 => 5, // HeavySnow
-        95 | 96 | 99 => 6, // Generic (thunderstorm)
-        8 | 9 => 8, // RainAndSnow (sleet)
-        _ => 255, // Unknown
+        71 | 73 | 77 | 85 => 2,                // LightSnow
+        75 | 86 => 5,                          // HeavySnow
+        95 | 96 | 99 => 6,                     // Generic (thunderstorm)
+        8 | 9 => 8,                            // RainAndSnow (sleet)
+        _ => 255,                              // Unknown
     }
 }

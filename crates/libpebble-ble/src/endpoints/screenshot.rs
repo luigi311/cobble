@@ -79,7 +79,12 @@ pub fn parse_screenshot_header(payload: &[u8]) -> Option<(ScreenshotHeader, &[u8
     let width = u32::from_be_bytes(payload[5..9].try_into().ok()?);
     let height = u32::from_be_bytes(payload[9..13].try_into().ok()?);
     Some((
-        ScreenshotHeader { response_code, version, width, height },
+        ScreenshotHeader {
+            response_code,
+            version,
+            width,
+            height,
+        },
         &payload[13..],
     ))
 }
@@ -166,7 +171,10 @@ mod tests {
         assert_eq!(h.version, Some(ScreenshotVersion::Color8Bit));
         assert_eq!((h.width, h.height), (144, 168));
         assert_eq!(data, &[0xAA, 0xBB]);
-        assert_eq!(expected_size(ScreenshotVersion::Color8Bit, 144, 168), Some(144 * 168));
+        assert_eq!(
+            expected_size(ScreenshotVersion::Color8Bit, 144, 168),
+            Some(144 * 168)
+        );
         assert!(parse_screenshot_header(&[0, 0, 0]).is_none());
     }
 
@@ -174,9 +182,15 @@ mod tests {
     fn rejects_invalid_geometry() {
         assert_eq!(expected_size(ScreenshotVersion::Color8Bit, 0, 168), None);
         assert_eq!(expected_size(ScreenshotVersion::Color8Bit, 5000, 168), None);
-        assert_eq!(expected_size(ScreenshotVersion::BlackWhite1Bit, 144, 99999), None);
+        assert_eq!(
+            expected_size(ScreenshotVersion::BlackWhite1Bit, 144, 99999),
+            None
+        );
         // 1-bit row is byte-aligned: 18 bytes/row * 168 rows.
-        assert_eq!(expected_size(ScreenshotVersion::BlackWhite1Bit, 144, 168), Some(18 * 168));
+        assert_eq!(
+            expected_size(ScreenshotVersion::BlackWhite1Bit, 144, 168),
+            Some(18 * 168)
+        );
         assert!(decode_to_rgba(ScreenshotVersion::Color8Bit, 5000, 5000, &[]).is_empty());
     }
 

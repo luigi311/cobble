@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use tracing::{debug, warn};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use tracing::{debug, warn};
 
 pub use cobble_config::Config;
 
@@ -37,7 +37,12 @@ pub fn default_db_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn resolved_db_path(config: &Config) -> anyhow::Result<PathBuf> {
-    config.db.as_deref().map(PathBuf::from).map(Ok).unwrap_or_else(default_db_path)
+    config
+        .db
+        .as_deref()
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(default_db_path)
 }
 
 pub fn load(path: &Path) -> anyhow::Result<Config> {
@@ -62,17 +67,28 @@ pub fn save(path: &Path, config: &Config) -> anyhow::Result<()> {
             .with_context(|| format!("create config directory {}", parent.display()))?;
     }
     let text = toml::to_string_pretty(config).context("serialize config")?;
-    let file_name = path.file_name().ok_or_else(|| anyhow::anyhow!("config path has no filename"))?;
-    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let temporary = path.parent().unwrap_or_else(|| Path::new(".")).join(format!(
-        ".{}.tmp-{}-{unique}", file_name.to_string_lossy(), std::process::id()
-    ));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path has no filename"))?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.tmp-{}-{unique}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let result = (|| {
-        let mut file = options.open(&temporary)
+        let mut file = options
+            .open(&temporary)
             .with_context(|| format!("open temporary config {}", temporary.display()))?;
         #[cfg(unix)]
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
@@ -83,7 +99,9 @@ pub fn save(path: &Path, config: &Config) -> anyhow::Result<()> {
         std::fs::rename(&temporary, path)
             .with_context(|| format!("replace config {}", path.display()))
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
     result
 }
 

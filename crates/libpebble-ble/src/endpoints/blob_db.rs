@@ -20,15 +20,15 @@ pub enum BlobDBCommand {
 #[repr(u8)]
 pub enum WeatherType {
     PartlyCloudy = 0,
-    CloudyDay    = 1,
-    LightSnow    = 2,
-    LightRain    = 3,
-    HeavyRain    = 4,
-    HeavySnow    = 5,
-    Generic      = 6,
-    Sun          = 7,
-    RainAndSnow  = 8,
-    Unknown      = 255,
+    CloudyDay = 1,
+    LightSnow = 2,
+    LightRain = 3,
+    HeavyRain = 4,
+    HeavySnow = 5,
+    Generic = 6,
+    Sun = 7,
+    RainAndSnow = 8,
+    Unknown = 255,
 }
 
 impl WeatherType {
@@ -70,7 +70,11 @@ pub enum BlobDBId {
 /// Official libpebble routing: health settings are written through the legacy
 /// HealthParams database even when modern watches report them via WatchPrefs.
 pub fn outgoing_preference_database(key: &str) -> BlobDBId {
-    if is_health_preference(key) { BlobDBId::HealthParams } else { BlobDBId::WatchPrefs }
+    if is_health_preference(key) {
+        BlobDBId::HealthParams
+    } else {
+        BlobDBId::WatchPrefs
+    }
 }
 
 /// Normalize incoming WatchPrefs health records into the logical HealthParams
@@ -84,7 +88,10 @@ pub fn logical_incoming_database(db: u8, key: &str) -> u8 {
 }
 
 pub fn is_health_preference(key: &str) -> bool {
-    matches!(key, "activityPreferences" | "unitsDistance" | "hrmPreferences" | "heartRatePreferences")
+    matches!(
+        key,
+        "activityPreferences" | "unitsDistance" | "hrmPreferences" | "heartRatePreferences"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +129,12 @@ impl BlobDBStatus {
     }
 }
 
-pub fn build_blobdb_insert(db: BlobDBId, key: &[u8; 16], blob: &[u8], token: u16) -> Result<Vec<u8>, &'static str> {
+pub fn build_blobdb_insert(
+    db: BlobDBId,
+    key: &[u8; 16],
+    blob: &[u8],
+    token: u16,
+) -> Result<Vec<u8>, &'static str> {
     let blob_len = u16::try_from(blob.len()).map_err(|_| "BlobDB blob exceeds 65535 bytes")?;
     let mut out = Vec::new();
     out.push(BlobDBCommand::Insert as u8);
@@ -136,9 +148,15 @@ pub fn build_blobdb_insert(db: BlobDBId, key: &[u8; 16], blob: &[u8], token: u16
 }
 
 /// Like `build_blobdb_insert` but with an arbitrary byte-string key (e.g. "activityPreferences").
-pub fn build_blobdb_str_insert(db: BlobDBId, key: &str, blob: &[u8], token: u16) -> Result<Vec<u8>, &'static str> {
+pub fn build_blobdb_str_insert(
+    db: BlobDBId,
+    key: &str,
+    blob: &[u8],
+    token: u16,
+) -> Result<Vec<u8>, &'static str> {
     let key_bytes = key.as_bytes();
-    let key_len = u8::try_from(key_bytes.len()).map_err(|_| "BlobDB string key exceeds 255 bytes")?;
+    let key_len =
+        u8::try_from(key_bytes.len()).map_err(|_| "BlobDB string key exceeds 255 bytes")?;
     let blob_len = u16::try_from(blob.len()).map_err(|_| "BlobDB blob exceeds 65535 bytes")?;
     let mut out = Vec::new();
     out.push(BlobDBCommand::Insert as u8);
@@ -261,12 +279,12 @@ mod icon_id {
 /// Pebble 8-bit ARGB color constants (alpha always 0b11 = opaque).
 /// Format: bits [7:6]=alpha, [5:4]=Red, [3:2]=Green, [1:0]=Blue (2 bits each).
 mod pebble_color {
-    pub const BLUE: u8 = 0xC3;           // 11_00_00_11
-    pub const GREEN: u8 = 0xCC;          // 11_00_11_00
-    pub const RED: u8 = 0xF0;            // 11_11_00_00
+    pub const BLUE: u8 = 0xC3; // 11_00_00_11
+    pub const GREEN: u8 = 0xCC; // 11_00_11_00
+    pub const RED: u8 = 0xF0; // 11_11_00_00
     pub const VIVID_CERULEAN: u8 = 0xCB; // 11_00_10_11 — Twitter blue
-    pub const JAZZBERRY_JAM: u8 = 0xD5;  // 11_01_01_01 — Facebook pink/red
-    pub const ORANGE: u8 = 0xF4;         // 11_11_01_00 — Instagram orange
+    pub const JAZZBERRY_JAM: u8 = 0xD5; // 11_01_01_01 — Facebook pink/red
+    pub const ORANGE: u8 = 0xF4; // 11_11_01_00 — Instagram orange
 }
 
 /// Notification category, used to select the correct Pebble icon and background
@@ -326,7 +344,9 @@ fn build_notification_blob(
     timestamp: u32,
     category: NotificationCategory,
 ) -> Result<Vec<u8>, &'static str> {
-    let parent_uuid = Uuid::parse_str(NOTIFICATIONS_APP_UUID).unwrap().into_bytes();
+    let parent_uuid = Uuid::parse_str(NOTIFICATIONS_APP_UUID)
+        .unwrap()
+        .into_bytes();
     let item_uuid = Uuid::new_v4().into_bytes();
 
     let mut attrs = Vec::new();
@@ -334,7 +354,8 @@ fn build_notification_blob(
     for (attr_id, value) in [(1u8, title), (2u8, subtitle), (3u8, body)] {
         if !value.is_empty() {
             let raw = value.as_bytes();
-            let raw_len = u16::try_from(raw.len()).map_err(|_| "notification text attribute exceeds 65535 bytes")?;
+            let raw_len = u16::try_from(raw.len())
+                .map_err(|_| "notification text attribute exceeds 65535 bytes")?;
             attrs.push(attr_id);
             attrs.extend_from_slice(&raw_len.to_le_bytes());
             attrs.extend_from_slice(raw);
@@ -352,7 +373,8 @@ fn build_notification_blob(
     attrs.push(category.background_color());
     attr_count += 1;
 
-    let attrs_len = u16::try_from(attrs.len()).map_err(|_| "notification attributes exceed 65535 bytes")?;
+    let attrs_len =
+        u16::try_from(attrs.len()).map_err(|_| "notification attributes exceed 65535 bytes")?;
     let mut out = Vec::new();
     out.extend_from_slice(&item_uuid);
     out.extend_from_slice(&parent_uuid);
@@ -386,22 +408,22 @@ pub fn build_notification(
 // ---------------------------------------------------------------------------
 
 // Phone → Watch command bytes
-const BLOBDB2_CMD_VERSION: u8        = 0x0B;
+const BLOBDB2_CMD_VERSION: u8 = 0x0B;
 const BLOBDB2_CMD_MARK_ALL_DIRTY: u8 = 0x0C;
 
 // Watch → Phone command bytes (watch-initiated)
-const BLOBDB2_CMD_WRITE: u8          = 0x08;
-const BLOBDB2_CMD_WRITEBACK: u8      = 0x09;
-const BLOBDB2_CMD_SYNCDONE: u8       = 0x0A;
+const BLOBDB2_CMD_WRITE: u8 = 0x08;
+const BLOBDB2_CMD_WRITEBACK: u8 = 0x09;
+const BLOBDB2_CMD_SYNCDONE: u8 = 0x0A;
 
 // Response bytes (0x80 | request_cmd)
-const BLOBDB2_RESP_DIRTY_DATABASE: u8  = 0x86; // watch → phone
-const BLOBDB2_RESP_START_SYNC: u8      = 0x87; // watch → phone
-const BLOBDB2_RESP_WRITE: u8           = 0x88; // phone → watch
-const BLOBDB2_RESP_WRITEBACK: u8       = 0x89; // phone → watch
-const BLOBDB2_RESP_SYNCDONE: u8        = 0x8A; // phone → watch
-const BLOBDB2_RESP_VERSION: u8         = 0x8B; // watch → phone
-const BLOBDB2_RESP_MARK_ALL_DIRTY: u8  = 0x8C; // watch → phone
+const BLOBDB2_RESP_DIRTY_DATABASE: u8 = 0x86; // watch → phone
+const BLOBDB2_RESP_START_SYNC: u8 = 0x87; // watch → phone
+const BLOBDB2_RESP_WRITE: u8 = 0x88; // phone → watch
+const BLOBDB2_RESP_WRITEBACK: u8 = 0x89; // phone → watch
+const BLOBDB2_RESP_SYNCDONE: u8 = 0x8A; // phone → watch
+const BLOBDB2_RESP_VERSION: u8 = 0x8B; // watch → phone
+const BLOBDB2_RESP_MARK_ALL_DIRTY: u8 = 0x8C; // watch → phone
 
 /// Raw DB-ID constant for matching incoming BlobDB2 Write messages that carry WatchPrefs records.
 /// Matches `BlobDBId::WatchPrefs as u8`; kept as a plain constant so it can be used in match arms.
@@ -432,7 +454,11 @@ pub enum BlobDB2Incoming {
     /// Watch replies to our `MarkAllDirty` command.
     MarkAllDirtyResponse { token: u16, status: u8 },
     /// Watch replies to our `DirtyDatabase` command.
-    DirtyDatabaseResponse { token: u16, status: u8, dirty_dbs: Vec<u8> },
+    DirtyDatabaseResponse {
+        token: u16,
+        status: u8,
+        dirty_dbs: Vec<u8>,
+    },
     /// Watch replies to our `StartSync` command.
     StartSyncResponse { token: u16, status: u8 },
 }
@@ -441,10 +467,10 @@ impl BlobDB2Incoming {
     /// Returns the token for response variants (None for watch-initiated messages).
     pub fn response_token(&self) -> Option<u16> {
         match self {
-            Self::VersionResponse { token, .. }      => Some(*token),
+            Self::VersionResponse { token, .. } => Some(*token),
             Self::MarkAllDirtyResponse { token, .. } => Some(*token),
             Self::DirtyDatabaseResponse { token, .. } => Some(*token),
-            Self::StartSyncResponse { token, .. }    => Some(*token),
+            Self::StartSyncResponse { token, .. } => Some(*token),
             _ => None,
         }
     }
@@ -538,13 +564,20 @@ pub fn parse_blobdb2_incoming(payload: &[u8]) -> Option<BlobDB2Incoming> {
             if rest.len() < 2 {
                 return None;
             }
-            Some(BlobDB2Incoming::VersionResponse { token, status: rest[0], version: rest[1] })
+            Some(BlobDB2Incoming::VersionResponse {
+                token,
+                status: rest[0],
+                version: rest[1],
+            })
         }
         BLOBDB2_RESP_MARK_ALL_DIRTY => {
             if rest.is_empty() {
                 return None;
             }
-            Some(BlobDB2Incoming::MarkAllDirtyResponse { token, status: rest[0] })
+            Some(BlobDB2Incoming::MarkAllDirtyResponse {
+                token,
+                status: rest[0],
+            })
         }
         BLOBDB2_RESP_DIRTY_DATABASE => {
             if rest.len() < 2 {
@@ -556,13 +589,20 @@ pub fn parse_blobdb2_incoming(payload: &[u8]) -> Option<BlobDB2Incoming> {
                 return None;
             }
             let dirty_dbs = rest[2..2 + count].to_vec();
-            Some(BlobDB2Incoming::DirtyDatabaseResponse { token, status, dirty_dbs })
+            Some(BlobDB2Incoming::DirtyDatabaseResponse {
+                token,
+                status,
+                dirty_dbs,
+            })
         }
         BLOBDB2_RESP_START_SYNC => {
             if rest.is_empty() {
                 return None;
             }
-            Some(BlobDB2Incoming::StartSyncResponse { token, status: rest[0] })
+            Some(BlobDB2Incoming::StartSyncResponse {
+                token,
+                status: rest[0],
+            })
         }
         _ => None,
     }
@@ -574,7 +614,12 @@ mod preference_routing_tests {
 
     #[test]
     fn health_writes_use_health_params_and_modern_reads_normalize_to_it() {
-        for key in ["activityPreferences", "unitsDistance", "hrmPreferences", "heartRatePreferences"] {
+        for key in [
+            "activityPreferences",
+            "unitsDistance",
+            "hrmPreferences",
+            "heartRatePreferences",
+        ] {
             assert_eq!(outgoing_preference_database(key), BlobDBId::HealthParams);
             assert_eq!(
                 logical_incoming_database(BlobDBId::WatchPrefs as u8, key),
@@ -585,7 +630,10 @@ mod preference_routing_tests {
 
     #[test]
     fn general_preferences_remain_in_watch_prefs() {
-        assert_eq!(outgoing_preference_database("clock24h"), BlobDBId::WatchPrefs);
+        assert_eq!(
+            outgoing_preference_database("clock24h"),
+            BlobDBId::WatchPrefs
+        );
         assert_eq!(
             logical_incoming_database(BlobDBId::WatchPrefs as u8, "clock24h"),
             BlobDBId::WatchPrefs as u8

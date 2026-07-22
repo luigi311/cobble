@@ -10,10 +10,22 @@ pub fn app_name_to_category(app_name: &str) -> NotificationCategory {
     let lower = app_name.to_lowercase();
     let lower = lower.trim();
 
-    if matches!(lower, "thunderbird" | "evolution" | "kmail" | "geary"
-        | "mutt" | "neomutt" | "protonmail" | "gmail" | "outlook"
-        | "apple mail" | "mail" | "fastmail" | "tutanota")
-    {
+    if matches!(
+        lower,
+        "thunderbird"
+            | "evolution"
+            | "kmail"
+            | "geary"
+            | "mutt"
+            | "neomutt"
+            | "protonmail"
+            | "gmail"
+            | "outlook"
+            | "apple mail"
+            | "mail"
+            | "fastmail"
+            | "tutanota"
+    ) {
         return NotificationCategory::Email;
     }
     if lower == "whatsapp" {
@@ -34,12 +46,31 @@ pub fn app_name_to_category(app_name: &str) -> NotificationCategory {
     if matches!(lower, "hangouts" | "google hangouts") {
         return NotificationCategory::Hangouts;
     }
-    if matches!(lower, "signal" | "telegram" | "discord" | "slack"
-        | "element" | "fractal" | "nheko" | "fluffychat" | "mattermost"
-        | "rocketchat" | "zulip" | "wire" | "viber" | "line"
-        | "skype" | "teams" | "microsoft teams" | "google chat"
-        | "messages" | "sms" | "kde connect" | "kdeconnect")
-    {
+    if matches!(
+        lower,
+        "signal"
+            | "telegram"
+            | "discord"
+            | "slack"
+            | "element"
+            | "fractal"
+            | "nheko"
+            | "fluffychat"
+            | "mattermost"
+            | "rocketchat"
+            | "zulip"
+            | "wire"
+            | "viber"
+            | "line"
+            | "skype"
+            | "teams"
+            | "microsoft teams"
+            | "google chat"
+            | "messages"
+            | "sms"
+            | "kde connect"
+            | "kdeconnect"
+    ) {
         return NotificationCategory::Messaging;
     }
     NotificationCategory::Generic

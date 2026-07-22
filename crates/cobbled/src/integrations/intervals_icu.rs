@@ -198,7 +198,10 @@ mod tests {
         };
         let record = WellnessRecord::from(&wellness);
         let json = serde_json::to_value(&record).unwrap();
-        assert_eq!(json.get("restingHR").and_then(|value| value.as_u64()), Some(58));
+        assert_eq!(
+            json.get("restingHR").and_then(|value| value.as_u64()),
+            Some(58)
+        );
 
         let without_resting_hr = WellnessRecord::from(&DailyWellness {
             resting_hr: None,

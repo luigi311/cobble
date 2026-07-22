@@ -21,8 +21,8 @@ pub use endpoints::health::{
     ActivityPreferences, HealthActivityConfig, HealthConfigError, HeartRatePreferences,
     HrMonitoringInterval, HrmPreferences, encode_activity_preferences,
     encode_heart_rate_preferences, encode_hrm_preferences, encode_units_distance,
-    parse_activity_preferences, parse_heart_rate_preferences, parse_hrm_preferences,
-    parse_health_activity_config, parse_units_distance,
+    parse_activity_preferences, parse_health_activity_config, parse_heart_rate_preferences,
+    parse_hrm_preferences, parse_units_distance,
 };
 pub use endpoints::music::{MusicAction, MusicPlaybackState, MusicRepeat, MusicShuffle};
 pub use endpoints::phone_control::PhoneAction;

@@ -10,7 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use tokio::{signal, signal::unix::SignalKind, sync::{mpsc, watch}};
+use tokio::{
+    signal,
+    signal::unix::SignalKind,
+    sync::{mpsc, watch},
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -31,11 +35,14 @@ mod weather;
 use cobble_db::AppDb;
 use integrations::worker;
 use notify_monitor::NotificationMonitor;
-use service::{run_signal_emitter, BUS_NAME, OBJECT_PATH, CobbleDaemon};
+use service::{BUS_NAME, CobbleDaemon, OBJECT_PATH, run_signal_emitter};
 use supervisor::run_supervisor;
 
 #[derive(Parser)]
-#[command(name = "cobbled", about = "Long-lived daemon owning the Pebble BLE connection.")]
+#[command(
+    name = "cobbled",
+    about = "Long-lived daemon owning the Pebble BLE connection."
+)]
 struct Cli {
     /// Path to config file (default: $XDG_CONFIG_HOME/cobbled/config.toml)
     #[arg(long)]

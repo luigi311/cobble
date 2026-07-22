@@ -139,7 +139,11 @@ impl Config {
         {
             anyhow::bail!("adapter must contain only letters, digits, '_' or '-'");
         }
-        if self.db.as_deref().is_some_and(|path| path.is_empty() || path.contains('\0')) {
+        if self
+            .db
+            .as_deref()
+            .is_some_and(|path| path.is_empty() || path.contains('\0'))
+        {
             anyhow::bail!("database path must be non-empty and contain no NUL bytes");
         }
         self.integrations.intervals_icu.validate()

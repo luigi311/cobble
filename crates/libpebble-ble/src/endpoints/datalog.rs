@@ -89,7 +89,14 @@ pub fn parse_opensession(id: u8, data: &[u8]) -> Option<DatalogSession> {
     let tag = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
     let item_type = data[24];
     let item_size = u16::from_le_bytes([data[25], data[26]]);
-    Some(DatalogSession { id, app_uuid, opened_at, tag, item_type, item_size })
+    Some(DatalogSession {
+        id,
+        app_uuid,
+        opened_at,
+        tag,
+        item_type,
+        item_size,
+    })
 }
 
 /// Parse a SENDDATA body (the bytes after command + handle).

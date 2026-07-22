@@ -118,13 +118,21 @@ mod tests {
     #[test]
     fn parse_answer() {
         let pkt = [CMD_ANSWER, 0x2A, 0x00, 0x00, 0x00];
-        assert_eq!(parse_phone_action(&pkt), Some(PhoneAction::Answer { cookie: 42 }));
+        assert_eq!(
+            parse_phone_action(&pkt),
+            Some(PhoneAction::Answer { cookie: 42 })
+        );
     }
 
     #[test]
     fn parse_hangup() {
         let pkt = [CMD_HANGUP, 0xFF, 0xFF, 0xFF, 0x7F];
-        assert_eq!(parse_phone_action(&pkt), Some(PhoneAction::Hangup { cookie: i32::MAX as u32 }));
+        assert_eq!(
+            parse_phone_action(&pkt),
+            Some(PhoneAction::Hangup {
+                cookie: i32::MAX as u32
+            })
+        );
     }
 
     #[test]
@@ -141,7 +149,10 @@ mod tests {
 
     #[test]
     fn build_ring_and_start() {
-        assert_eq!(build_ring(0x12345678), vec![CMD_RING, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(
+            build_ring(0x12345678),
+            vec![CMD_RING, 0x78, 0x56, 0x34, 0x12]
+        );
         assert_eq!(build_call_start(1), vec![CMD_START, 1, 0, 0, 0]);
         assert_eq!(build_call_end(0), vec![CMD_END, 0, 0, 0, 0]);
     }

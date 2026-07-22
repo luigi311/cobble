@@ -361,7 +361,8 @@ async fn reconcile(
                 Some(retry_at(RECONCILIATION_INTERVAL)),
                 "wellness client initialization failed",
             )
-            .await {
+            .await
+            {
                 status_revision.fetch_add(1, Ordering::SeqCst);
             }
             return ReconcileOutcome::Complete;

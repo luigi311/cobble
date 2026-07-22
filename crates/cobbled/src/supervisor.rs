@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use libpebble_ble::{
-    decode_watch_pref, parse_activity_preferences, parse_health_activity_config, parse_heart_rate_preferences,
-    parse_hrm_preferences, parse_units_distance, AppRunStateHandler, BatteryHandler,
-    HealthDataHandler, MusicAction, MusicActionHandler, Pebble, PhoneAction,
-    PhoneActionHandler, WatchPrefHandler,
+    AppRunStateHandler, BatteryHandler, HealthDataHandler, MusicAction, MusicActionHandler, Pebble,
+    PhoneAction, PhoneActionHandler, WatchPrefHandler, decode_watch_pref,
+    parse_activity_preferences, parse_health_activity_config, parse_heart_rate_preferences,
+    parse_hrm_preferences, parse_units_distance,
 };
 use tracing::{debug, info, warn};
 

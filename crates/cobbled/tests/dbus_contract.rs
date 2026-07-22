@@ -31,19 +31,43 @@ exit 1
         .output()
         .expect("run daemon on private session bus");
     let _ = std::fs::remove_dir_all(&root);
-    assert!(output.status.success(), "private-bus introspection failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "private-bus introspection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let xml = String::from_utf8(output.stdout).expect("introspection is UTF-8");
 
     for method in [
-        "GetDaemonConfig", "UpdateDaemonConfig", "GetDeviceConfig", "RefreshDeviceConfig",
-        "UpdateDeviceConfig", "ResetDeviceConfigDefaults", "SyncWellness",
-        "GetWellnessSyncStatus", "ReloadConfig", "RebootWatch", "ResetIntoRecovery",
-        "CreateCoreDump", "FactoryReset", "Forget",
+        "GetDaemonConfig",
+        "UpdateDaemonConfig",
+        "GetDeviceConfig",
+        "RefreshDeviceConfig",
+        "UpdateDeviceConfig",
+        "ResetDeviceConfigDefaults",
+        "SyncWellness",
+        "GetWellnessSyncStatus",
+        "ReloadConfig",
+        "RebootWatch",
+        "ResetIntoRecovery",
+        "CreateCoreDump",
+        "FactoryReset",
+        "Forget",
     ] {
-        assert!(xml.contains(&format!("<method name=\"{method}\">")), "missing D-Bus method {method}");
+        assert!(
+            xml.contains(&format!("<method name=\"{method}\">")),
+            "missing D-Bus method {method}"
+        );
     }
-    for signal in ["DaemonConfigChanged", "DeviceConfigChanged", "ConnectionChanged"] {
-        assert!(xml.contains(&format!("<signal name=\"{signal}\">")), "missing D-Bus signal {signal}");
+    for signal in [
+        "DaemonConfigChanged",
+        "DeviceConfigChanged",
+        "ConnectionChanged",
+    ] {
+        assert!(
+            xml.contains(&format!("<signal name=\"{signal}\">")),
+            "missing D-Bus signal {signal}"
+        );
     }
     assert!(xml.contains("<arg name=\"expected_revision\" type=\"t\" direction=\"in\"/>"));
     assert!(xml.contains("<arg name=\"patch\" type=\"a{sv}\" direction=\"in\"/>"));

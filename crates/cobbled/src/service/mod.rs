@@ -64,25 +64,20 @@ use std::{
 };
 
 use libpebble_ble::{
-    ActivityPreferences, HeartRatePreferences, HrmPreferences,
-    MusicPlaybackState, MusicRepeat, MusicShuffle, Pebble, WatchColorInfo, WatchPrefValue,
-    WatchVersionInfo, WeatherType, HrMonitoringInterval, WatchPrefDefault, WatchPrefModel,
-    WatchType, decode_watch_pref_for_model, encode_watch_pref, watch_pref_metadata,
+    ActivityPreferences, HeartRatePreferences, HrMonitoringInterval, HrmPreferences,
+    MusicPlaybackState, MusicRepeat, MusicShuffle, Pebble, WatchColorInfo, WatchPrefDefault,
+    WatchPrefModel, WatchPrefValue, WatchType, WatchVersionInfo, WeatherType,
+    decode_watch_pref_for_model, encode_watch_pref, watch_pref_metadata,
 };
 
-use cobble_db::{AppDb, DateRange, WellnessExportStatus};
 use cobble_config::{Config, IntervalsIcuConfig};
 use cobble_contracts::{CONFIG_API_VERSION, DEVICE_CONFIG_API_VERSION, DeviceConfigState};
+use cobble_db::{AppDb, DateRange, WellnessExportStatus};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{debug, warn};
-use zbus::{
-    interface,
-    object_server::SignalEmitter,
-    zvariant::OwnedValue,
-    Connection,
-};
+use zbus::{Connection, interface, object_server::SignalEmitter, zvariant::OwnedValue};
 
-use crate::codec::{decode_wire_dict, encode_wire_dict, WireDict};
+use crate::codec::{WireDict, decode_wire_dict, encode_wire_dict};
 use crate::notification::app_name_to_category;
 
 fn editable_general_preference(key: &str) -> Option<&'static str> {
@@ -150,17 +145,38 @@ fn daemon_config_map(
     let mut result = HashMap::from([
         ("api_version".into(), dbus_val(CONFIG_API_VERSION)),
         ("revision".into(), dbus_val(revision)),
-        ("config_path".into(), dbus_val(config_path.display().to_string())),
-        ("active_database_path".into(), dbus_val(active_database_path.display().to_string())),
-        ("resolved_database_path".into(), dbus_val(resolved_db.display().to_string())),
+        (
+            "config_path".into(),
+            dbus_val(config_path.display().to_string()),
+        ),
+        (
+            "active_database_path".into(),
+            dbus_val(active_database_path.display().to_string()),
+        ),
+        (
+            "resolved_database_path".into(),
+            dbus_val(resolved_db.display().to_string()),
+        ),
         ("active_verbose".into(), dbus_val(active_verbose)),
         ("address".into(), dbus_val(config.address.clone())),
         ("adapter".into(), dbus_val(config.adapter.clone())),
         ("verbose".into(), dbus_val(config.verbose)),
-        ("database_path".into(), dbus_val(config.db.clone().unwrap_or_default())),
-        ("intervals_enabled".into(), dbus_val(config.integrations.intervals_icu.enabled)),
-        ("intervals_athlete_id".into(), dbus_val(config.integrations.intervals_icu.athlete_id.clone())),
-        ("intervals_api_key_configured".into(), dbus_val(!config.integrations.intervals_icu.api_key.is_empty())),
+        (
+            "database_path".into(),
+            dbus_val(config.db.clone().unwrap_or_default()),
+        ),
+        (
+            "intervals_enabled".into(),
+            dbus_val(config.integrations.intervals_icu.enabled),
+        ),
+        (
+            "intervals_athlete_id".into(),
+            dbus_val(config.integrations.intervals_icu.athlete_id.clone()),
+        ),
+        (
+            "intervals_api_key_configured".into(),
+            dbus_val(!config.integrations.intervals_icu.api_key.is_empty()),
+        ),
     ]);
     if let Some(message) = error {
         result.insert("error_kind".into(), dbus_val("invalid_data"));
@@ -169,18 +185,28 @@ fn daemon_config_map(
     Ok(result)
 }
 
-fn patch_string(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<String>, DaemonError> {
-    patch.get(key).map(|value| {
-        <&str>::try_from(value).map(str::to_owned)
-            .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a string")))
-    }).transpose()
+fn patch_string(
+    patch: &HashMap<String, OwnedValue>,
+    key: &str,
+) -> Result<Option<String>, DaemonError> {
+    patch
+        .get(key)
+        .map(|value| {
+            <&str>::try_from(value)
+                .map(str::to_owned)
+                .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a string")))
+        })
+        .transpose()
 }
 
 fn patch_bool(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<bool>, DaemonError> {
-    patch.get(key).map(|value| {
-        bool::try_from(value)
-            .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a boolean")))
-    }).transpose()
+    patch
+        .get(key)
+        .map(|value| {
+            bool::try_from(value)
+                .map_err(|_| DaemonError::Failed(format!("patch field {key} must be a boolean")))
+        })
+        .transpose()
 }
 
 fn device_config_state_name(state: DeviceConfigState) -> &'static str {
@@ -195,13 +221,19 @@ fn device_config_state_name(state: DeviceConfigState) -> &'static str {
 }
 
 fn patch_u8(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<u8>, DaemonError> {
-    patch.get(key).map(|value| u8::try_from(value)
-        .map_err(|_| DaemonError::Failed(format!("invalid {key}")))).transpose()
+    patch
+        .get(key)
+        .map(|value| u8::try_from(value).map_err(|_| DaemonError::Failed(format!("invalid {key}"))))
+        .transpose()
 }
 
 fn patch_u16(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<u16>, DaemonError> {
-    patch.get(key).map(|value| u16::try_from(value)
-        .map_err(|_| DaemonError::Failed(format!("invalid {key}")))).transpose()
+    patch
+        .get(key)
+        .map(|value| {
+            u16::try_from(value).map_err(|_| DaemonError::Failed(format!("invalid {key}")))
+        })
+        .transpose()
 }
 
 async fn write_records_in_order<F, Fut>(
@@ -213,15 +245,21 @@ where
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     for (key, value) in writes {
-        write(key, value).await.map_err(|error| format!("{key}: {error}"))?;
+        write(key, value)
+            .await
+            .map_err(|error| format!("{key}: {error}"))?;
     }
     Ok(())
 }
 
 fn completed_write_state(blob_db_version: u8, failed: bool) -> DeviceConfigState {
-    if failed { DeviceConfigState::Error }
-    else if blob_db_version >= 1 { DeviceConfigState::Ready }
-    else { DeviceConfigState::Partial }
+    if failed {
+        DeviceConfigState::Error
+    } else if blob_db_version >= 1 {
+        DeviceConfigState::Ready
+    } else {
+        DeviceConfigState::Partial
+    }
 }
 
 fn preference_model(watch: Option<&WatchVersionInfo>) -> WatchPrefModel {
@@ -236,8 +274,14 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
     let mut result = HashMap::from([
         ("api_version".into(), dbus_val(DEVICE_CONFIG_API_VERSION)),
         ("revision".into(), dbus_val(state.device_config_revision)),
-        ("state".into(), dbus_val(device_config_state_name(state.device_config_state))),
-        ("blob_db_version".into(), dbus_val(state.device_config_blob_db_version)),
+        (
+            "state".into(),
+            dbus_val(device_config_state_name(state.device_config_state)),
+        ),
+        (
+            "blob_db_version".into(),
+            dbus_val(state.device_config_blob_db_version),
+        ),
         (
             "capability.complete_refresh".into(),
             dbus_val(state.device_config_blob_db_version >= 1),
@@ -247,13 +291,22 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         result.insert("last_read_at_ms".into(), dbus_val(timestamp));
     }
     if let Some(info) = &state.device_config_watch {
-        result.insert("watch_id".into(), dbus_val(if info.serial.is_empty() {
-            info.bt_address.clone()
-        } else {
-            info.serial.clone()
-        }));
-        result.insert("watch_platform".into(), dbus_val(info.watch_type().codename()));
-        result.insert("watch_firmware".into(), dbus_val(info.running.string_version.clone()));
+        result.insert(
+            "watch_id".into(),
+            dbus_val(if info.serial.is_empty() {
+                info.bt_address.clone()
+            } else {
+                info.serial.clone()
+            }),
+        );
+        result.insert(
+            "watch_platform".into(),
+            dbus_val(info.watch_type().codename()),
+        );
+        result.insert(
+            "watch_firmware".into(),
+            dbus_val(info.running.string_version.clone()),
+        );
     }
     if let Some(error) = &state.device_config_error {
         let lower = error.to_ascii_lowercase();
@@ -265,11 +318,12 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
             "timeout"
         } else if lower.contains("not connected") || lower.contains("disconnected") {
             "disconnected"
-        } else if state.device_config_blob_db_version == 0 { "not_supported" } else { "internal" };
-        result.insert(
-            "error_kind".into(),
-            dbus_val(kind),
-        );
+        } else if state.device_config_blob_db_version == 0 {
+            "not_supported"
+        } else {
+            "internal"
+        };
+        result.insert("error_kind".into(), dbus_val(kind));
         result.insert("error_message".into(), dbus_val(error.clone()));
     }
 
@@ -279,17 +333,32 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         result.insert("health.weight_dag".into(), dbus_val(profile.weight_dag));
         result.insert("health.age".into(), dbus_val(profile.age));
         result.insert("health.gender".into(), dbus_val(profile.gender));
-        result.insert("health.tracking_enabled".into(), dbus_val(profile.tracking_enabled));
-        result.insert("health.activity_insights_enabled".into(), dbus_val(profile.activity_insights_enabled));
-        result.insert("health.sleep_insights_enabled".into(), dbus_val(profile.sleep_insights_enabled));
+        result.insert(
+            "health.tracking_enabled".into(),
+            dbus_val(profile.tracking_enabled),
+        );
+        result.insert(
+            "health.activity_insights_enabled".into(),
+            dbus_val(profile.activity_insights_enabled),
+        );
+        result.insert(
+            "health.sleep_insights_enabled".into(),
+            dbus_val(profile.sleep_insights_enabled),
+        );
     } else {
-        result.insert("health.activity.availability".into(), dbus_val("not_received"));
+        result.insert(
+            "health.activity.availability".into(),
+            dbus_val("not_received"),
+        );
     }
     if let Some(hrm) = state.hrm_prefs {
         result.insert("health.hrm.availability".into(), dbus_val("available"));
         result.insert("health.hrm.enabled".into(), dbus_val(hrm.enabled));
         if let Some(interval) = hrm.measurement_interval {
-            result.insert("health.hrm.measurement_interval".into(), dbus_val(interval.code()));
+            result.insert(
+                "health.hrm.measurement_interval".into(),
+                dbus_val(interval.code()),
+            );
         }
         if let Some(enabled) = hrm.activity_tracking_enabled {
             result.insert("health.hrm.during_activity".into(), dbus_val(enabled));
@@ -298,29 +367,58 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         result.insert("health.hrm.availability".into(), dbus_val("not_received"));
     }
     if let Some(hr) = state.heart_rate_prefs {
-        result.insert("health.thresholds.availability".into(), dbus_val("available"));
+        result.insert(
+            "health.thresholds.availability".into(),
+            dbus_val("available"),
+        );
         result.insert("health.thresholds.resting".into(), dbus_val(hr.resting_hr));
-        result.insert("health.thresholds.elevated".into(), dbus_val(hr.elevated_hr));
+        result.insert(
+            "health.thresholds.elevated".into(),
+            dbus_val(hr.elevated_hr),
+        );
         result.insert("health.thresholds.maximum".into(), dbus_val(hr.max_hr));
-        result.insert("health.thresholds.zone1".into(), dbus_val(hr.zone1_threshold));
-        result.insert("health.thresholds.zone2".into(), dbus_val(hr.zone2_threshold));
-        result.insert("health.thresholds.zone3".into(), dbus_val(hr.zone3_threshold));
+        result.insert(
+            "health.thresholds.zone1".into(),
+            dbus_val(hr.zone1_threshold),
+        );
+        result.insert(
+            "health.thresholds.zone2".into(),
+            dbus_val(hr.zone2_threshold),
+        );
+        result.insert(
+            "health.thresholds.zone3".into(),
+            dbus_val(hr.zone3_threshold),
+        );
     } else {
-        result.insert("health.thresholds.availability".into(), dbus_val("not_received"));
+        result.insert(
+            "health.thresholds.availability".into(),
+            dbus_val("not_received"),
+        );
     }
     if let Some(imperial) = state.imperial_units {
         result.insert("health.units.availability".into(), dbus_val("available"));
-        result.insert("health.distance_units".into(), dbus_val(if imperial { "imperial" } else { "metric" }));
+        result.insert(
+            "health.distance_units".into(),
+            dbus_val(if imperial { "imperial" } else { "metric" }),
+        );
     } else {
         result.insert("health.units.availability".into(), dbus_val("not_received"));
     }
     let model = preference_model(state.device_config_watch.as_ref());
     for (key, cached_value) in &state.watch_settings {
-        let decoded = state.watch_setting_raw.get(key)
+        let decoded = state
+            .watch_setting_raw
+            .get(key)
             .and_then(|raw| decode_watch_pref_for_model(key, raw, model));
         let value = decoded.as_ref().unwrap_or(cached_value);
-        result.insert(format!("preference.{key}.availability"), dbus_val("available"));
-        result.insert(format!("preference.{key}.value"), watch_pref_owned_value(value));
+        result.insert(
+            format!("preference.{key}.availability"),
+            dbus_val("available"),
+        );
+        result.insert(
+            format!("preference.{key}.value"),
+            watch_pref_owned_value(value),
+        );
         if let Some(raw) = state.watch_setting_raw.get(key) {
             result.insert(format!("preference.{key}.raw"), dbus_val(raw.clone()));
         }
@@ -330,9 +428,8 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
 
 mod state;
 pub(crate) use state::{
-    DaemonError, DaemonEvent, DaemonState, HealthProfile, MusicState,
-    BUS_NAME, MUSIC_APP_UUID, OBJECT_PATH,
-    dbus_val, watch_pref_owned_value,
+    BUS_NAME, DaemonError, DaemonEvent, DaemonState, HealthProfile, MUSIC_APP_UUID, MusicState,
+    OBJECT_PATH, dbus_val, watch_pref_owned_value,
 };
 
 /// Render watch version info as a self-describing `a{sv}` map. Optional fields
@@ -340,29 +437,44 @@ pub(crate) use state::{
 fn watch_version_to_map(info: &WatchVersionInfo) -> HashMap<String, OwnedValue> {
     let r = &info.running;
     let mut m: HashMap<String, OwnedValue> = HashMap::from([
-        ("firmware_version".into(), dbus_val(r.string_version.clone())),
+        (
+            "firmware_version".into(),
+            dbus_val(r.string_version.clone()),
+        ),
         ("firmware_major".into(), dbus_val(r.major)),
         ("firmware_minor".into(), dbus_val(r.minor)),
         ("firmware_patch".into(), dbus_val(r.patch)),
         ("firmware_suffix".into(), dbus_val(r.suffix.clone())),
         ("firmware_git_hash".into(), dbus_val(r.git_hash.clone())),
         ("is_recovery".into(), dbus_val(r.is_recovery)),
-        ("bootloader_timestamp".into(), dbus_val(info.bootloader_timestamp)),
+        (
+            "bootloader_timestamp".into(),
+            dbus_val(info.bootloader_timestamp),
+        ),
         ("board".into(), dbus_val(info.board.clone())),
         ("serial".into(), dbus_val(info.serial.clone())),
         ("bt_address".into(), dbus_val(info.bt_address.clone())),
         ("resource_crc".into(), dbus_val(info.resource_crc)),
-        ("resource_timestamp".into(), dbus_val(info.resource_timestamp)),
+        (
+            "resource_timestamp".into(),
+            dbus_val(info.resource_timestamp),
+        ),
         ("language".into(), dbus_val(info.language.clone())),
         ("language_version".into(), dbus_val(info.language_version)),
         ("hardware_platform".into(), dbus_val(info.hardware_platform)),
-        ("platform_revision".into(), dbus_val(info.platform_revision())),
+        (
+            "platform_revision".into(),
+            dbus_val(info.platform_revision()),
+        ),
         ("watch_type".into(), dbus_val(info.watch_type().codename())),
         ("capabilities".into(), dbus_val(info.capabilities)),
         ("is_unfaithful".into(), dbus_val(info.is_unfaithful)),
     ]);
     if let Some(recovery) = &info.recovery {
-        m.insert("recovery_version".into(), dbus_val(recovery.string_version.clone()));
+        m.insert(
+            "recovery_version".into(),
+            dbus_val(recovery.string_version.clone()),
+        );
     }
     if let Some(v) = info.health_insights_version {
         m.insert("health_insights_version".into(), dbus_val(v));
@@ -418,8 +530,14 @@ fn wellness_status_to_dbus_map(
         ("valid".into(), dbus_val(config.validate().is_ok())),
         ("running".into(), dbus_val(running)),
         ("athlete_id".into(), dbus_val(config.athlete_id.clone())),
-        ("exported_dates".into(), dbus_val(status.exported_dates as u64)),
-        ("pending_dates".into(), dbus_val(status.pending_dates as u64)),
+        (
+            "exported_dates".into(),
+            dbus_val(status.exported_dates as u64),
+        ),
+        (
+            "pending_dates".into(),
+            dbus_val(status.pending_dates as u64),
+        ),
         (
             "last_success".into(),
             dbus_val(format_timestamp(status.last_success_at)),
@@ -473,7 +591,6 @@ pub struct CobbleDaemon {
 }
 
 impl CobbleDaemon {
-
     pub fn new(
         config: Config,
         wellness_sync_tx: watch::Sender<u64>,
@@ -586,7 +703,10 @@ impl CobbleDaemon {
         if !state.connected {
             return Err(DaemonError::NotConnected("watch is not connected".into()));
         }
-        state.pebble.clone().ok_or_else(|| DaemonError::NotConnected("watch is not connected".into()))
+        state
+            .pebble
+            .clone()
+            .ok_or_else(|| DaemonError::NotConnected("watch is not connected".into()))
     }
 
     /// Called by the supervisor when the watch connects.
@@ -708,7 +828,11 @@ impl CobbleDaemon {
 
     /// Cache the heart-rate record. Returns the merged snapshot only if the
     /// demographic profile is already known.
-    pub(crate) fn cache_heart_rate(&self, hr: HeartRatePreferences, raw: Vec<u8>) -> Option<HealthProfile> {
+    pub(crate) fn cache_heart_rate(
+        &self,
+        hr: HeartRatePreferences,
+        raw: Vec<u8>,
+    ) -> Option<HealthProfile> {
         let mut s = self.state.lock().unwrap();
         s.heart_rate_prefs = Some(hr);
         s.heart_rate_prefs_raw = Some(raw);
@@ -805,7 +929,9 @@ impl CobbleDaemon {
                 .and_then(|h| h.measurement_interval)
                 .map(|i| i.code())
                 .unwrap_or(255),
-            hrm_activity_tracking: hrm.and_then(|h| h.activity_tracking_enabled).unwrap_or(false),
+            hrm_activity_tracking: hrm
+                .and_then(|h| h.activity_tracking_enabled)
+                .unwrap_or(false),
             resting_hr: hr.map(|h| h.resting_hr as u16).unwrap_or(0),
             elevated_hr: hr.map(|h| h.elevated_hr as u16).unwrap_or(0),
             max_hr: hr.map(|h| h.max_hr as u16).unwrap_or(0),
@@ -854,7 +980,11 @@ impl CobbleDaemon {
             debug!("watch down; dropping notification from {app_name:?}");
             return;
         }
-        if state.notify_blocklist.iter().any(|b| b.eq_ignore_ascii_case(&app_name)) {
+        if state
+            .notify_blocklist
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(&app_name))
+        {
             debug!("filtered notification from {app_name:?}");
             return;
         }
@@ -866,7 +996,10 @@ impl CobbleDaemon {
             let category = app_name_to_category(&app_name);
             debug!("notification from {app_name:?} -> category {category:?}");
             tokio::spawn(async move {
-                if let Err(e) = pebble.send_notification(&summary, &body, &app_name, category).await {
+                if let Err(e) = pebble
+                    .send_notification(&summary, &body, &app_name, category)
+                    .await
+                {
                     warn!("send notification failed: {e}");
                 }
             });
@@ -911,7 +1044,11 @@ impl CobbleDaemon {
         debug!(
             "reload_config: adapter={}, address{}, intervals_icu={:?}",
             new_cfg.adapter,
-            if new_cfg.address.is_empty() { " (none)" } else { " set" },
+            if new_cfg.address.is_empty() {
+                " (none)"
+            } else {
+                " set"
+            },
             new_cfg.redacted_intervals_icu(),
         );
         let pebble_to_disconnect = {
@@ -924,10 +1061,19 @@ impl CobbleDaemon {
         };
         let integration_config = new_cfg.integrations.intervals_icu.clone();
         let integration_changed = self.integration_config.send_if_modified(|current| {
-            if *current == integration_config { false } else { *current = integration_config.clone(); true }
+            if *current == integration_config {
+                false
+            } else {
+                *current = integration_config.clone();
+                true
+            }
         });
-        if integration_changed { self.wellness_status_revision.fetch_add(1, Ordering::SeqCst); }
-        if let Some(pebble) = pebble_to_disconnect { let _ = pebble.disconnect().await; }
+        if integration_changed {
+            self.wellness_status_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(pebble) = pebble_to_disconnect {
+            let _ = pebble.disconnect().await;
+        }
         self.publish_config_revision();
     }
 }
@@ -954,7 +1100,12 @@ impl CobbleDaemon {
     /// Watch battery percentage (0–100), or -1 if unknown/disconnected.
     #[zbus(property)]
     fn battery_level(&self) -> i16 {
-        self.state.lock().unwrap().battery_level.map(i16::from).unwrap_or(-1)
+        self.state
+            .lock()
+            .unwrap()
+            .battery_level
+            .map(i16::from)
+            .unwrap_or(-1)
     }
 
     // ---- Methods ----
@@ -977,20 +1128,34 @@ impl CobbleDaemon {
 
     async fn launch_app(&self, app_uuid: String) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.launch_app(&app_uuid).await.map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .launch_app(&app_uuid)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     async fn stop_app(&self, app_uuid: String) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.stop_app(&app_uuid).await.map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .stop_app(&app_uuid)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     async fn update_time(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.update_time().await.map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .update_time()
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
-    async fn notify(&self, title: String, body: String, subtitle: String) -> Result<u32, DaemonError> {
+    async fn notify(
+        &self,
+        title: String,
+        body: String,
+        subtitle: String,
+    ) -> Result<u32, DaemonError> {
         let pebble = self.require_pebble()?;
         // subtitle is conventionally the app_name; use it for category detection.
         let category = app_name_to_category(&subtitle);
@@ -1039,9 +1204,7 @@ impl CobbleDaemon {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .filter(|cached| {
-                    cached.revision == revision && cached.account_id == account_id
-                })
+                .filter(|cached| cached.revision == revision && cached.account_id == account_id)
                 .map(|cached| cached.status.clone())
             {
                 let running = self.wellness_running.load(Ordering::SeqCst);
@@ -1065,7 +1228,9 @@ impl CobbleDaemon {
                             .into_iter()
                             .map(|daily| {
                                 let record =
-                                    crate::integrations::intervals_icu::WellnessRecord::from(&daily);
+                                    crate::integrations::intervals_icu::WellnessRecord::from(
+                                        &daily,
+                                    );
                                 Ok((daily.date, record.payload_hash()?))
                             })
                             .collect::<anyhow::Result<Vec<_>>>()?,
@@ -1084,11 +1249,14 @@ impl CobbleDaemon {
             if self.wellness_status_revision.load(Ordering::Acquire) != revision {
                 continue;
             }
-            self.wellness_status_cache.lock().unwrap().replace(CachedWellnessStatus {
-                revision,
-                account_id,
-                status: status.clone(),
-            });
+            self.wellness_status_cache
+                .lock()
+                .unwrap()
+                .replace(CachedWellnessStatus {
+                    revision,
+                    account_id,
+                    status: status.clone(),
+                });
             let running = self.wellness_running.load(Ordering::SeqCst);
             return Ok(wellness_status_to_dbus_map(&config, status, running));
         }
@@ -1132,8 +1300,13 @@ impl CobbleDaemon {
             "intervals_api_key_clear",
             "intervals_api_key_replace",
         ];
-        if let Some(key) = patch.keys().find(|key| !PATCH_FIELDS.contains(&key.as_str())) {
-            return Err(DaemonError::Failed(format!("unsupported patch field {key}")));
+        if let Some(key) = patch
+            .keys()
+            .find(|key| !PATCH_FIELDS.contains(&key.as_str()))
+        {
+            return Err(DaemonError::Failed(format!(
+                "unsupported patch field {key}"
+            )));
         }
         if patch_bool(&patch, "intervals_api_key_clear")? == Some(true)
             && patch.contains_key("intervals_api_key_replace")
@@ -1173,9 +1346,15 @@ impl CobbleDaemon {
             state.config.clone()
         };
         let original = config.clone();
-        if let Some(value) = patch_string(&patch, "address")? { config.address = value; }
-        if let Some(value) = patch_string(&patch, "adapter")? { config.adapter = value; }
-        if let Some(value) = patch_bool(&patch, "verbose")? { config.verbose = value; }
+        if let Some(value) = patch_string(&patch, "address")? {
+            config.address = value;
+        }
+        if let Some(value) = patch_string(&patch, "adapter")? {
+            config.adapter = value;
+        }
+        if let Some(value) = patch_bool(&patch, "verbose")? {
+            config.verbose = value;
+        }
         if let Some(value) = patch_string(&patch, "database_path")? {
             config.db = if value.is_empty() { None } else { Some(value) };
         }
@@ -1191,7 +1370,9 @@ impl CobbleDaemon {
         if let Some(value) = patch_string(&patch, "intervals_api_key_replace")? {
             config.integrations.intervals_icu.api_key = value;
         }
-        config.validate().map_err(|error| DaemonError::Failed(error.to_string()))?;
+        config
+            .validate()
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
 
         if config != original {
             crate::config::save(&path, &config)
@@ -1209,11 +1390,24 @@ impl CobbleDaemon {
             state.active_verbose,
         )?;
         drop(state);
-        if original.address != config.address { result.insert("apply.address".into(), dbus_val("reconnecting")); }
-        if original.adapter != config.adapter { result.insert("apply.adapter".into(), dbus_val("reconnecting")); }
-        if original.verbose != config.verbose { result.insert("apply.verbose".into(), dbus_val("daemon_restart_required")); }
-        if original.db != config.db { result.insert("apply.database_path".into(), dbus_val("daemon_and_gui_restart_required")); }
-        if original.integrations != config.integrations { result.insert("apply.intervals_icu".into(), dbus_val("applied_live")); }
+        if original.address != config.address {
+            result.insert("apply.address".into(), dbus_val("reconnecting"));
+        }
+        if original.adapter != config.adapter {
+            result.insert("apply.adapter".into(), dbus_val("reconnecting"));
+        }
+        if original.verbose != config.verbose {
+            result.insert("apply.verbose".into(), dbus_val("daemon_restart_required"));
+        }
+        if original.db != config.db {
+            result.insert(
+                "apply.database_path".into(),
+                dbus_val("daemon_and_gui_restart_required"),
+            );
+        }
+        if original.integrations != config.integrations {
+            result.insert("apply.intervals_icu".into(), dbus_val("applied_live"));
+        }
         Ok(result)
     }
 
@@ -1242,7 +1436,9 @@ impl CobbleDaemon {
     /// Ask the watch to flush pending health records via DataLog sessions.
     fn fetch_health_data(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.fetch_health_data().map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .fetch_health_data()
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// PROTOTYPE: ask the watch to re-sync its HealthParams BlobDB (height,
@@ -1291,7 +1487,9 @@ impl CobbleDaemon {
         self.refresh_device_config_unlocked().await
     }
 
-    async fn refresh_device_config_unlocked(&self) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+    async fn refresh_device_config_unlocked(
+        &self,
+    ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
         let pebble = self.require_pebble()?;
         self.reset_device_config(DeviceConfigState::Loading);
 
@@ -1303,7 +1501,11 @@ impl CobbleDaemon {
         let refresh_error = if blob_db_version == 0 {
             Some("watch does not support completeness-confirmed BlobDB2 refresh".to_string())
         } else {
-            pebble.refresh_watch_preferences().await.err().map(|error| error.to_string())
+            pebble
+                .refresh_watch_preferences()
+                .await
+                .err()
+                .map(|error| error.to_string())
         };
         let error = refresh_error.or(identity_error);
         let (done_tx, done_rx) = oneshot::channel();
@@ -1330,124 +1532,278 @@ impl CobbleDaemon {
         patch: HashMap<String, OwnedValue>,
     ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
         const FIELDS: &[&str] = &[
-            "health.height_mm", "health.weight_dag", "health.tracking_enabled",
-            "health.activity_insights_enabled", "health.sleep_insights_enabled", "health.age",
-            "health.gender", "health.distance_units", "health.hrm.enabled",
-            "health.hrm.measurement_interval", "health.hrm.during_activity",
-            "health.thresholds.resting", "health.thresholds.elevated", "health.thresholds.maximum",
-            "health.thresholds.zone1", "health.thresholds.zone2", "health.thresholds.zone3",
+            "health.height_mm",
+            "health.weight_dag",
+            "health.tracking_enabled",
+            "health.activity_insights_enabled",
+            "health.sleep_insights_enabled",
+            "health.age",
+            "health.gender",
+            "health.distance_units",
+            "health.hrm.enabled",
+            "health.hrm.measurement_interval",
+            "health.hrm.during_activity",
+            "health.thresholds.resting",
+            "health.thresholds.elevated",
+            "health.thresholds.maximum",
+            "health.thresholds.zone1",
+            "health.thresholds.zone2",
+            "health.thresholds.zone3",
         ];
-        if let Some(key) = patch.keys().find(|key| {
-            !FIELDS.contains(&key.as_str()) && !key.starts_with("preference.")
-        }) {
-            return Err(DaemonError::Failed(format!("unsupported patch field {key}")));
+        if let Some(key) = patch
+            .keys()
+            .find(|key| !FIELDS.contains(&key.as_str()) && !key.starts_with("preference."))
+        {
+            return Err(DaemonError::Failed(format!(
+                "unsupported patch field {key}"
+            )));
         }
 
         let _operation = self.device_config_operation.lock().await;
         let pebble = self.require_pebble()?;
-        let (actual_revision, mut activity, mut activity_raw, units, mut units_raw,
-             mut hrm, mut hrm_raw, mut thresholds, mut thresholds_raw, firmware, blob_db_version) = {
+        let (
+            actual_revision,
+            mut activity,
+            mut activity_raw,
+            units,
+            mut units_raw,
+            mut hrm,
+            mut hrm_raw,
+            mut thresholds,
+            mut thresholds_raw,
+            firmware,
+            blob_db_version,
+        ) = {
             let state = self.state.lock().unwrap();
-            (state.device_config_revision, state.device_health_activity,
-             state.device_health_activity_raw.clone(), state.imperial_units,
-             state.imperial_units_raw.clone(), state.hrm_prefs, state.hrm_prefs_raw.clone(),
-             state.heart_rate_prefs, state.heart_rate_prefs_raw.clone(),
-             state.device_config_watch.as_ref().map(|info| (
-                 info.running.major as u8, info.running.minor as u8, info.running.patch as u16,
-             )), state.device_config_blob_db_version)
+            (
+                state.device_config_revision,
+                state.device_health_activity,
+                state.device_health_activity_raw.clone(),
+                state.imperial_units,
+                state.imperial_units_raw.clone(),
+                state.hrm_prefs,
+                state.hrm_prefs_raw.clone(),
+                state.heart_rate_prefs,
+                state.heart_rate_prefs_raw.clone(),
+                state.device_config_watch.as_ref().map(|info| {
+                    (
+                        info.running.major as u8,
+                        info.running.minor as u8,
+                        info.running.patch as u16,
+                    )
+                }),
+                state.device_config_blob_db_version,
+            )
         };
         if expected_revision != actual_revision {
             return Err(DaemonError::Failed(format!(
                 "revision conflict: expected {expected_revision}, current {actual_revision}"
             )));
         }
-        if patch.is_empty() { return Ok(device_config_map(&self.state.lock().unwrap())); }
+        if patch.is_empty() {
+            return Ok(device_config_map(&self.state.lock().unwrap()));
+        }
 
-        let activity_changed = patch.keys().any(|key| matches!(key.as_str(),
-            "health.height_mm" | "health.weight_dag" | "health.tracking_enabled" |
-            "health.activity_insights_enabled" | "health.sleep_insights_enabled" |
-            "health.age" | "health.gender"));
+        let activity_changed = patch.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "health.height_mm"
+                    | "health.weight_dag"
+                    | "health.tracking_enabled"
+                    | "health.activity_insights_enabled"
+                    | "health.sleep_insights_enabled"
+                    | "health.age"
+                    | "health.gender"
+            )
+        });
         if activity_changed {
-            let value = activity.as_mut().ok_or_else(|| DaemonError::Failed(
-                "activityPreferences was not received; refresh before editing".into()))?;
-            let raw = activity_raw.as_mut().filter(|raw| raw.len() >= 9).ok_or_else(||
-                DaemonError::Failed("activityPreferences raw record is unavailable".into()))?;
+            let value = activity.as_mut().ok_or_else(|| {
+                DaemonError::Failed(
+                    "activityPreferences was not received; refresh before editing".into(),
+                )
+            })?;
+            let raw = activity_raw
+                .as_mut()
+                .filter(|raw| raw.len() >= 9)
+                .ok_or_else(|| {
+                    DaemonError::Failed("activityPreferences raw record is unavailable".into())
+                })?;
             if let Some(v) = patch_u16(&patch, "health.height_mm")? {
-                if !(1000..=2200).contains(&v) { return Err(DaemonError::Failed("height must be between 1000 and 2200 mm".into())); }
-                value.height_mm = v; raw[0..2].copy_from_slice(&v.to_le_bytes());
+                if !(1000..=2200).contains(&v) {
+                    return Err(DaemonError::Failed(
+                        "height must be between 1000 and 2200 mm".into(),
+                    ));
+                }
+                value.height_mm = v;
+                raw[0..2].copy_from_slice(&v.to_le_bytes());
             }
             if let Some(v) = patch_u16(&patch, "health.weight_dag")? {
-                if !(3000..=20_000).contains(&v) { return Err(DaemonError::Failed("weight must be between 3000 and 20000 dag".into())); }
-                value.weight_dag = v; raw[2..4].copy_from_slice(&v.to_le_bytes());
+                if !(3000..=20_000).contains(&v) {
+                    return Err(DaemonError::Failed(
+                        "weight must be between 3000 and 20000 dag".into(),
+                    ));
+                }
+                value.weight_dag = v;
+                raw[2..4].copy_from_slice(&v.to_le_bytes());
             }
-            if let Some(v) = patch_bool(&patch, "health.tracking_enabled")? { value.tracking_enabled = v; raw[4] = u8::from(v); }
-            if let Some(v) = patch_bool(&patch, "health.activity_insights_enabled")? { value.activity_insights_enabled = v; raw[5] = u8::from(v); }
-            if let Some(v) = patch_bool(&patch, "health.sleep_insights_enabled")? { value.sleep_insights_enabled = v; raw[6] = u8::from(v); }
+            if let Some(v) = patch_bool(&patch, "health.tracking_enabled")? {
+                value.tracking_enabled = v;
+                raw[4] = u8::from(v);
+            }
+            if let Some(v) = patch_bool(&patch, "health.activity_insights_enabled")? {
+                value.activity_insights_enabled = v;
+                raw[5] = u8::from(v);
+            }
+            if let Some(v) = patch_bool(&patch, "health.sleep_insights_enabled")? {
+                value.sleep_insights_enabled = v;
+                raw[6] = u8::from(v);
+            }
             if let Some(v) = patch_u8(&patch, "health.age")? {
-                if !(1..=120).contains(&v) { return Err(DaemonError::Failed("age must be between 1 and 120".into())); }
-                value.age = v; raw[7] = v;
+                if !(1..=120).contains(&v) {
+                    return Err(DaemonError::Failed("age must be between 1 and 120".into()));
+                }
+                value.age = v;
+                raw[7] = v;
             }
             if let Some(v) = patch_u8(&patch, "health.gender")? {
-                if v > 2 { return Err(DaemonError::Failed("gender must be Female (0), Male (1), or Other (2)".into())); }
-                value.gender = v; raw[8] = v;
+                if v > 2 {
+                    return Err(DaemonError::Failed(
+                        "gender must be Female (0), Male (1), or Other (2)".into(),
+                    ));
+                }
+                value.gender = v;
+                raw[8] = v;
             }
         }
 
         let units_changed = patch.contains_key("health.distance_units");
         let new_units = if units_changed {
-            let raw = units_raw.as_mut().filter(|raw| !raw.is_empty()).ok_or_else(||
-                DaemonError::Failed("unitsDistance raw record is unavailable".into()))?;
+            let raw = units_raw
+                .as_mut()
+                .filter(|raw| !raw.is_empty())
+                .ok_or_else(|| {
+                    DaemonError::Failed("unitsDistance raw record is unavailable".into())
+                })?;
             match patch_u8(&patch, "health.distance_units")?.unwrap() {
-                0 => { raw[0] = 0; Some(false) }, 1 => { raw[0] = 1; Some(true) },
-                _ => return Err(DaemonError::Failed("distance units must be metric (0) or imperial (1)".into())),
+                0 => {
+                    raw[0] = 0;
+                    Some(false)
+                }
+                1 => {
+                    raw[0] = 1;
+                    Some(true)
+                }
+                _ => {
+                    return Err(DaemonError::Failed(
+                        "distance units must be metric (0) or imperial (1)".into(),
+                    ));
+                }
             }
-        } else { units };
+        } else {
+            units
+        };
 
         let hrm_changed = patch.keys().any(|key| key.starts_with("health.hrm."));
         if hrm_changed {
-            let value = hrm.as_mut().ok_or_else(|| DaemonError::Failed(
-                "hrmPreferences was not received; refresh before editing".into()))?;
-            let raw = hrm_raw.as_mut().filter(|raw| !raw.is_empty()).ok_or_else(||
-                DaemonError::Failed("hrmPreferences raw record is unavailable".into()))?;
-            let version = firmware.ok_or_else(|| DaemonError::Failed(
-                "watch firmware is unavailable; refresh before editing HRM settings".into()))?;
+            let value = hrm.as_mut().ok_or_else(|| {
+                DaemonError::Failed(
+                    "hrmPreferences was not received; refresh before editing".into(),
+                )
+            })?;
+            let raw = hrm_raw
+                .as_mut()
+                .filter(|raw| !raw.is_empty())
+                .ok_or_else(|| {
+                    DaemonError::Failed("hrmPreferences raw record is unavailable".into())
+                })?;
+            let version = firmware.ok_or_else(|| {
+                DaemonError::Failed(
+                    "watch firmware is unavailable; refresh before editing HRM settings".into(),
+                )
+            })?;
             if patch.contains_key("health.hrm.measurement_interval") && version < (4, 9, 146) {
-                return Err(DaemonError::Failed("HRM measurement interval is unsupported by this firmware".into()));
+                return Err(DaemonError::Failed(
+                    "HRM measurement interval is unsupported by this firmware".into(),
+                ));
             }
             if patch.contains_key("health.hrm.during_activity") && version < (4, 9, 150) {
-                return Err(DaemonError::Failed("HRM during activities is unsupported by this firmware".into()));
+                return Err(DaemonError::Failed(
+                    "HRM during activities is unsupported by this firmware".into(),
+                ));
             }
-            if let Some(v) = patch_bool(&patch, "health.hrm.enabled")? { value.enabled = v; raw[0] = u8::from(v); }
+            if let Some(v) = patch_bool(&patch, "health.hrm.enabled")? {
+                value.enabled = v;
+                raw[0] = u8::from(v);
+            }
             if let Some(v) = patch_u8(&patch, "health.hrm.measurement_interval")? {
-                if raw.len() < 2 { return Err(DaemonError::Failed("watch returned a short hrmPreferences record".into())); }
+                if raw.len() < 2 {
+                    return Err(DaemonError::Failed(
+                        "watch returned a short hrmPreferences record".into(),
+                    ));
+                }
                 value.measurement_interval = Some(HrMonitoringInterval::from_u8(v));
                 raw[1] = v;
             }
             if let Some(v) = patch_bool(&patch, "health.hrm.during_activity")? {
-                if raw.len() < 3 { return Err(DaemonError::Failed("watch returned a short hrmPreferences record".into())); }
+                if raw.len() < 3 {
+                    return Err(DaemonError::Failed(
+                        "watch returned a short hrmPreferences record".into(),
+                    ));
+                }
                 value.activity_tracking_enabled = Some(v);
                 raw[2] = u8::from(v);
             }
         }
 
-        let thresholds_changed = patch.keys().any(|key| key.starts_with("health.thresholds."));
+        let thresholds_changed = patch
+            .keys()
+            .any(|key| key.starts_with("health.thresholds."));
         if thresholds_changed {
-            let value = thresholds.as_mut().ok_or_else(|| DaemonError::Failed(
-                "heartRatePreferences was not received; refresh before editing".into()))?;
-            let raw = thresholds_raw.as_mut().filter(|raw| raw.len() >= 6).ok_or_else(||
-                DaemonError::Failed("heartRatePreferences raw record is unavailable".into()))?;
-            if let Some(v) = patch_u8(&patch, "health.thresholds.resting")? { value.resting_hr = v; raw[0] = v; }
-            if let Some(v) = patch_u8(&patch, "health.thresholds.elevated")? { value.elevated_hr = v; raw[1] = v; }
-            if let Some(v) = patch_u8(&patch, "health.thresholds.maximum")? { value.max_hr = v; raw[2] = v; }
-            if let Some(v) = patch_u8(&patch, "health.thresholds.zone1")? { value.zone1_threshold = v; raw[3] = v; }
-            if let Some(v) = patch_u8(&patch, "health.thresholds.zone2")? { value.zone2_threshold = v; raw[4] = v; }
-            if let Some(v) = patch_u8(&patch, "health.thresholds.zone3")? { value.zone3_threshold = v; raw[5] = v; }
+            let value = thresholds.as_mut().ok_or_else(|| {
+                DaemonError::Failed(
+                    "heartRatePreferences was not received; refresh before editing".into(),
+                )
+            })?;
+            let raw = thresholds_raw
+                .as_mut()
+                .filter(|raw| raw.len() >= 6)
+                .ok_or_else(|| {
+                    DaemonError::Failed("heartRatePreferences raw record is unavailable".into())
+                })?;
+            if let Some(v) = patch_u8(&patch, "health.thresholds.resting")? {
+                value.resting_hr = v;
+                raw[0] = v;
+            }
+            if let Some(v) = patch_u8(&patch, "health.thresholds.elevated")? {
+                value.elevated_hr = v;
+                raw[1] = v;
+            }
+            if let Some(v) = patch_u8(&patch, "health.thresholds.maximum")? {
+                value.max_hr = v;
+                raw[2] = v;
+            }
+            if let Some(v) = patch_u8(&patch, "health.thresholds.zone1")? {
+                value.zone1_threshold = v;
+                raw[3] = v;
+            }
+            if let Some(v) = patch_u8(&patch, "health.thresholds.zone2")? {
+                value.zone2_threshold = v;
+                raw[4] = v;
+            }
+            if let Some(v) = patch_u8(&patch, "health.thresholds.zone3")? {
+                value.zone3_threshold = v;
+                raw[5] = v;
+            }
         }
 
         let (watch_type, observed_settings) = {
             let state = self.state.lock().unwrap();
             (
-                state.device_config_watch.as_ref().map(|info| info.watch_type()).unwrap_or(WatchType::Unknown),
+                state
+                    .device_config_watch
+                    .as_ref()
+                    .map(|info| info.watch_type())
+                    .unwrap_or(WatchType::Unknown),
                 state.watch_settings.clone(),
             )
         };
@@ -1461,7 +1817,9 @@ impl CobbleDaemon {
         if activity_changed {
             writes.push(("activityPreferences", activity_raw.clone().unwrap()));
         }
-        if units_changed { writes.push(("unitsDistance", units_raw.clone().unwrap())); }
+        if units_changed {
+            writes.push(("unitsDistance", units_raw.clone().unwrap()));
+        }
         if hrm_changed {
             writes.push(("hrmPreferences", hrm_raw.clone().unwrap()));
         }
@@ -1469,12 +1827,15 @@ impl CobbleDaemon {
             writes.push(("heartRatePreferences", thresholds_raw.clone().unwrap()));
         }
         let mut general_updates = Vec::new();
-        let mut preference_fields: Vec<_> = patch.iter()
+        let mut preference_fields: Vec<_> = patch
+            .iter()
             .filter(|(field, _)| field.starts_with("preference."))
             .collect();
         preference_fields.sort_by_key(|(field, _)| field.as_str());
         for (field, value) in preference_fields {
-            let Some(key) = field.strip_prefix("preference.") else { continue };
+            let Some(key) = field.strip_prefix("preference.") else {
+                continue;
+            };
             if !observed_settings.contains_key(key) {
                 return Err(DaemonError::Failed(format!(
                     "preference {key} was not reported by this watch"
@@ -1487,12 +1848,15 @@ impl CobbleDaemon {
             } else if let Ok(value) = <&str>::try_from(value) {
                 WatchPrefValue::Text(value.to_owned())
             } else {
-                return Err(DaemonError::Failed(format!("invalid preference value for {key}")));
+                return Err(DaemonError::Failed(format!(
+                    "invalid preference value for {key}"
+                )));
             };
             let encoded = encode_watch_pref(key, &value, model)
                 .map_err(|error| DaemonError::Failed(error.to_string()))?;
-            let key = editable_general_preference(key).ok_or_else(||
-                DaemonError::Failed(format!("preference {key} is not editable in this phase")))?;
+            let key = editable_general_preference(key).ok_or_else(|| {
+                DaemonError::Failed(format!("preference {key} is not editable in this phase"))
+            })?;
             writes.push((key, encoded.clone()));
             general_updates.push((key.to_owned(), value, encoded));
         }
@@ -1500,10 +1864,15 @@ impl CobbleDaemon {
         let write_error = write_records_in_order(writes, |key, value| {
             let pebble = pebble.clone();
             async move {
-                pebble.write_preference_confirmed(key, &value).await
-                    .map(|_| ()).map_err(|error| error.to_string())
+                pebble
+                    .write_preference_confirmed(key, &value)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
-        }).await.err();
+        })
+        .await
+        .err();
         if blob_db_version >= 1 {
             let mut snapshot = self.refresh_device_config_unlocked().await?;
             if let Some(message) = write_error {
@@ -1512,7 +1881,8 @@ impl CobbleDaemon {
                 state.device_config_state = completed_write_state(blob_db_version, true);
                 state.device_config_revision = state.device_config_revision.wrapping_add(1);
                 let _ = state.event_tx.send(DaemonEvent::DeviceConfigChanged {
-                    revision: state.device_config_revision, state: state.device_config_state,
+                    revision: state.device_config_revision,
+                    state: state.device_config_state,
                 });
                 snapshot = device_config_map(&state);
             }
@@ -1521,14 +1891,30 @@ impl CobbleDaemon {
             Err(DaemonError::Failed(message))
         } else {
             let mut state = self.state.lock().unwrap();
-            if activity_changed { state.device_health_activity = activity; }
-            if activity_changed { state.device_health_activity_raw = activity_raw; }
-            if units_changed { state.imperial_units = new_units; }
-            if units_changed { state.imperial_units_raw = units_raw; }
-            if hrm_changed { state.hrm_prefs = hrm; }
-            if hrm_changed { state.hrm_prefs_raw = hrm_raw; }
-            if thresholds_changed { state.heart_rate_prefs = thresholds; }
-            if thresholds_changed { state.heart_rate_prefs_raw = thresholds_raw; }
+            if activity_changed {
+                state.device_health_activity = activity;
+            }
+            if activity_changed {
+                state.device_health_activity_raw = activity_raw;
+            }
+            if units_changed {
+                state.imperial_units = new_units;
+            }
+            if units_changed {
+                state.imperial_units_raw = units_raw;
+            }
+            if hrm_changed {
+                state.hrm_prefs = hrm;
+            }
+            if hrm_changed {
+                state.hrm_prefs_raw = hrm_raw;
+            }
+            if thresholds_changed {
+                state.heart_rate_prefs = thresholds;
+            }
+            if thresholds_changed {
+                state.heart_rate_prefs_raw = thresholds_raw;
+            }
             for (key, value, raw) in general_updates {
                 state.watch_settings.insert(key.clone(), value);
                 state.watch_setting_raw.insert(key, raw);
@@ -1536,7 +1922,8 @@ impl CobbleDaemon {
             state.device_config_state = completed_write_state(blob_db_version, false);
             state.device_config_revision = state.device_config_revision.wrapping_add(1);
             let _ = state.event_tx.send(DaemonEvent::DeviceConfigChanged {
-                revision: state.device_config_revision, state: state.device_config_state,
+                revision: state.device_config_revision,
+                state: state.device_config_state,
             });
             Ok(device_config_map(&state))
         }
@@ -1550,16 +1937,27 @@ impl CobbleDaemon {
         let observed = self.state.lock().unwrap().watch_settings.clone();
         let mut patch = HashMap::new();
         for (key, current) in observed {
-            if editable_general_preference(&key).is_none() { continue; }
-            let Some(metadata) = watch_pref_metadata(&key) else { continue };
+            if editable_general_preference(&key).is_none() {
+                continue;
+            }
+            let Some(metadata) = watch_pref_metadata(&key) else {
+                continue;
+            };
             let default = match metadata.default {
                 WatchPrefDefault::Bool(value) => WatchPrefValue::Bool(value),
                 WatchPrefDefault::Number(value) => WatchPrefValue::Number(value),
                 WatchPrefDefault::QuickLaunch { enabled, uuid } => WatchPrefValue::Text(
-                    if enabled { uuid.unwrap_or("off") } else { "off" }.to_owned(),
+                    if enabled {
+                        uuid.unwrap_or("off")
+                    } else {
+                        "off"
+                    }
+                    .to_owned(),
                 ),
             };
-            if current == default { continue; }
+            if current == default {
+                continue;
+            }
             let value = match default {
                 WatchPrefValue::Bool(value) => dbus_val(value),
                 WatchPrefValue::Number(value) => dbus_val(value),
@@ -1591,7 +1989,9 @@ impl CobbleDaemon {
             .map_err(|e| DaemonError::Failed(e.to_string()))?
         {
             Some(color) => Ok(watch_color_to_map(color)),
-            None => Err(DaemonError::Failed("watch reported an unknown color".into())),
+            None => Err(DaemonError::Failed(
+                "watch reported an unknown color".into(),
+            )),
         }
     }
 
@@ -1606,7 +2006,11 @@ impl CobbleDaemon {
     }
 
     /// Tell the watch which media app is playing (now-playing source).
-    pub(crate) async fn set_music_player_info(&self, pkg: String, name: String) -> Result<(), DaemonError> {
+    pub(crate) async fn set_music_player_info(
+        &self,
+        pkg: String,
+        name: String,
+    ) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
         pebble
             .update_music_player_info(&pkg, &name)
@@ -1639,8 +2043,14 @@ impl CobbleDaemon {
             )
             .await
             .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        self.state.lock().unwrap().music.track =
-            Some((artist, album, title, track_length_ms, track_count, track_number));
+        self.state.lock().unwrap().music.track = Some((
+            artist,
+            album,
+            title,
+            track_length_ms,
+            track_count,
+            track_number,
+        ));
         Ok(())
     }
 
@@ -1690,19 +2100,25 @@ impl CobbleDaemon {
     /// Reboot the watch. It drops the link and the daemon reconnects.
     async fn reboot_watch(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.reboot_watch().map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .reboot_watch()
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Reboot the watch into its recovery (PRF) firmware.
     async fn reset_into_recovery(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.reset_into_recovery().map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .reset_into_recovery()
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Trigger a core dump on the watch.
     async fn create_core_dump(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.create_core_dump().map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .create_core_dump()
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Factory-reset the watch. DESTRUCTIVE: wipes all watch data and unpairs.
@@ -1716,14 +2132,19 @@ impl CobbleDaemon {
             ));
         }
         let pebble = self.require_pebble()?;
-        pebble.factory_reset().map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .factory_reset()
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Remove the watch's Bluetooth bond (unpair). The watch re-pairs on the
     /// next reconnect.
     async fn forget(&self) -> Result<(), DaemonError> {
         let pebble = self.require_pebble()?;
-        pebble.forget().await.map_err(|e| DaemonError::Failed(e.to_string()))
+        pebble
+            .forget()
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Push weather data to the Pebble built-in weather app.
@@ -2011,7 +2432,9 @@ mod tests {
             Config {
                 address: "E6:94:0A:D4:D5:DC".into(),
                 adapter: "hci0".into(),
-                integrations: cobble_config::Integrations { intervals_icu: initial },
+                integrations: cobble_config::Integrations {
+                    intervals_icu: initial,
+                },
                 ..Config::default()
             },
             watch::channel(0).0,
@@ -2082,7 +2505,12 @@ mod tests {
         assert_eq!(persisted.adapter, "hci7");
         assert_eq!(persisted.db.as_deref(), Some("/tmp/new-cobbled.db"));
         assert_eq!(persisted.integrations.intervals_icu.api_key, "test-secret");
-        assert!(daemon.update_daemon_config(0, HashMap::new()).await.is_err());
+        assert!(
+            daemon
+                .update_daemon_config(0, HashMap::new())
+                .await
+                .is_err()
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -2107,18 +2535,26 @@ mod tests {
         );
 
         daemon
-            .update_daemon_config(
-                0,
-                HashMap::from([("adapter".into(), dbus_val("hci7"))]),
-            )
+            .update_daemon_config(0, HashMap::from([("adapter".into(), dbus_val("hci7"))]))
             .await
             .unwrap();
         std::fs::write(&path, "adapter = [not valid TOML").unwrap();
 
-        assert!(daemon.update_daemon_config(1, HashMap::new()).await.is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "adapter = [not valid TOML");
+        assert!(
+            daemon
+                .update_daemon_config(1, HashMap::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "adapter = [not valid TOML"
+        );
         let snapshot = daemon.get_daemon_config().unwrap();
-        assert_eq!(<&str>::try_from(snapshot.get("adapter").unwrap()).unwrap(), "hci7");
+        assert_eq!(
+            <&str>::try_from(snapshot.get("adapter").unwrap()).unwrap(),
+            "hci7"
+        );
         assert_eq!(
             <&str>::try_from(snapshot.get("error_kind").unwrap()).unwrap(),
             "invalid_data"
@@ -2149,22 +2585,28 @@ mod tests {
         );
 
         let empty = daemon.get_device_config();
-        assert_eq!(<&str>::try_from(empty.get("state").unwrap()).unwrap(), "disconnected");
+        assert_eq!(
+            <&str>::try_from(empty.get("state").unwrap()).unwrap(),
+            "disconnected"
+        );
         assert_eq!(
             <&str>::try_from(empty.get("health.activity.availability").unwrap()).unwrap(),
             "not_received"
         );
         assert!(!empty.contains_key("health.height_mm"));
 
-        daemon.cache_health_activity_raw(libpebble_ble::HealthActivityConfig {
-            height_mm: 1805,
-            weight_dag: 7555,
-            tracking_enabled: true,
-            activity_insights_enabled: false,
-            sleep_insights_enabled: true,
-            age: 42,
-            gender: 2,
-        }, vec![13, 7, 131, 29, 1, 1, 0, 42, 2]);
+        daemon.cache_health_activity_raw(
+            libpebble_ble::HealthActivityConfig {
+                height_mm: 1805,
+                weight_dag: 7555,
+                tracking_enabled: true,
+                activity_insights_enabled: false,
+                sleep_insights_enabled: true,
+                age: 42,
+                gender: 2,
+            },
+            vec![13, 7, 131, 29, 1, 1, 0, 42, 2],
+        );
         {
             let mut state = daemon.state.lock().unwrap();
             state.connected = true;
@@ -2172,8 +2614,14 @@ mod tests {
         let (_, completed_state) = daemon.complete_device_config_refresh(None, 1, None);
         assert_eq!(completed_state, DeviceConfigState::Partial);
         let snapshot = daemon.get_device_config();
-        assert_eq!(u16::try_from(snapshot.get("health.height_mm").unwrap()).unwrap(), 1805);
-        assert_eq!(u16::try_from(snapshot.get("health.weight_dag").unwrap()).unwrap(), 7555);
+        assert_eq!(
+            u16::try_from(snapshot.get("health.height_mm").unwrap()).unwrap(),
+            1805
+        );
+        assert_eq!(
+            u16::try_from(snapshot.get("health.weight_dag").unwrap()).unwrap(),
+            7555
+        );
         assert_eq!(
             <&str>::try_from(snapshot.get("health.units.availability").unwrap()).unwrap(),
             "not_received"
@@ -2270,10 +2718,15 @@ mod tests {
                     Ok(())
                 })
             },
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.contains("unitsDistance"));
-        assert_eq!(*attempted.lock().unwrap(), vec!["activityPreferences", "unitsDistance"]);
+        assert_eq!(
+            *attempted.lock().unwrap(),
+            vec!["activityPreferences", "unitsDistance"]
+        );
     }
 
     #[tokio::test]
@@ -2281,12 +2734,17 @@ mod tests {
         let attempted = Arc::new(Mutex::new(Vec::new()));
         let observed = attempted.clone();
         let error = write_records_in_order(
-            vec![("activityPreferences", vec![1]), ("hrmPreferences", vec![2])],
+            vec![
+                ("activityPreferences", vec![1]),
+                ("hrmPreferences", vec![2]),
+            ],
             move |key, _| {
                 observed.lock().unwrap().push(key);
                 std::future::ready(Err("watch disconnected".to_string()))
             },
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.contains("disconnected"));
         assert_eq!(*attempted.lock().unwrap(), vec!["activityPreferences"]);
@@ -2349,20 +2807,31 @@ pub async fn run_signal_emitter(
             }
             DaemonEvent::ConnectionChanged(c) => {
                 let _ = CobbleDaemon::connection_changed(emitter, c).await;
-                let _ = iface.get().await.connected_changed(iface.signal_emitter()).await;
+                let _ = iface
+                    .get()
+                    .await
+                    .connected_changed(iface.signal_emitter())
+                    .await;
                 if c {
                     // The connect-time battery read can be queued before this
                     // event and dropped by the disconnected gate; deliver it now.
                     if let Some(level) = daemon.session_battery_level()
                         && daemon.set_battery_level(level)
                     {
-                        let _ =
-                            iface.get().await.battery_level_changed(iface.signal_emitter()).await;
+                        let _ = iface
+                            .get()
+                            .await
+                            .battery_level_changed(iface.signal_emitter())
+                            .await;
                         let _ = CobbleDaemon::battery_changed(emitter, i16::from(level)).await;
                     }
                 } else {
                     // Battery is unknown while disconnected (state was cleared).
-                    let _ = iface.get().await.battery_level_changed(iface.signal_emitter()).await;
+                    let _ = iface
+                        .get()
+                        .await
+                        .battery_level_changed(iface.signal_emitter())
+                        .await;
                     let _ = CobbleDaemon::battery_changed(emitter, -1).await;
                 }
             }
@@ -2370,7 +2839,11 @@ pub async fn run_signal_emitter(
                 // Gated on connected so a late event after disconnect can't
                 // resurrect a stale level past the -1 contract.
                 if daemon.set_battery_level(level) {
-                    let _ = iface.get().await.battery_level_changed(iface.signal_emitter()).await;
+                    let _ = iface
+                        .get()
+                        .await
+                        .battery_level_changed(iface.signal_emitter())
+                        .await;
                     let _ = CobbleDaemon::battery_changed(emitter, i16::from(level)).await;
                 }
             }
@@ -2459,19 +2932,22 @@ pub async fn run_signal_emitter(
             }
             DaemonEvent::HealthHrm(hrm, raw) => {
                 if let Some(profile) = daemon.cache_hrm(hrm, raw) {
-                    let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
+                    let _ =
+                        CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
                 daemon.note_device_config_value();
             }
             DaemonEvent::HealthHeartRate(hr, raw) => {
                 if let Some(profile) = daemon.cache_heart_rate(hr, raw) {
-                    let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
+                    let _ =
+                        CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
                 daemon.note_device_config_value();
             }
             DaemonEvent::HealthUnits(imperial, raw) => {
                 if let Some(profile) = daemon.cache_units(imperial, raw) {
-                    let _ = CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
+                    let _ =
+                        CobbleDaemon::health_profile_received(emitter, profile.to_dbus_map()).await;
                 }
                 daemon.note_device_config_value();
             }

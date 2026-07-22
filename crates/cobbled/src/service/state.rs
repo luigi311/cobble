@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use libpebble_ble::{
-    ActivityPreferences, AppMessageValue, DatalogData, HeartRatePreferences, HrmPreferences,
-    HealthActivityConfig, Pebble, WatchPrefValue, WatchVersionInfo,
+    ActivityPreferences, AppMessageValue, DatalogData, HealthActivityConfig, HeartRatePreferences,
+    HrmPreferences, Pebble, WatchPrefValue, WatchVersionInfo,
 };
 
-use cobble_db::AppDb;
 use cobble_config::Config;
 use cobble_contracts::DeviceConfigState;
+use cobble_db::AppDb;
 use tokio::sync::{mpsc, oneshot};
 use zbus::zvariant::{OwnedValue, Value};
 
@@ -29,12 +29,18 @@ pub(crate) enum DaemonError {
 #[derive(Debug)]
 pub enum DaemonEvent {
     ConnectionChanged(bool),
-    AppMessageReceived { uuid: String, data: HashMap<u32, AppMessageValue> },
+    AppMessageReceived {
+        uuid: String,
+        data: HashMap<u32, AppMessageValue>,
+    },
     AckReceived(u8),
     NackReceived(u8),
     HealthData(DatalogData),
     BatteryChanged(u8),
-    AppRunState { uuid: String, running: bool },
+    AppRunState {
+        uuid: String,
+        running: bool,
+    },
     MusicAction(String),
     PhoneAction(libpebble_ble::PhoneAction),
     HealthProfile(ActivityPreferences),
@@ -42,9 +48,16 @@ pub enum DaemonEvent {
     HealthHrm(HrmPreferences, Vec<u8>),
     HealthHeartRate(HeartRatePreferences, Vec<u8>),
     HealthUnits(bool, Vec<u8>),
-    WatchSetting { key: String, value: WatchPrefValue, raw: Vec<u8> },
+    WatchSetting {
+        key: String,
+        value: WatchPrefValue,
+        raw: Vec<u8>,
+    },
     DaemonConfigChanged(u64),
-    DeviceConfigChanged { revision: u64, state: DeviceConfigState },
+    DeviceConfigChanged {
+        revision: u64,
+        state: DeviceConfigState,
+    },
     DeviceConfigRefreshComplete {
         info: Option<WatchVersionInfo>,
         blob_db_version: u8,
@@ -55,11 +68,22 @@ pub enum DaemonEvent {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HealthProfile {
-    pub height_cm: u16, pub weight_kg: u16, pub age: u16, pub gender: u16,
-    pub tracking_enabled: bool, pub activity_insights_enabled: bool, pub sleep_insights_enabled: bool,
-    pub hrm_enabled: bool, pub hrm_measurement_interval: u8, pub hrm_activity_tracking: bool,
-    pub resting_hr: u16, pub elevated_hr: u16, pub max_hr: u16,
-    pub hr_zone1_threshold: u16, pub hr_zone2_threshold: u16, pub hr_zone3_threshold: u16,
+    pub height_cm: u16,
+    pub weight_kg: u16,
+    pub age: u16,
+    pub gender: u16,
+    pub tracking_enabled: bool,
+    pub activity_insights_enabled: bool,
+    pub sleep_insights_enabled: bool,
+    pub hrm_enabled: bool,
+    pub hrm_measurement_interval: u8,
+    pub hrm_activity_tracking: bool,
+    pub resting_hr: u16,
+    pub elevated_hr: u16,
+    pub max_hr: u16,
+    pub hr_zone1_threshold: u16,
+    pub hr_zone2_threshold: u16,
+    pub hr_zone3_threshold: u16,
     pub imperial_units: bool,
 }
 
@@ -74,11 +98,23 @@ impl HealthProfile {
             ("age".into(), val(self.age)),
             ("gender".into(), val(self.gender)),
             ("tracking_enabled".into(), val(self.tracking_enabled)),
-            ("activity_insights_enabled".into(), val(self.activity_insights_enabled)),
-            ("sleep_insights_enabled".into(), val(self.sleep_insights_enabled)),
+            (
+                "activity_insights_enabled".into(),
+                val(self.activity_insights_enabled),
+            ),
+            (
+                "sleep_insights_enabled".into(),
+                val(self.sleep_insights_enabled),
+            ),
             ("hrm_enabled".into(), val(self.hrm_enabled)),
-            ("hrm_measurement_interval".into(), val(self.hrm_measurement_interval)),
-            ("hrm_activity_tracking".into(), val(self.hrm_activity_tracking)),
+            (
+                "hrm_measurement_interval".into(),
+                val(self.hrm_measurement_interval),
+            ),
+            (
+                "hrm_activity_tracking".into(),
+                val(self.hrm_activity_tracking),
+            ),
             ("resting_hr".into(), val(self.resting_hr)),
             ("elevated_hr".into(), val(self.elevated_hr)),
             ("max_hr".into(), val(self.max_hr)),
