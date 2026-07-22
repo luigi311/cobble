@@ -14,6 +14,8 @@ export component AppWindow inherits Window {
     background: Palette.bg;
     preferred-width: 400px;
     preferred-height: 780px;
+    min-width: 320px;
+    min-height: 480px;
 
     // ── Status ──
     in property <bool> daemon-running: false;
@@ -208,8 +210,8 @@ export component AppWindow inherits Window {
     // ── Internal state ──
     property <int> active-tab: 0;
     property <int> settings-page: 0;   // 0 = category list, 1 = daemon config, 2 = device actions, 3 = device config
-    property <bool> confirm-factory: false;
-    property <bool> confirm-recovery: false;
+    in-out property <bool> action-busy: false;
+    in-out property <string> confirm-action: "";
     in-out property <bool> confirm-device-defaults: false;
     property <int> workout-period: 1;
     property <int> sleep-period-val: 1;
@@ -477,7 +479,7 @@ export component AppWindow inherits Window {
                     SettingsRow {
                         label: "Device Actions";
                         sublabel: "Reboot, recovery, core dump, forget, factory reset";
-                        clicked => { root.action-status = ""; root.action-error = false; root.confirm-factory = false; root.confirm-recovery = false; root.settings-page = 2; }
+                        clicked => { root.action-status = ""; root.action-error = false; root.confirm-action = ""; root.settings-page = 2; }
                     }
                 }
             }
@@ -984,7 +986,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             width: 32px; height: 28px; border-radius: 6px; background: Palette.surface;
                             Text { text: "‹"; color: Palette.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
-                            TouchArea { clicked => { root.settings-page = 0; root.confirm-factory = false; root.confirm-recovery = false; root.action-status = ""; root.action-error = false; } }
+                            TouchArea { clicked => { if (!root.action-busy) { root.settings-page = 0; root.confirm-action = ""; root.action-status = ""; root.action-error = false; } } }
                         }
                         Text { text: "Device Actions"; color: Palette.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
                     }
@@ -995,51 +997,61 @@ export component AppWindow inherits Window {
                     }
 
                     ActionButton {
-                        label: "Reboot Watch"; enabled: root.watch-connected;
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Reboot sent."; root.reboot-watch(); }
+                        label: "Reboot Watch"; enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.reboot-watch(); }
                     }
                     ActionButton {
-                        label: root.confirm-recovery ? "Tap again to confirm Recovery" : "Reboot into Recovery";
-                        danger: root.confirm-recovery; enabled: root.watch-connected;
-                        clicked => {
-                            if (root.confirm-recovery) {
-                                root.confirm-recovery = false;
-                                root.action-error = false;
-                                root.action-status = "Entering recovery…";
-                                root.reset-into-recovery();
-                            } else {
-                                root.confirm-recovery = true;
-                                root.confirm-factory = false;
+                        label: "Reboot into Recovery"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "recovery"; }
+                    }
+                    ActionButton {
+                        label: "Create Core Dump"; enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.create-core-dump(); }
+                    }
+                    ActionButton {
+                        label: "Forget (Unpair)"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "forget"; }
+                    }
+                    ActionButton {
+                        label: "Factory Reset (erases watch)"; danger: true;
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.confirm-action = "factory"; }
+                    }
+
+                    if root.confirm-action != "": Rectangle {
+                        background: Palette.surface; border-radius: 10px; border-width: 1px; border-color: Palette.red;
+                        VerticalLayout { padding: 16px; spacing: 10px;
+                            Text {
+                                text: root.confirm-action == "factory" ? "Factory reset the watch?"
+                                    : root.confirm-action == "forget" ? "Forget this watch?" : "Reboot into Recovery?";
+                                color: Palette.text; font-size: 16px; font-weight: 700; horizontal-alignment: center;
                             }
-                        }
-                    }
-                    ActionButton {
-                        label: "Create Core Dump"; enabled: root.watch-connected;
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Core dump requested…"; root.create-core-dump(); }
-                    }
-                    ActionButton {
-                        label: "Forget (Unpair)";
-                        clicked => { root.confirm-factory = false; root.confirm-recovery = false; root.action-error = false; root.action-status = "Removing bond…"; root.forget-watch(); }
-                    }
-                    ActionButton {
-                        label: root.confirm-factory ? "Tap again to confirm Factory Reset" : "Factory Reset (erases watch)";
-                        danger: true; enabled: root.watch-connected;
-                        clicked => {
-                            if (root.confirm-factory) {
-                                root.confirm-factory = false;
-                                root.action-error = false;
-                                root.action-status = "Factory reset sent.";
-                                root.factory-reset();
-                            } else {
-                                root.confirm-factory = true;
-                                root.confirm-recovery = false;
+                            Text {
+                                text: root.confirm-action == "factory" ? "This erases all watch data and removes its pairing. This cannot be undone."
+                                    : root.confirm-action == "forget" ? "This removes the Bluetooth bond. The watch must pair again before reconnecting."
+                                    : "The watch will restart in recovery firmware and temporarily disconnect.";
+                                color: Palette.muted; font-size: 13px; wrap: word-wrap; horizontal-alignment: center;
+                            }
+                            HorizontalLayout { spacing: 8px;
+                                ActionButton { label: "Cancel"; enabled: !root.action-busy; clicked => { root.confirm-action = ""; } }
+                                ActionButton {
+                                    label: "Confirm"; danger: true; enabled: !root.action-busy;
+                                    clicked => {
+                                        if (root.confirm-action == "factory") { root.factory-reset(); }
+                                        else if (root.confirm-action == "forget") { root.forget-watch(); }
+                                        else { root.reset-into-recovery(); }
+                                        root.confirm-action = "";
+                                    }
+                                }
                             }
                         }
                     }
 
                     if root.action-status != "": Text {
                         text: root.action-status;
-                        color: root.action-error ? Palette.red : Palette.green;
+                        color: root.action-error ? Palette.red : root.action-busy ? Palette.accent : Palette.green;
                         font-size: 13px; horizontal-alignment: center;
                     }
                 }
@@ -1102,7 +1114,7 @@ export component AppWindow inherits Window {
                         Text { text: "⚙"; font-size: 20px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
                         Text { text: "Settings"; font-size: 11px; horizontal-alignment: center; color: active-tab == 4 ? Palette.accent : Palette.muted; }
                     }
-                    TouchArea { clicked => { active-tab = 4; settings-page = 0; confirm-factory = false; confirm-recovery = false; action-status = ""; action-error = false; } }
+                    TouchArea { clicked => { if (!root.action-busy) { active-tab = 4; settings-page = 0; confirm-action = ""; action-status = ""; action-error = false; } } }
                 }
             }
         }

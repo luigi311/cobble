@@ -875,27 +875,27 @@ fn main() -> anyhow::Result<()> {
         window.on_reboot_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), |c| async move { c.reboot_watch().await })
+            move || spawn_action(&rt, w.clone(), "Rebooting watch…", "Reboot command accepted.", |c| async move { c.reboot_watch().await })
         });
         window.on_reset_into_recovery({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), |c| async move { c.reset_into_recovery().await })
+            move || spawn_action(&rt, w.clone(), "Rebooting into recovery…", "Recovery command accepted.", |c| async move { c.reset_into_recovery().await })
         });
         window.on_create_core_dump({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), |c| async move { c.create_core_dump().await })
+            move || spawn_action(&rt, w.clone(), "Requesting core dump…", "Core dump request accepted.", |c| async move { c.create_core_dump().await })
         });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), |c| async move { c.forget().await })
+            move || spawn_action(&rt, w.clone(), "Removing Bluetooth bond…", "Bluetooth bond removed.", |c| async move { c.forget().await })
         });
         window.on_factory_reset({
             let rt = rt_handle.clone();
             let w = w.clone();
-            move || spawn_action(&rt, w.clone(), |c| async move { c.factory_reset(true).await })
+            move || spawn_action(&rt, w.clone(), "Factory resetting watch…", "Factory reset command accepted.", |c| async move { c.factory_reset(true).await })
         });
     }
 
@@ -904,25 +904,45 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run a device action on the runtime; the UI sets an optimistic status before
-/// calling, so only failures are reported back.
-fn spawn_action<F, Fut>(rt: &tokio::runtime::Handle, weak: slint::Weak<AppWindow>, f: F)
+/// Run one device action at a time and report only completed outcomes.
+fn spawn_action<F, Fut>(rt: &tokio::runtime::Handle, weak: slint::Weak<AppWindow>, pending: &'static str, success: &'static str, f: F)
 where
     F: FnOnce(CobbleClient) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = cobble_client::Result<()>> + Send + 'static,
 {
+    let Some(window) = weak.upgrade() else { return };
+    if window.get_action_busy() { return; }
+    window.set_action_busy(true);
+    window.set_action_error(false);
+    window.set_action_status(pending.into());
+    drop(window);
     rt.spawn(async move {
-        if let Err(e) = async { f(CobbleClient::new().await?).await }.await {
-            let msg = format!("Error: {e}");
-            slint::invoke_from_event_loop(move || {
-                if let Some(w) = weak.upgrade() {
-                    w.set_action_error(true);
-                    w.set_action_status(msg.into());
+        let result = async { f(CobbleClient::new().await?).await }.await;
+        slint::invoke_from_event_loop(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_action_busy(false);
+                match result {
+                    Ok(()) => { w.set_action_error(false); w.set_action_status(success.into()); }
+                    Err(error) => { w.set_action_error(true); w.set_action_status(action_error_message(&error.to_string()).into()); }
                 }
-            })
-            .ok();
-        }
+            }
+        }).ok();
     });
+}
+
+fn action_error_message(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("not connected") || lower.contains("disconnected") {
+        "The watch disconnected before the action completed.".into()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "The watch did not respond in time. Please reconnect and try again.".into()
+    } else if lower.contains("rejected") || lower.contains("nack") {
+        "The watch rejected this action.".into()
+    } else if lower.contains("serviceunknown") || lower.contains("name has no owner") {
+        "The Cobble daemon is not running.".into()
+    } else {
+        "The action could not be completed. Check the daemon log for details.".into()
+    }
 }
 
 fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
