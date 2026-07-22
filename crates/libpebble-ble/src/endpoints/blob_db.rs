@@ -175,8 +175,8 @@ pub fn build_blobdb_str_insert(
 
 /// Insert a record whose string key is not NUL-terminated.
 ///
-/// AppConfigs records such as `weatherApp` use this form, unlike WatchPrefs
-/// and HealthParams string keys.
+/// HealthParams and AppConfigs records use this form. WatchPrefs keys are
+/// NUL-terminated.
 pub fn build_blobdb_raw_str_insert(
     db: BlobDBId,
     key: &str,
@@ -196,6 +196,21 @@ pub fn build_blobdb_raw_str_insert(
     out.extend_from_slice(&blob_len.to_le_bytes());
     out.extend_from_slice(blob);
     Ok(out)
+}
+
+/// Build a preference insert using the key representation used by the
+/// corresponding official mobile-app database entity.
+pub fn build_preference_insert(
+    db: BlobDBId,
+    key: &str,
+    blob: &[u8],
+    token: u16,
+) -> Result<Vec<u8>, &'static str> {
+    match db {
+        BlobDBId::WatchPrefs => build_blobdb_str_insert(db, key, blob, token),
+        BlobDBId::HealthParams => build_blobdb_raw_str_insert(db, key, blob, token),
+        _ => Err("database does not contain device preferences"),
+    }
 }
 
 /// Like `build_blobdb_insert` but with an explicit unix timestamp (u32).
@@ -672,12 +687,21 @@ mod preference_routing_tests {
     #[test]
     fn database_string_keys_use_their_required_wire_formats() {
         let insert =
-            build_blobdb_str_insert(BlobDBId::WatchPrefs, "lightEnabled", &[0], 0x1234).unwrap();
+            build_preference_insert(BlobDBId::WatchPrefs, "lightEnabled", &[0], 0x1234).unwrap();
         assert_eq!(
             &insert[..5],
             &[BlobDBCommand::Insert as u8, 0x34, 0x12, 12, 13]
         );
         assert_eq!(&insert[5..18], b"lightEnabled\0");
+
+        let health =
+            build_preference_insert(BlobDBId::HealthParams, "activityPreferences", &[1], 0x1234)
+                .unwrap();
+        assert_eq!(
+            &health[..5],
+            &[BlobDBCommand::Insert as u8, 0x34, 0x12, 7, 19]
+        );
+        assert_eq!(&health[5..24], b"activityPreferences");
 
         let app_config =
             build_blobdb_raw_str_insert(BlobDBId::AppConfigs, "weatherApp", &[1], 0x1234).unwrap();

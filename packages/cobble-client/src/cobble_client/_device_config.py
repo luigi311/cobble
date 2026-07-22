@@ -185,9 +185,7 @@ def decode_device_config(raw: dict[str, object]) -> DeviceConfigSnapshot:
             gender=int(raw["health.gender"]),
             distance_units=FieldValue(
                 units_availability,
-                str(raw["health.distance_units"])
-                if "health.distance_units" in raw
-                else None,
+                str(raw["health.distance_units"]) if "health.distance_units" in raw else None,
             ),
             hrm=FieldValue(hrm_availability, hrm),
             heart_rate_thresholds=FieldValue(thresholds_availability, thresholds),
@@ -230,9 +228,7 @@ def decode_device_config(raw: dict[str, object]) -> DeviceConfigSnapshot:
             blob_db_version=int(raw.get("blob_db_version", 0)),
             supported=supported,
         ),
-        last_read_at_ms=(
-            int(raw["last_read_at_ms"]) if "last_read_at_ms" in raw else None
-        ),
+        last_read_at_ms=(int(raw["last_read_at_ms"]) if "last_read_at_ms" in raw else None),
         health=FieldValue(activity_availability, health_value),
         preferences=preferences,
         error=(

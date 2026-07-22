@@ -32,7 +32,7 @@ use crate::{
         blob_db::{
             BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
             build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_raw_str_insert,
-            build_blobdb_str_insert, build_blobdb2_mark_all_dirty, build_notification,
+            build_blobdb2_mark_all_dirty, build_notification, build_preference_insert,
             build_weather_blob, build_weather_prefs_blob,
         },
         datalog::build_report_sessions,
@@ -670,6 +670,10 @@ impl Pebble {
 
     /// Write "activityPreferences" (and optionally "hrmPreferences") to the
     /// BlobDB PREFERENCES store, then trigger a DataLog sync from the watch.
+    /// Legacy whole-record health writer. Prefer
+    /// [`Pebble::write_preference_confirmed`] with a freshly read, patched raw
+    /// record so existing insight and firmware-specific fields are preserved.
+    #[deprecated(note = "use a refreshed, lossless preference patch")]
     pub async fn activate_health(
         &self,
         height_cm: u16,
@@ -684,13 +688,13 @@ impl Pebble {
         let token = rand_u16();
         let blob = build_activate_health_blob(height_cm, weight_kg, age, gender);
         let payload =
-            build_blobdb_str_insert(BlobDBId::HealthParams, "activityPreferences", &blob, token)
+            build_preference_insert(BlobDBId::HealthParams, "activityPreferences", &blob, token)
                 .map_err(|e| PebbleError::Other(e.to_string()))?;
         self.send_pebble(Endpoint::BlobDb, &payload)?;
 
         let hrm_token = rand_u16();
         let hrm_blob = build_hrm_blob(hrm_enabled);
-        let hrm_payload = build_blobdb_str_insert(
+        let hrm_payload = build_preference_insert(
             BlobDBId::HealthParams,
             "hrmPreferences",
             &hrm_blob,
@@ -752,7 +756,7 @@ impl Pebble {
             return Err(PebbleError::NotConnected);
         }
         let token = rand_u16();
-        let payload = build_blobdb_str_insert(db, key, value, token)
+        let payload = build_preference_insert(db, key, value, token)
             .map_err(|error| PebbleError::Other(error.into()))?;
         let status = self.send_blobdb_confirmed(token, key, &payload).await?;
         if status == BlobDBStatus::Success {

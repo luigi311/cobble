@@ -1,7 +1,7 @@
 """Typed daemon-configuration contracts matching the Rust client."""
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from ._device_config import ConfigError, ConfigErrorKind
 
@@ -55,7 +55,7 @@ class DaemonConfigPatch:
     intervals_icu: IntervalsIcuPatch | None = None
 
 
-class ApplyDisposition(str, Enum):
+class ApplyDisposition(StrEnum):
     APPLIED_LIVE = "applied_live"
     RECONNECTING = "reconnecting"
     GUI_DATA_SOURCE_REOPEN_REQUIRED = "gui_data_source_reopen_required"
@@ -85,8 +85,10 @@ def decode_daemon_config(raw: dict) -> DaemonConfigSnapshot:
         resolved_database_path=str(raw["resolved_database_path"]),
         active_verbose=bool(raw["active_verbose"]),
         config=DaemonConfig(
-            address=str(raw["address"]), adapter=str(raw["adapter"]),
-            verbose=bool(raw["verbose"]), database_path=database_path or None,
+            address=str(raw["address"]),
+            adapter=str(raw["adapter"]),
+            verbose=bool(raw["verbose"]),
+            database_path=database_path or None,
             intervals_icu=IntervalsIcuConfig(
                 enabled=bool(raw["intervals_enabled"]),
                 athlete_id=str(raw["intervals_athlete_id"]),

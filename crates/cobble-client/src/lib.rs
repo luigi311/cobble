@@ -844,6 +844,8 @@ impl CobbleClient {
 
     // ---- Health ----
 
+    /// Compatibility health activation API. The daemon refreshes current
+    /// settings and applies this as a lossless, confirmed patch.
     pub async fn activate_health(
         &self,
         height_cm: u16,

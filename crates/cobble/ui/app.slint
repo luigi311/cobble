@@ -119,6 +119,10 @@ export component AppWindow inherits Window {
     in-out property <bool> dc-applying: false;
     in property <bool> dc-clock-24h-available: false;
     in-out property <bool> dc-clock-24h-value;
+    in property <bool> dc-timezone-manual-available: false;
+    in-out property <bool> dc-timezone-manual-value;
+    in property <bool> dc-stationary-mode-available: false;
+    in-out property <bool> dc-stationary-mode-value;
     in property <bool> dc-left-handed-available: false;
     in-out property <bool> dc-left-handed-value;
     in property <bool> dc-text-size-available: false;
@@ -162,6 +166,7 @@ export component AppWindow inherits Window {
     in property <bool> dc-ql-tap-up-available; in-out property <int> dc-ql-tap-up-index;
     in property <bool> dc-ql-tap-down-available; in-out property <int> dc-ql-tap-down-index;
     in property <bool> dc-language-available; in-out property <int> dc-language-index;
+    in property <bool> dc-language-english-available; in-out property <bool> dc-language-english-value;
     in property <bool> dc-light-color-available; in-out property <int> dc-light-color-index;
     in property <bool> dc-motion-sensitivity-available; in-out property <int> dc-motion-sensitivity-index: 3;
     in property <bool> dc-light-ambient-threshold-available; in-out property <int> dc-light-ambient-threshold: 150;
@@ -756,10 +761,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.dc-clock-24h-available || root.dc-left-handed-available || root.dc-text-size-available: Text {
+                    if root.dc-clock-24h-available || root.dc-timezone-manual-available || root.dc-stationary-mode-available
+                        || root.dc-left-handed-available || root.dc-text-size-available: Text {
                         text: "Time & Display"; color: Palette.muted; font-size: 12px;
                     }
-                    if root.dc-clock-24h-available || root.dc-left-handed-available || root.dc-text-size-available: Rectangle {
+                    if root.dc-clock-24h-available || root.dc-timezone-manual-available || root.dc-stationary-mode-available
+                        || root.dc-left-handed-available || root.dc-text-size-available: Rectangle {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout {
                             padding: 14px; spacing: 8px;
@@ -768,6 +775,18 @@ export component AppWindow inherits Window {
                                 Text { text: "24-hour clock"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
                                 Rectangle { horizontal-stretch: 1; }
                                 Toggle { checked <=> root.dc-clock-24h-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-timezone-manual-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Manual timezone source"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-timezone-manual-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
+                            if root.dc-stationary-mode-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Standby mode"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-stationary-mode-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
                             }
                             if root.dc-left-handed-available: HorizontalLayout {
                                 height: 36px;
@@ -892,13 +911,19 @@ export component AppWindow inherits Window {
                         text: "Quick Launch"; color: Palette.muted; font-size: 12px;
                     }
 
-                    if root.dc-language-available: Text {
+                    if root.dc-language-available || root.dc-language-english-available: Text {
                         text: "Language"; color: Palette.muted; font-size: 12px;
                     }
-                    if root.dc-language-available: Rectangle {
+                    if root.dc-language-available || root.dc-language-english-available: Rectangle {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout { padding: 14px; spacing: 8px;
-                            EnumSetting { label: "Built-in language"; options: ["English", "Català", "Deutsch", "Español", "Français", "Italiano", "Nederlands", "Português", "Polski", "Existing language pack"]; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-language-available: EnumSetting { label: "Built-in language"; options: ["English", "Català", "Deutsch", "Español", "Français", "Italiano", "Nederlands", "Português", "Polski", "Custom language pack"]; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-language-english-available: HorizontalLayout {
+                                height: 36px;
+                                Text { text: "Use English"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Toggle { checked <=> root.dc-language-english-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
+                            }
                         }
                     }
                     if root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
@@ -917,7 +942,8 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.dc-health-available || root.dc-clock-24h-available || root.dc-left-handed-available || root.dc-text-size-available
+                    if root.dc-health-available || root.dc-clock-24h-available || root.dc-timezone-manual-available
+                        || root.dc-stationary-mode-available || root.dc-left-handed-available || root.dc-text-size-available
                         || root.dc-light-enabled-available || root.dc-light-ambient-available || root.dc-light-motion-available
                         || root.dc-light-timeout-available || root.dc-light-touch-available || root.dc-light-intensity-available
                         || root.dc-light-dynamic-legacy-available || root.dc-light-preset-available
@@ -934,7 +960,7 @@ export component AppWindow inherits Window {
                         || root.dc-ql-up-available || root.dc-ql-down-available || root.dc-ql-select-available || root.dc-ql-back-available
                         || root.dc-ql-combo-back-up-available || root.dc-ql-combo-up-down-available
                         || root.dc-ql-tap-up-available || root.dc-ql-tap-down-available
-                        || root.dc-language-available: HorizontalLayout {
+                        || root.dc-language-available || root.dc-language-english-available: HorizontalLayout {
                         spacing: 8px;
                         ActionButton { label: "Discard"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.discard-device-config(); } }
                         ActionButton { label: root.dc-applying ? "Applying…" : "Apply"; enabled: root.dc-dirty && !root.dc-applying; clicked => { root.apply-device-config(); } }

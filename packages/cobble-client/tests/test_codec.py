@@ -11,6 +11,7 @@ from cobble_client._device_config import (
     FieldAvailability,
     decode_device_config,
 )
+from cobble_client.client import CobbleClient
 
 
 def test_width_pins_survive_round_trip():
@@ -29,8 +30,14 @@ def test_width_pins_survive_round_trip():
     back = decode_data_dict(encode_data_dict(src))
 
     assert back[0] == "hello"
-    for key, width, signed in [(1, 2, False), (2, 1, False), (3, 4, False),
-                               (4, 1, True), (5, 2, True), (6, 4, True)]:
+    for key, width, signed in [
+        (1, 2, False),
+        (2, 1, False),
+        (3, 4, False),
+        (4, 1, True),
+        (5, 2, True),
+        (6, 4, True),
+    ]:
         v = back[key]
         assert isinstance(v, Int), f"key {key} lost its Int wrapper"
         assert v.width == width and v.signed == signed, f"key {key} width/sign drifted"
@@ -85,3 +92,13 @@ def test_device_config_preserves_availability_and_native_units():
     assert snapshot.health.value.weight_dag == 7555
     assert snapshot.health.value.distance_units.availability is FieldAvailability.NOT_RECEIVED
     assert snapshot.preferences["clock24h"].raw == b"\x01"
+
+
+def test_daemon_config_changed_handler_receives_revision():
+    client = CobbleClient()
+    revisions = []
+    client.on_daemon_config_changed(revisions.append)
+
+    client._dispatch_daemon_config_changed(17)
+
+    assert revisions == [17]

@@ -82,7 +82,9 @@ use crate::notification::app_name_to_category;
 
 fn editable_general_preference(key: &str) -> Option<&'static str> {
     Some(match key {
+        "timezoneSource" => "timezoneSource",
         "clock24h" => "clock24h",
+        "stationaryMode" => "stationaryMode",
         "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
         "textStyle" => "textStyle",
         "lightEnabled" => "lightEnabled",
@@ -124,6 +126,7 @@ fn editable_general_preference(key: &str) -> Option<&'static str> {
         "qlSingleClickUp" => "qlSingleClickUp",
         "qlSingleClickDown" => "qlSingleClickDown",
         "language" => "language",
+        "langEnglish" => "langEnglish",
         "lightColor" => "lightColor",
         "motionSensitivity" => "motionSensitivity",
         "lightAmbientThreshold" => "lightAmbientThreshold",
@@ -236,6 +239,47 @@ fn patch_u16(patch: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<u1
         .transpose()
 }
 
+fn compatibility_health_patch(
+    height_cm: u16,
+    weight_kg: u16,
+    age: u8,
+    gender: u8,
+    hrm_enabled: bool,
+) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+    let height_mm = height_cm
+        .checked_mul(10)
+        .ok_or_else(|| DaemonError::Failed("height is out of range".into()))?;
+    let weight_dag = weight_kg
+        .checked_mul(100)
+        .ok_or_else(|| DaemonError::Failed("weight is out of range".into()))?;
+    if !(1000..=2200).contains(&height_mm) {
+        return Err(DaemonError::Failed(
+            "height must be between 100 and 220 cm".into(),
+        ));
+    }
+    if !(3000..=20_000).contains(&weight_dag) {
+        return Err(DaemonError::Failed(
+            "weight must be between 30 and 200 kg".into(),
+        ));
+    }
+    if !(1..=120).contains(&age) {
+        return Err(DaemonError::Failed("age must be between 1 and 120".into()));
+    }
+    if gender > 2 {
+        return Err(DaemonError::Failed(format!(
+            "invalid gender={gender}; must be 0 (female), 1 (male), or 2 (other)"
+        )));
+    }
+    Ok(HashMap::from([
+        ("health.height_mm".into(), dbus_val(height_mm)),
+        ("health.weight_dag".into(), dbus_val(weight_dag)),
+        ("health.age".into(), dbus_val(age)),
+        ("health.gender".into(), dbus_val(gender)),
+        ("health.tracking_enabled".into(), dbus_val(true)),
+        ("health.hrm.enabled".into(), dbus_val(hrm_enabled)),
+    ]))
+}
+
 async fn write_records_in_order<F, Fut>(
     writes: Vec<(&'static str, Vec<u8>)>,
     mut write: F,
@@ -268,6 +312,48 @@ fn preference_model(watch: Option<&WatchVersionInfo>) -> WatchPrefModel {
         Some(WatchType::Gabbro) => WatchPrefModel::Gabbro,
         _ => WatchPrefModel::Standard,
     }
+}
+
+fn default_preferences_patch(
+    observed: &HashMap<String, WatchPrefValue>,
+    raw: &HashMap<String, Vec<u8>>,
+    model: WatchPrefModel,
+) -> HashMap<String, OwnedValue> {
+    let mut patch = HashMap::new();
+    for (key, cached) in observed {
+        if editable_general_preference(key).is_none() {
+            continue;
+        }
+        let current = raw
+            .get(key)
+            .and_then(|value| decode_watch_pref_for_model(key, value, model))
+            .unwrap_or_else(|| cached.clone());
+        let Some(metadata) = watch_pref_metadata(key) else {
+            continue;
+        };
+        let default = match metadata.default {
+            WatchPrefDefault::Bool(value) => WatchPrefValue::Bool(value),
+            WatchPrefDefault::Number(value) => WatchPrefValue::Number(value),
+            WatchPrefDefault::QuickLaunch { enabled, uuid } => WatchPrefValue::Text(
+                if enabled {
+                    uuid.unwrap_or("off")
+                } else {
+                    "off"
+                }
+                .to_owned(),
+            ),
+        };
+        if current == default {
+            continue;
+        }
+        let value = match default {
+            WatchPrefValue::Bool(value) => dbus_val(value),
+            WatchPrefValue::Number(value) => dbus_val(value),
+            WatchPrefValue::Text(value) => dbus_val(value),
+        };
+        patch.insert(format!("preference.{key}"), value);
+    }
+    patch
 }
 
 fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
@@ -849,10 +935,18 @@ impl CobbleDaemon {
     }
 
     /// Cache a decoded general watch setting (db 12).
-    pub(crate) fn cache_watch_setting(&self, key: String, value: WatchPrefValue, raw: Vec<u8>) {
+    pub(crate) fn cache_watch_setting(
+        &self,
+        key: String,
+        value: WatchPrefValue,
+        raw: Vec<u8>,
+    ) -> WatchPrefValue {
         let mut state = self.state.lock().unwrap();
+        let model = preference_model(state.device_config_watch.as_ref());
+        let value = decode_watch_pref_for_model(&key, &raw, model).unwrap_or(value);
         state.watch_setting_raw.insert(key.clone(), raw);
-        state.watch_settings.insert(key, value);
+        state.watch_settings.insert(key, value.clone());
+        value
     }
 
     /// Re-send the last pushed music state to the watch — used to answer the
@@ -1411,8 +1505,9 @@ impl CobbleDaemon {
         Ok(result)
     }
 
-    /// Write health user profile to the watch and trigger a DataLog sync.
-    /// gender: 0 = female, 1 = male, 2 = other (libpebble3 `HealthGender`).
+    /// Compatibility wrapper for the original health-activation API. Refresh
+    /// first and apply a lossless patch so insight flags and firmware-sized HRM
+    /// fields are preserved.
     async fn activate_health(
         &self,
         height_cm: u16,
@@ -1421,16 +1516,26 @@ impl CobbleDaemon {
         gender: u8,
         hrm_enabled: bool,
     ) -> Result<(), DaemonError> {
-        if gender > 2 {
-            return Err(DaemonError::Failed(format!(
-                "invalid gender={gender}; must be 0 (female), 1 (male), or 2 (other)"
-            )));
+        let patch = compatibility_health_patch(height_cm, weight_kg, age, gender, hrm_enabled)?;
+        self.refresh_device_config().await?;
+        let expected_revision = self.state.lock().unwrap().device_config_revision;
+        self.update_device_config(expected_revision, patch).await?;
+        let state = self.state.lock().unwrap();
+        if state.device_config_state == DeviceConfigState::Error {
+            return Err(DaemonError::Failed(
+                state
+                    .device_config_error
+                    .clone()
+                    .unwrap_or_else(|| "health update failed".into()),
+            ));
         }
-        let pebble = self.require_pebble()?;
+        let pebble = state.pebble.clone().ok_or_else(|| {
+            DaemonError::NotConnected("watch disconnected after health update".into())
+        })?;
+        drop(state);
         pebble
-            .activate_health(height_cm, weight_kg, age, gender, hrm_enabled)
-            .await
-            .map_err(|e| DaemonError::Failed(e.to_string()))
+            .fetch_health_data()
+            .map_err(|error| DaemonError::Failed(error.to_string()))
     }
 
     /// Ask the watch to flush pending health records via DataLog sessions.
@@ -1465,12 +1570,19 @@ impl CobbleDaemon {
     /// far, as a map of key -> variant (bool / uint32 / string). Empty until the
     /// watch syncs settings on connect. See `WatchSettingReceived` for updates.
     fn get_watch_settings(&self) -> HashMap<String, OwnedValue> {
-        self.state
-            .lock()
-            .unwrap()
+        let state = self.state.lock().unwrap();
+        let model = preference_model(state.device_config_watch.as_ref());
+        state
             .watch_settings
             .iter()
-            .map(|(k, v)| (k.clone(), watch_pref_owned_value(v)))
+            .map(|(key, cached)| {
+                let value = state
+                    .watch_setting_raw
+                    .get(key)
+                    .and_then(|raw| decode_watch_pref_for_model(key, raw, model))
+                    .unwrap_or_else(|| cached.clone());
+                (key.clone(), watch_pref_owned_value(&value))
+            })
             .collect()
     }
 
@@ -1498,6 +1610,11 @@ impl CobbleDaemon {
             Err(error) => (None, Some(format!("watch identity unavailable: {error}"))),
         };
         let blob_db_version = pebble.blob_db_version();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.device_config_watch = info.clone();
+            state.device_config_blob_db_version = blob_db_version;
+        }
         let refresh_error = if blob_db_version == 0 {
             Some("watch does not support completeness-confirmed BlobDB2 refresh".to_string())
         } else {
@@ -1934,37 +2051,15 @@ impl CobbleDaemon {
         &self,
         expected_revision: u64,
     ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
-        let observed = self.state.lock().unwrap().watch_settings.clone();
-        let mut patch = HashMap::new();
-        for (key, current) in observed {
-            if editable_general_preference(&key).is_none() {
-                continue;
-            }
-            let Some(metadata) = watch_pref_metadata(&key) else {
-                continue;
-            };
-            let default = match metadata.default {
-                WatchPrefDefault::Bool(value) => WatchPrefValue::Bool(value),
-                WatchPrefDefault::Number(value) => WatchPrefValue::Number(value),
-                WatchPrefDefault::QuickLaunch { enabled, uuid } => WatchPrefValue::Text(
-                    if enabled {
-                        uuid.unwrap_or("off")
-                    } else {
-                        "off"
-                    }
-                    .to_owned(),
-                ),
-            };
-            if current == default {
-                continue;
-            }
-            let value = match default {
-                WatchPrefValue::Bool(value) => dbus_val(value),
-                WatchPrefValue::Number(value) => dbus_val(value),
-                WatchPrefValue::Text(value) => dbus_val(value),
-            };
-            patch.insert(format!("preference.{key}"), value);
-        }
+        let (observed, raw, model) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.watch_settings.clone(),
+                state.watch_setting_raw.clone(),
+                preference_model(state.device_config_watch.as_ref()),
+            )
+        };
+        let patch = default_preferences_patch(&observed, &raw, model);
         self.update_device_config(expected_revision, patch).await
     }
 
@@ -2400,6 +2495,46 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("cobbled-reload-test-{unique}.toml"))
+    }
+
+    #[test]
+    fn compatibility_health_patch_is_precise_and_preserves_unmentioned_fields() {
+        let patch = compatibility_health_patch(181, 76, 42, 2, true).unwrap();
+        assert_eq!(
+            u16::try_from(patch.get("health.height_mm").unwrap()).unwrap(),
+            1810
+        );
+        assert_eq!(
+            u16::try_from(patch.get("health.weight_dag").unwrap()).unwrap(),
+            7600
+        );
+        assert!(bool::try_from(patch.get("health.tracking_enabled").unwrap()).unwrap());
+        assert!(bool::try_from(patch.get("health.hrm.enabled").unwrap()).unwrap());
+        assert!(!patch.contains_key("health.activity_insights_enabled"));
+        assert!(!patch.contains_key("health.sleep_insights_enabled"));
+        assert!(!patch.contains_key("health.hrm.measurement_interval"));
+        assert!(!patch.contains_key("health.hrm.during_activity"));
+    }
+
+    #[test]
+    fn compatibility_health_patch_rejects_lossy_or_invalid_inputs() {
+        assert!(compatibility_health_patch(u16::MAX, 70, 35, 0, false).is_err());
+        assert!(compatibility_health_patch(170, u16::MAX, 35, 0, false).is_err());
+        assert!(compatibility_health_patch(170, 70, 0, 0, false).is_err());
+        assert!(compatibility_health_patch(170, 70, 35, 3, false).is_err());
+    }
+
+    #[test]
+    fn reset_defaults_uses_model_adjusted_text_size() {
+        let observed = HashMap::from([("textStyle".into(), WatchPrefValue::Number(1))]);
+        let raw = HashMap::from([("textStyle".into(), vec![1])]);
+
+        let emery = default_preferences_patch(&observed, &raw, WatchPrefModel::Emery);
+        assert_eq!(
+            u32::try_from(emery.get("preference.textStyle").unwrap()).unwrap(),
+            1
+        );
+        assert!(default_preferences_patch(&observed, &raw, WatchPrefModel::Standard).is_empty());
     }
 
     #[tokio::test]
@@ -2952,8 +3087,8 @@ pub async fn run_signal_emitter(
                 daemon.note_device_config_value();
             }
             DaemonEvent::WatchSetting { key, value, raw } => {
+                let value = daemon.cache_watch_setting(key.clone(), value, raw);
                 let variant = watch_pref_owned_value(&value);
-                daemon.cache_watch_setting(key.clone(), value, raw);
                 daemon.note_device_config_value();
                 let _ = CobbleDaemon::watch_setting_received(emitter, &key, variant).await;
             }

@@ -17,7 +17,10 @@ from dbus_fast.constants import BusType
 
 from ._codec import decode_data_dict, encode_data_dict
 from ._daemon_config import (
-    ApplyDisposition, DaemonConfigPatch, DaemonConfigSnapshot, DaemonConfigUpdate,
+    ApplyDisposition,
+    DaemonConfigPatch,
+    DaemonConfigSnapshot,
+    DaemonConfigUpdate,
     decode_daemon_config,
 )
 from ._device_config import (
@@ -50,6 +53,7 @@ AppRunStateHandler = Callable[[str, bool], None]
 # media-control action name from the watch (play/pause/next_track/…)
 MusicActionHandler = Callable[[str], None]
 DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
+DaemonConfigChangedHandler = Callable[[int], None]
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -94,6 +98,7 @@ class CobbleClient:
         self._app_run_state_handlers: list[AppRunStateHandler] = []
         self._music_action_handlers: list[MusicActionHandler] = []
         self._device_config_handlers: list[DeviceConfigChangedHandler] = []
+        self._daemon_config_handlers: list[DaemonConfigChangedHandler] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -140,6 +145,7 @@ class CobbleClient:
         self._iface.on_connection_changed(self._dispatch_connection)
         self._iface.on_health_data_received(self._dispatch_health_data)
         self._iface.on_health_profile_received(self._dispatch_health_profile)
+        self._iface.on_daemon_config_changed(self._dispatch_daemon_config_changed)
         self._iface.on_device_config_changed(self._dispatch_device_config_changed)
         self._iface.on_watch_setting_received(self._dispatch_watch_setting)
         self._iface.on_battery_changed(self._dispatch_battery)
@@ -289,22 +295,33 @@ class CobbleClient:
         """Apply a revision-guarded daemon configuration patch."""
         self._require_iface()
         wire: dict[str, Variant] = {}
-        if patch.address is not None: wire["address"] = Variant("s", patch.address)
-        if patch.adapter is not None: wire["adapter"] = Variant("s", patch.adapter)
-        if patch.verbose is not None: wire["verbose"] = Variant("b", patch.verbose)
+        if patch.address is not None:
+            wire["address"] = Variant("s", patch.address)
+        if patch.adapter is not None:
+            wire["adapter"] = Variant("s", patch.adapter)
+        if patch.verbose is not None:
+            wire["verbose"] = Variant("b", patch.verbose)
         if patch.database_path is not None or patch.use_default_database_path:
             wire["database_path"] = Variant("s", patch.database_path or "")
         if intervals := patch.intervals_icu:
-            if intervals.enabled is not None: wire["intervals_enabled"] = Variant("b", intervals.enabled)
-            if intervals.athlete_id is not None: wire["intervals_athlete_id"] = Variant("s", intervals.athlete_id)
-            if intervals.api_key is not None: wire["intervals_api_key_replace"] = Variant("s", intervals.api_key)
-            if intervals.clear_api_key: wire["intervals_api_key_clear"] = Variant("b", True)
+            if intervals.enabled is not None:
+                wire["intervals_enabled"] = Variant("b", intervals.enabled)
+            if intervals.athlete_id is not None:
+                wire["intervals_athlete_id"] = Variant("s", intervals.athlete_id)
+            if intervals.api_key is not None:
+                wire["intervals_api_key_replace"] = Variant("s", intervals.api_key)
+            if intervals.clear_api_key:
+                wire["intervals_api_key_clear"] = Variant("b", True)
         try:
             raw = await self._iface.call_update_daemon_config(patch.expected_revision, wire)
         except DBusError as e:
             raise self._translate(e) from e
         values = {k: _unwrap(v) for k, v in raw.items()}
-        fields = {key.removeprefix("apply."): ApplyDisposition(str(value)) for key, value in values.items() if key.startswith("apply.")}
+        fields = {
+            key.removeprefix("apply."): ApplyDisposition(str(value))
+            for key, value in values.items()
+            if key.startswith("apply.")
+        }
         return DaemonConfigUpdate(decode_daemon_config(values), fields)
 
     async def activate_health(
@@ -316,8 +333,9 @@ class CobbleClient:
         *,
         hrm_enabled: bool = False,
     ) -> None:
-        """Write the health user profile to the watch and trigger a DataLog sync.
+        """Refresh and safely patch the health profile, then trigger a DataLog sync.
 
+        Existing insight flags and firmware-specific HRM fields are preserved.
         gender: 0 = female, 1 = male, 2 = other (libpebble3 HealthGender).
         """
         self._require_iface()
@@ -420,9 +438,12 @@ class CobbleClient:
         if patch.heart_rate_thresholds is not None:
             value = patch.heart_rate_thresholds
             for key, threshold in {
-                "resting": value.resting, "elevated": value.elevated,
-                "maximum": value.maximum, "zone1": value.zone_1,
-                "zone2": value.zone_2, "zone3": value.zone_3,
+                "resting": value.resting,
+                "elevated": value.elevated,
+                "maximum": value.maximum,
+                "zone1": value.zone_1,
+                "zone2": value.zone_2,
+                "zone3": value.zone_3,
             }.items():
                 wire[f"health.thresholds.{key}"] = Variant("y", threshold)
         for key, value in (preferences or {}).items():
@@ -713,6 +734,12 @@ class CobbleClient:
         self._device_config_handlers.append(fn)
         return fn
 
+    def on_daemon_config_changed(
+        self, fn: DaemonConfigChangedHandler
+    ) -> DaemonConfigChangedHandler:
+        self._daemon_config_handlers.append(fn)
+        return fn
+
     def on_battery(self, fn: BatteryHandler) -> BatteryHandler:
         self._battery_handlers.append(fn)
         return fn
@@ -744,6 +771,10 @@ class CobbleClient:
         parsed = DeviceConfigState(state)
         for handler in self._device_config_handlers:
             _safe(handler, revision, parsed)
+
+    def _dispatch_daemon_config_changed(self, revision: int) -> None:
+        for handler in self._daemon_config_handlers:
+            _safe(handler, revision)
 
     def _dispatch_nack(self, txn: int) -> None:
         for h in self._nack_handlers:

@@ -562,9 +562,9 @@ pub fn watch_pref_type(key: &str) -> Option<WatchPrefType> {
 /// Decode a watch-pref blob for a known key. Returns `None` for unknown keys or
 /// blobs too short for their type.
 ///
-/// Note: the `textStyle` enum has a per-watch-model offset in libpebble3
-/// (`applyOffsetForReceiveFromWatch`); we return the raw on-wire code without
-/// that adjustment.
+/// Without model context this uses the standard-model representation. Call
+/// [`decode_watch_pref_for_model`] when the watch model is known so `textStyle`
+/// receives the Emery/Gabbro offset adjustment.
 pub fn decode_watch_pref(key: &str, raw: &[u8]) -> Option<WatchPrefValue> {
     decode_watch_pref_for_model(key, raw, WatchPrefModel::Standard)
 }

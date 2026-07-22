@@ -252,6 +252,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             stage_bool("clock24h", window.get_dc_clock_24h_available(), window.get_dc_clock_24h_value());
+            stage_bool("timezoneSource", window.get_dc_timezone_manual_available(), window.get_dc_timezone_manual_value());
+            stage_bool("stationaryMode", window.get_dc_stationary_mode_available(), window.get_dc_stationary_mode_value());
             stage_bool("displayOrientationLeftHanded", window.get_dc_left_handed_available(), window.get_dc_left_handed_value());
             stage_bool("lightEnabled", window.get_dc_light_enabled_available(), window.get_dc_light_enabled_value());
             stage_bool("lightAmbientSensorEnabled", window.get_dc_light_ambient_available(), window.get_dc_light_ambient_value());
@@ -268,6 +270,7 @@ fn main() -> anyhow::Result<()> {
             stage_bool("timelineQuickViewEnabled", window.get_dc_timeline_quick_view_available(), window.get_dc_timeline_quick_view_value());
             stage_bool("musicShowVolumeControls", window.get_dc_music_volume_available(), window.get_dc_music_volume_value());
             stage_bool("musicShowProgressBar", window.get_dc_music_progress_available(), window.get_dc_music_progress_value());
+            stage_bool("langEnglish", window.get_dc_language_english_available(), window.get_dc_language_english_value());
             let mut stage_number = |key: &str, available: bool, value: u32| {
                 if available && original_preferences.get(key).and_then(|field| field.value.as_ref()) != Some(&PreferenceValue::Unsigned(value)) {
                     preferences.insert(key.to_owned(), PreferenceValue::Unsigned(value));
@@ -337,9 +340,11 @@ fn main() -> anyhow::Result<()> {
                 let original = original_preferences.get("language").and_then(|field| match field.value.as_ref() {
                     Some(PreferenceValue::Unsigned(value)) => Some(*value), _ => None,
                 });
-                let selected = ((0..9).contains(&window.get_dc_language_index()))
-                    .then_some(window.get_dc_language_index() as u32 + 1)
-                    .or(original);
+                let selected = match window.get_dc_language_index() {
+                    index @ 0..=8 => Some(index as u32 + 1),
+                    9 => Some(0),
+                    _ => original,
+                };
                 if let (Some(selected), Some(original)) = (selected, original) {
                     if selected != original { preferences.insert("language".into(), PreferenceValue::Unsigned(selected)); }
                 }
@@ -1368,6 +1373,12 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     let clock = pref_bool("clock24h");
     w.set_dc_clock_24h_available(clock.is_some());
     w.set_dc_clock_24h_value(clock.unwrap_or(false));
+    let timezone_manual = pref_bool("timezoneSource");
+    w.set_dc_timezone_manual_available(timezone_manual.is_some());
+    w.set_dc_timezone_manual_value(timezone_manual.unwrap_or(false));
+    let stationary = pref_bool("stationaryMode");
+    w.set_dc_stationary_mode_available(stationary.is_some());
+    w.set_dc_stationary_mode_value(stationary.unwrap_or(false));
     let left = pref_bool("displayOrientationLeftHanded");
     w.set_dc_left_handed_available(left.is_some());
     w.set_dc_left_handed_value(left.unwrap_or(false));
@@ -1620,6 +1631,9 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
             .filter(|value| (1..=9).contains(value))
             .map_or(9, |value| value as i32 - 1),
     );
+    let language_english = pref_bool("langEnglish");
+    w.set_dc_language_english_available(language_english.is_some());
+    w.set_dc_language_english_value(language_english.unwrap_or(false));
 
     let mut entries = Vec::new();
     if let Some(watch) = &snapshot.watch {
@@ -1795,6 +1809,8 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_dirty(false);
     w.set_dc_applying(false);
     w.set_dc_clock_24h_available(false);
+    w.set_dc_timezone_manual_available(false);
+    w.set_dc_stationary_mode_available(false);
     w.set_dc_left_handed_available(false);
     w.set_dc_text_size_available(false);
     w.set_dc_light_enabled_available(false);
@@ -1836,6 +1852,7 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_ql_tap_up_available(false);
     w.set_dc_ql_tap_down_available(false);
     w.set_dc_language_available(false);
+    w.set_dc_language_english_available(false);
     w.set_dc_light_color_available(false);
     w.set_dc_motion_sensitivity_available(false);
     w.set_dc_light_ambient_threshold_available(false);
