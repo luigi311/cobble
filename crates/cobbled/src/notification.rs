@@ -70,6 +70,7 @@ pub fn app_name_to_category(app_name: &str) -> NotificationCategory {
             | "sms"
             | "kde connect"
             | "kdeconnect"
+            | "telephony"
     ) {
         return NotificationCategory::Messaging;
     }
