@@ -50,6 +50,7 @@ pub fn app_name_to_category(app_name: &str) -> NotificationCategory {
         lower,
         "signal"
             | "telegram"
+            | "telegram desktop"
             | "discord"
             | "slack"
             | "element"
