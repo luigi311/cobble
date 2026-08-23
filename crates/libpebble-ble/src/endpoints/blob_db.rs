@@ -305,19 +305,19 @@ pub fn parse_blobdb_response(payload: &[u8]) -> Option<(u16, u8)> {
     Some((token, status))
 }
 
-/// Pebble system icon resource IDs (0x80000000 flag = system resource).
-/// Values from Gadgetbridge's PebbleIconID enum.
+/// Pebble timeline icon resource IDs (0x80000000 flag = system resource).
+/// Values match libpebble3's `TimelineIcon` registry.
 mod icon_id {
-    pub const GENERIC: u32 = 0x80000037;
-    pub const EMAIL: u32 = 0x8000003C;
-    pub const SMS: u32 = 0x80000035;
-    pub const MISSED_CALL: u32 = 0x80000005;
-    pub const TWITTER: u32 = 0x8000000E;
-    pub const FACEBOOK: u32 = 0x80000007;
-    pub const FACEBOOK_MESSENGER: u32 = 0x8000006F;
-    pub const INSTAGRAM: u32 = 0x80000029;
-    pub const GOOGLE_HANGOUTS: u32 = 0x80000022;
-    pub const WHATSAPP: u32 = 0x80000057;
+    pub const GENERIC: u32 = 0x80000001;
+    pub const EMAIL: u32 = 0x80000013;
+    pub const SMS: u32 = 0x8000002D;
+    pub const MISSED_CALL: u32 = 0x80000002;
+    pub const TWITTER: u32 = 0x80000006;
+    pub const FACEBOOK: u32 = 0x8000000B;
+    pub const FACEBOOK_MESSENGER: u32 = 0x8000000A;
+    pub const INSTAGRAM: u32 = 0x8000003B;
+    pub const GOOGLE_HANGOUTS: u32 = 0x80000008;
+    pub const WHATSAPP: u32 = 0x80000005;
 }
 
 /// Pebble 8-bit ARGB color constants (alpha always 0b11 = opaque).
