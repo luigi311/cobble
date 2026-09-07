@@ -270,13 +270,17 @@ impl MprisMonitor {
 
         let self2 = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(e) = self2.listen_properties_changed(&bus_name).await {
-                warn!("mpris: properties listener for {bus_name} ended: {e}");
+            if let Err(e) = self2.listen_player_signals(&bus_name).await {
+                warn!("mpris: signal listener for {bus_name} ended: {e}");
             }
         });
     }
 
     async fn push_to_watch(&self, state: &PlayerState) {
+        self.push_to_watch_at(state, None).await;
+    }
+
+    async fn push_to_watch_at(&self, state: &PlayerState, position_us: Option<i64>) {
         // Push player info best-effort; don't bail on failure — the watch may
         // already have the identity cached from a previous push.
         let _ = self
@@ -321,11 +325,14 @@ impl MprisMonitor {
             "Paused" => 0u8,
             _ => 4u8,
         };
-        let position_us: i64 = self
-            .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Position")
-            .await
-            .unwrap_or(0)
-            .max(0);
+        let position_us = match position_us {
+            Some(position_us) => position_us,
+            None => self
+                .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Position")
+                .await
+                .unwrap_or(0),
+        }
+        .max(0);
         let position_ms = (position_us / 1000).min(u32::MAX as i64) as u32;
         let rate: f64 = self
             .get_prop(&state.bus_name, "org.mpris.MediaPlayer2.Player", "Rate")
@@ -393,18 +400,22 @@ impl MprisMonitor {
         HashMap::<String, OwnedValue>::try_from(ov).unwrap_or_default()
     }
 
-    async fn listen_properties_changed(&self, bus_name: &str) -> zbus::Result<()> {
+    async fn listen_player_signals(&self, bus_name: &str) -> zbus::Result<()> {
         // Resolve well-known name → unique name so we can verify the sender.
         let unique = match resolve_name(&self.conn, bus_name).await {
             Some(u) => u,
             None => return Ok(()),
         };
 
-        let rule = format!(
+        let properties_rule = format!(
             "type='signal',sender='{bus_name}',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path='/org/mpris/MediaPlayer2'"
         );
-        add_match(&self.conn, &rule).await?;
-        debug!("mpris: listening for PropertiesChanged from {bus_name} ({unique})");
+        add_match(&self.conn, &properties_rule).await?;
+        let seeked_rule = format!(
+            "type='signal',sender='{bus_name}',interface='org.mpris.MediaPlayer2.Player',member='Seeked',path='/org/mpris/MediaPlayer2'"
+        );
+        add_match(&self.conn, &seeked_rule).await?;
+        debug!("mpris: listening for PropertiesChanged and Seeked from {bus_name} ({unique})");
         let mut stream = MessageStream::from(&self.conn);
         while let Some(msg) = stream.next().await {
             let msg = match msg {
@@ -412,18 +423,43 @@ impl MprisMonitor {
                 Err(_) => continue,
             };
             let hdr = msg.header();
-            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus.Properties") {
-                continue;
-            }
-            if hdr.member().map(|m| m.as_str()) != Some("PropertiesChanged") {
-                continue;
-            }
             if hdr.path().map(|p| p.as_str()) != Some("/org/mpris/MediaPlayer2") {
                 continue;
             }
             // Verify the sender against the resolved unique name so we don't
             // process another player's signals in this listener.
             if hdr.sender().map(|s| s.as_str()) != Some(&unique) {
+                continue;
+            }
+
+            if hdr.interface().map(|i| i.as_str()) == Some("org.mpris.MediaPlayer2.Player")
+                && hdr.member().map(|m| m.as_str()) == Some("Seeked")
+            {
+                let Ok(position_us) = msg.body().deserialize::<i64>() else {
+                    continue;
+                };
+                debug!("mpris: Seeked from {bus_name} to {position_us}us");
+                let is_active = self
+                    .active
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|state| state.bus_name.as_str())
+                    == Some(bus_name);
+                if is_active {
+                    if let Some(state) = self.read_player_state(bus_name).await {
+                        self.push_to_watch_at(&state, Some(position_us)).await;
+                    } else {
+                        *self.active.lock().await = None;
+                        self.daemon.clear_music_state().await;
+                    }
+                }
+                continue;
+            }
+
+            if hdr.interface().map(|i| i.as_str()) != Some("org.freedesktop.DBus.Properties")
+                || hdr.member().map(|m| m.as_str()) != Some("PropertiesChanged")
+            {
                 continue;
             }
 
