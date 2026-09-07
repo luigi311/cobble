@@ -53,6 +53,7 @@ exit 1
         "CreateCoreDump",
         "FactoryReset",
         "Forget",
+        "InstallPbw",
     ] {
         assert!(
             xml.contains(&format!("<method name=\"{method}\">")),
@@ -71,4 +72,5 @@ exit 1
     }
     assert!(xml.contains("<arg name=\"expected_revision\" type=\"t\" direction=\"in\"/>"));
     assert!(xml.contains("<arg name=\"patch\" type=\"a{sv}\" direction=\"in\"/>"));
+    assert!(xml.contains("<arg name=\"pbw\" type=\"ay\" direction=\"in\"/>"));
 }

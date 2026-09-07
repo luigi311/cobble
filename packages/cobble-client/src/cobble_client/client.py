@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 from dbus_fast import DBusError, Variant
 from dbus_fast.aio import MessageBus
@@ -245,6 +246,16 @@ class CobbleClient:
             await self._iface.call_stop_app(app_uuid)
         except DBusError as e:
             raise self._translate(e) from e
+
+    async def install_pbw(self, path: str | Path) -> dict:
+        """Install a PBW file and return its UUID/name/version/platform metadata."""
+        self._require_iface()
+        pbw = Path(path).read_bytes()
+        try:
+            raw = await self._iface.call_install_pbw(pbw)
+        except DBusError as e:
+            raise self._translate(e) from e
+        return {key: _unwrap(value) for key, value in raw.items()}
 
     async def ping_daemon(self) -> bool:
         """Round-trip probe that the daemon is actually servicing calls."""

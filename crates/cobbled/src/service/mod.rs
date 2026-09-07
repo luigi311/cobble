@@ -11,6 +11,7 @@
 //!     SendAppMessage(s uuid, a{i(sv)} data, b wait_ack) -> u txn
 //!     LaunchApp(s uuid)
 //!     StopApp(s uuid)
+//!     InstallPbw(ay pbw) -> a{sv}  parse and install a PBW byte stream
 //!     UpdateTime()
 //!     Notify(s title, s body, s subtitle) -> u token
 //!     Ping() -> b
@@ -1216,6 +1217,24 @@ impl CobbleDaemon {
             .stop_app(&app_uuid)
             .await
             .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Install a PBW supplied as bytes. Bytes cross the D-Bus boundary instead
+    /// of a filesystem path so sandboxed GUI clients and the daemon do not need
+    /// shared path visibility.
+    async fn install_pbw(&self, pbw: Vec<u8>) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let pebble = self.require_pebble()?;
+        let info = pebble
+            .install_pbw(&pbw)
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        Ok(HashMap::from([
+            ("uuid".into(), dbus_val(info.uuid.to_string())),
+            ("name".into(), dbus_val(info.name)),
+            ("version".into(), dbus_val(info.version)),
+            ("watchface".into(), dbus_val(info.watchface)),
+            ("platform".into(), dbus_val(info.platform.codename())),
+        ]))
     }
 
     async fn update_time(&self) -> Result<(), DaemonError> {

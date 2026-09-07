@@ -222,6 +222,22 @@ impl WatchType {
     pub fn supports_bt_classic(self) -> bool {
         matches!(self, Self::Aplite | Self::Basalt | Self::Chalk)
     }
+
+    /// App variants accepted by this watch, most-preferred first.
+    /// Mirrors libpebble3's `WatchType.getCompatibleAppVariants()`.
+    pub fn compatible_app_variants(self) -> &'static [WatchType] {
+        use WatchType::*;
+        match self {
+            Aplite => &[Aplite],
+            Basalt => &[Basalt, Aplite],
+            Chalk => &[Chalk],
+            Diorite => &[Diorite, Aplite],
+            Emery => &[Emery, Basalt, Diorite, Aplite],
+            Flint => &[Flint, Diorite, Aplite],
+            Gabbro => &[Gabbro, Chalk],
+            Unknown => &[],
+        }
+    }
 }
 
 /// Map a hardware-platform protocol number to `(watch type, board revision)`.

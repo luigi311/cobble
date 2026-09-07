@@ -9,12 +9,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::endpoints::app_message::AppMessageValue;
 use crate::endpoints::blob_db::{BlobDB2Incoming, BlobDBStatus};
 use crate::endpoints::datalog::{DatalogData, DatalogSession};
 use crate::endpoints::music::MusicAction;
 use crate::endpoints::phone_control::PhoneAction;
+use crate::endpoints::put_bytes::PutBytesResponse;
 use crate::endpoints::screenshot::ScreenshotVersion;
 use crate::endpoints::system::{WatchColorInfo, WatchVersionInfo};
 use crate::transport::gatt_server::PebbleGattServerHandle;
@@ -97,6 +99,10 @@ pub(crate) struct PebbleInner {
     pub(crate) blobdb2_pending: HashMap<u16, oneshot::Sender<BlobDB2Incoming>>,
     /// Regular BlobDB token → status returned by the watch.
     pub(crate) blobdb_pending: HashMap<u16, oneshot::Sender<BlobDBStatus>>,
+    /// App UUID → watch-assigned app id from the next AppFetch request.
+    pub(crate) app_fetch_pending: HashMap<Uuid, oneshot::Sender<u32>>,
+    /// The serialized PutBytes operation's next command response.
+    pub(crate) put_bytes_pending: Option<oneshot::Sender<PutBytesResponse>>,
     /// Latest raw records observed through BlobDB2, keyed by wire DB and key.
     pub(crate) observed_preferences: HashMap<(u8, String), Vec<u8>>,
     /// Monotonic notification of BlobDB2 SyncDone messages: `(generation, db)`.
@@ -136,6 +142,8 @@ impl PebbleInner {
             pending_order: VecDeque::new(),
             blobdb2_pending: HashMap::new(),
             blobdb_pending: HashMap::new(),
+            app_fetch_pending: HashMap::new(),
+            put_bytes_pending: None,
             observed_preferences: HashMap::new(),
             sync_done_tx,
             watch_version_pending: Vec::new(),

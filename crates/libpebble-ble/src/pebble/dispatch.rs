@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 use super::PebbleInner;
+use crate::endpoints::app_fetch::{build_app_fetch_invalid_uuid, parse_app_fetch_request};
 use crate::endpoints::app_message::{AppMessageCmd, build_app_message_ack, parse_app_message};
 use crate::endpoints::app_run_state::{AppRunStateCmd, parse_app_run_state};
 use crate::endpoints::blob_db::{
@@ -23,6 +24,7 @@ use crate::endpoints::music::parse_music_command;
 use crate::endpoints::phone_control::parse_phone_action;
 use crate::endpoints::phone_version::build_phone_version_response;
 use crate::endpoints::ping::{build_pong, parse_ping};
+use crate::endpoints::put_bytes::parse_response as parse_put_bytes_response;
 use crate::endpoints::screenshot::{ScreenshotResponseCode, parse_screenshot_header};
 use crate::endpoints::system::{
     WATCH_VERSION_RESPONSE, parse_factory_data_response, parse_watch_color,
@@ -117,6 +119,32 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
                 }
             }
         }
+        Some(Endpoint::AppFetch) => {
+            if let Some(request) = parse_app_fetch_request(payload) {
+                debug!(
+                    "app fetch request: uuid={} app_id={}",
+                    request.uuid, request.app_id
+                );
+                let waiter = inner
+                    .lock()
+                    .unwrap()
+                    .app_fetch_pending
+                    .remove(&request.uuid);
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(request.app_id);
+                } else {
+                    warn!("no PBW available for requested app {}", request.uuid);
+                    if let Some(reply) =
+                        pebble_pack(Endpoint::AppFetch, &build_app_fetch_invalid_uuid())
+                        && let Some(server) = &inner.lock().unwrap().gatt_server
+                    {
+                        server.send(reply);
+                    }
+                }
+            } else {
+                warn!("AppFetch: malformed request ({} bytes)", payload.len());
+            }
+        }
         Some(Endpoint::MusicControl) => {
             if let Some(action) = parse_music_command(payload) {
                 debug!("music action from watch: {}", action.as_str());
@@ -162,6 +190,22 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
         }
         Some(Endpoint::BlobDbV2) => {
             on_blobdb2_message(payload.to_vec(), inner);
+        }
+        Some(Endpoint::PutBytes) => {
+            if let Some(response) = parse_put_bytes_response(payload) {
+                debug!(
+                    "PutBytes {} cookie={}",
+                    if response.acknowledged { "ACK" } else { "NACK" },
+                    response.cookie
+                );
+                if let Some(waiter) = inner.lock().unwrap().put_bytes_pending.take() {
+                    let _ = waiter.send(response);
+                } else {
+                    debug!("discarding stale PutBytes response");
+                }
+            } else {
+                warn!("PutBytes: malformed response ({} bytes)", payload.len());
+            }
         }
         _ => {
             trace!("rx unknown endpoint={endpoint_raw} len={}", payload.len());

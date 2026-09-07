@@ -4,6 +4,7 @@
 
 pub mod endpoints;
 pub mod error;
+pub mod pbw;
 pub mod transport;
 pub mod uuids;
 
@@ -38,6 +39,7 @@ pub use endpoints::watch_pref::{
     decode_watch_pref_for_model, encode_watch_pref, watch_pref_metadata,
 };
 pub use error::PebbleError;
+pub use pbw::{PbwBundle, PbwInfo};
 pub use pebble::{
     AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
     MusicActionHandler, NackHandler, Pebble, PhoneActionHandler, PreferenceWriteConfirmation,

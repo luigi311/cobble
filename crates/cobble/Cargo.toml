@@ -18,6 +18,7 @@ cobble-client = { path = "../cobble-client" }
 cobble-db = { path = "../cobble-db" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 

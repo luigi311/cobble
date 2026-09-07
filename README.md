@@ -134,6 +134,11 @@ async def main():
             "00000000-0000-0000-0000-000000000000",
             {0: "hello", 1: u16(150)},
         )
+
+        # Sideload a watchapp/watchface. The client reads the file and sends
+        # its bytes to the daemon, which selects the correct watch variant.
+        installed = await cobble.install_pbw("/path/to/watchapp.pbw")
+        print("installed", installed["name"], installed["uuid"])
         await asyncio.sleep(60)
 
 asyncio.run(main())
@@ -234,6 +239,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `SendAppMessage` | `(s, a{i(sv)}, b) → u` | uuid, data, wait_ack → txn |
 | Method | `LaunchApp` | `(s)` | uuid |
 | Method | `StopApp` | `(s)` | uuid |
+| Method | `InstallPbw` | `(ay) → a{sv}` | PBW bytes → installed uuid/name/version/watchface/platform metadata |
 | Method | `UpdateTime` | `()` | sync watch clock to system time |
 | Method | `Notify` | `(s, s, s) → u` | title, body, subtitle → token |
 | Method | `Ping` | `() → b` | daemon liveness probe |

@@ -553,6 +553,7 @@ pub trait CobbleDaemon {
 
     async fn launch_app(&self, app_uuid: &str) -> Result<()>;
     async fn stop_app(&self, app_uuid: &str) -> Result<()>;
+    async fn install_pbw(&self, pbw: Vec<u8>) -> Result<VarDict>;
     async fn update_time(&self) -> Result<()>;
     async fn notify(&self, title: &str, body: &str, subtitle: &str) -> Result<u32>;
     async fn ping(&self) -> Result<bool>;
@@ -785,6 +786,21 @@ impl CobbleClient {
 
     pub async fn stop_app(&self, app_uuid: &str) -> Result<()> {
         self.proxy().await?.stop_app(app_uuid).await
+    }
+
+    /// Install PBW bytes and return its UUID/name/version/platform metadata.
+    pub async fn install_pbw_bytes(&self, pbw: Vec<u8>) -> Result<VarDict> {
+        self.proxy().await?.install_pbw(pbw).await
+    }
+
+    /// Read and install a PBW file. The bytes, not the path, are sent to the
+    /// daemon so this also works when client and daemon have different mounts.
+    pub async fn install_pbw_file(&self, path: impl AsRef<Path>) -> Result<VarDict> {
+        let path = path.as_ref();
+        let pbw = std::fs::read(path).map_err(|error| {
+            Error::Failure(format!("read PBW file {}: {error}", path.display()))
+        })?;
+        self.install_pbw_bytes(pbw).await
     }
 
     pub async fn update_time(&self) -> Result<()> {

@@ -196,6 +196,7 @@ export component AppWindow inherits Window {
     callback reboot-watch();
     callback reset-into-recovery();
     callback create-core-dump();
+    callback install-pbw();
     callback forget-watch();
     callback factory-reset();
     in-out property <string> action-status: "";
@@ -1020,6 +1021,13 @@ export component AppWindow inherits Window {
                     if !root.watch-connected: Text {
                         text: "Watch not connected — most actions are unavailable.";
                         color: Palette.muted; font-size: 12px; horizontal-alignment: center;
+                    }
+
+                    Text { text: "Install Watch App"; color: Palette.muted; font-size: 12px; }
+                    ActionButton {
+                        label: root.action-busy ? "Installing…" : "Choose PBW to Install";
+                        enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
+                        clicked => { root.install-pbw(); }
                     }
 
                     ActionButton {

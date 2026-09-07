@@ -957,6 +957,79 @@ fn main() -> anyhow::Result<()> {
                 )
             }
         });
+        window.on_install_pbw({
+            let rt = rt_handle.clone();
+            let w = w.clone();
+            move || {
+                let Some(window) = w.upgrade() else { return };
+                if window.get_action_busy() {
+                    return;
+                }
+                window.set_action_busy(true);
+                window.set_action_error(false);
+                window.set_action_status("Choose a PBW file…".into());
+                drop(window);
+
+                let weak = w.clone();
+                rt.spawn(async move {
+                    let selected = rfd::AsyncFileDialog::new()
+                        .set_title("Install Pebble App")
+                        .add_filter("Pebble watch app", &["pbw"])
+                        .pick_file()
+                        .await;
+
+                    let Some(file) = selected else {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(w) = weak.upgrade() {
+                                w.set_action_busy(false);
+                                w.set_action_error(false);
+                                w.set_action_status("".into());
+                            }
+                        })
+                        .ok();
+                        return;
+                    };
+
+                    let file_name = file.file_name();
+                    let pbw = file.read().await;
+                    let status = format!("Installing {file_name}…");
+                    let status_weak = weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = status_weak.upgrade() {
+                            w.set_action_status(status.into());
+                        }
+                    })
+                    .ok();
+
+                    let result = async {
+                        CobbleClient::new()
+                            .await?
+                            .install_pbw_bytes(pbw)
+                            .await
+                            .map(|_| ())
+                    }
+                    .await;
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_action_busy(false);
+                            match result {
+                                Ok(()) => {
+                                    w.set_action_error(false);
+                                    w.set_action_status("PBW installed successfully.".into());
+                                }
+                                Err(error) => {
+                                    w.set_action_error(true);
+                                    w.set_action_status(
+                                        action_error_message(&error.to_string()).into(),
+                                    );
+                                }
+                            }
+                        }
+                    })
+                    .ok();
+                });
+            }
+        });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
@@ -1036,6 +1109,12 @@ fn action_error_message(error: &str) -> String {
         "The watch disconnected before the action completed.".into()
     } else if lower.contains("timeout") || lower.contains("timed out") {
         "The watch did not respond in time. Please reconnect and try again.".into()
+    } else if lower.contains("read pbw file") {
+        "The PBW file could not be read. Check its path and permissions.".into()
+    } else if lower.contains("pbw") && lower.contains("no variant") {
+        "The PBW does not contain a compatible build for this watch.".into()
+    } else if lower.contains("invalid pbw") || lower.contains("pblapp") {
+        "The selected file is not a valid PBW.".into()
     } else if lower.contains("rejected") || lower.contains("nack") {
         "The watch rejected this action.".into()
     } else if lower.contains("serviceunknown") || lower.contains("name has no owner") {

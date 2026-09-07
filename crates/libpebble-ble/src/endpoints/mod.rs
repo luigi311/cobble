@@ -5,6 +5,7 @@
 //!
 //! Every Pebble Protocol message: [u16 length BE][u16 endpoint BE][payload].
 
+pub mod app_fetch;
 pub mod app_message;
 pub mod app_run_state;
 pub mod blob_db;
@@ -14,6 +15,7 @@ pub mod music;
 pub mod phone_control;
 pub mod phone_version;
 pub mod ping;
+pub mod put_bytes;
 pub mod reset;
 pub mod screenshot;
 pub mod system;
@@ -83,6 +85,7 @@ impl Endpoint {
             6001 => Some(Self::AppFetch),
             6778 => Some(Self::DataLog),
             8000 => Some(Self::Screenshot),
+            0xBEEF => Some(Self::PutBytes),
             _ => None,
         }
     }
