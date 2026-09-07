@@ -30,6 +30,7 @@ pub struct MprisMonitor {
     daemon: CobbleDaemon,
     conn: Connection,
     active: Arc<Mutex<Option<PlayerState>>>,
+    update_lock: Mutex<()>,
 }
 
 impl MprisMonitor {
@@ -39,6 +40,7 @@ impl MprisMonitor {
             daemon,
             conn,
             active: Arc::new(Mutex::new(None)),
+            update_lock: Mutex::new(()),
         })
     }
 
@@ -82,37 +84,12 @@ impl MprisMonitor {
 
             if !old_owner.is_empty() {
                 debug!("mpris: player {name} disappeared");
-                let was_active = {
-                    let mut active = self.active.lock().await;
-                    if active.as_ref().map(|a| a.bus_name.as_str()) == Some(name.as_str()) {
-                        *active = None;
-                        true
+                let _update = self.update_lock.lock().await;
+                if self.is_active(&name).await {
+                    if let Some(state) = self.discover_player(Some(&name)).await {
+                        self.publish_active_state(&state, None).await;
                     } else {
-                        false
-                    }
-                };
-                if was_active {
-                    let mut replacement = None;
-                    let mut fallback = None;
-                    if let Ok(players) = self.list_players().await {
-                        for player in players {
-                            if player != name
-                                && let Some(state) = self.read_player_state(&player).await
-                            {
-                                if state.playing {
-                                    replacement = Some(state);
-                                    break;
-                                }
-                                fallback.get_or_insert(state);
-                            }
-                        }
-                    }
-                    let replacement = replacement.or(fallback);
-                    if let Some(state) = replacement {
-                        *self.active.lock().await = Some(state.clone());
-                        self.push_to_watch(&state).await;
-                    } else {
-                        self.daemon.clear_music_state().await;
+                        self.clear_active_state().await;
                     }
                 }
             }
@@ -144,15 +121,20 @@ impl MprisMonitor {
         // refresh the complete state directly from MPRIS when the watch opens
         // its music app. Never replay stale media if the player is gone.
         if action == "get_current_track" {
+            let _update = self.update_lock.lock().await;
             let player = { self.active.lock().await.clone() };
-            if let Some(player) = player
-                && let Some(state) = self.read_player_state(&player.bus_name).await
-            {
-                *self.active.lock().await = Some(state.clone());
-                self.push_to_watch(&state).await;
+            let state = match player {
+                Some(player) => self.read_player_state(&player.bus_name).await,
+                None => None,
+            };
+            let state = match state {
+                Some(state) => Some(state),
+                None => self.discover_player(None).await,
+            };
+            if let Some(state) = state {
+                self.publish_active_state(&state, None).await;
             } else {
-                *self.active.lock().await = None;
-                self.daemon.clear_music_state().await;
+                self.clear_active_state().await;
             }
             return;
         }
@@ -245,28 +227,63 @@ impl MprisMonitor {
         })
     }
 
+    async fn discover_player(&self, excluded: Option<&str>) -> Option<PlayerState> {
+        let mut fallback = None;
+        for player in self.list_players().await.ok()? {
+            if excluded == Some(player.as_str()) {
+                continue;
+            }
+            if let Some(state) = self.read_player_state(&player).await {
+                if state.playing {
+                    return Some(state);
+                }
+                fallback.get_or_insert(state);
+            }
+        }
+        fallback
+    }
+
+    async fn is_active(&self, bus_name: &str) -> bool {
+        self.active
+            .lock()
+            .await
+            .as_ref()
+            .map(|state| state.bus_name.as_str())
+            == Some(bus_name)
+    }
+
+    async fn publish_active_state(&self, state: &PlayerState, position_us: Option<i64>) {
+        // Callers hold update_lock so selection and the complete snapshot are
+        // ordered with respect to all other player updates.
+        *self.active.lock().await = Some(state.clone());
+        self.push_to_watch_at(state, position_us).await;
+    }
+
+    async fn clear_active_state(&self) {
+        // See publish_active_state: clearing participates in the same ordering.
+        *self.active.lock().await = None;
+        self.daemon.clear_music_state().await;
+    }
+
     async fn track_player(self: &Arc<Self>, bus_name: String) {
+        let _update = self.update_lock.lock().await;
         let state = match self.read_player_state(&bus_name).await {
             Some(s) => s,
             None => return,
         };
         let is_active = {
-            let mut active = self.active.lock().await;
+            let active = self.active.lock().await;
             match active.as_ref() {
-                Some(current) if state.playing && !current.playing => {
-                    *active = Some(state.clone());
-                    true
-                }
-                None => {
-                    *active = Some(state.clone());
-                    true
-                }
+                Some(current) if state.playing && !current.playing => true,
+                None => true,
                 _ => active.as_ref().map(|a| a.bus_name.as_str()) == Some(bus_name.as_str()),
             }
         };
         if is_active {
-            self.push_to_watch(&state).await;
+            self.publish_active_state(&state, None).await;
         }
+
+        drop(_update);
 
         let self2 = Arc::clone(self);
         tokio::spawn(async move {
@@ -274,10 +291,6 @@ impl MprisMonitor {
                 warn!("mpris: signal listener for {bus_name} ended: {e}");
             }
         });
-    }
-
-    async fn push_to_watch(&self, state: &PlayerState) {
-        self.push_to_watch_at(state, None).await;
     }
 
     async fn push_to_watch_at(&self, state: &PlayerState, position_us: Option<i64>) {
@@ -439,19 +452,18 @@ impl MprisMonitor {
                     continue;
                 };
                 debug!("mpris: Seeked from {bus_name} to {position_us}us");
-                let is_active = self
-                    .active
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|state| state.bus_name.as_str())
-                    == Some(bus_name);
-                if is_active {
-                    if let Some(state) = self.read_player_state(bus_name).await {
-                        self.push_to_watch_at(&state, Some(position_us)).await;
+                let _update = self.update_lock.lock().await;
+                if self.is_active(bus_name).await {
+                    let state = self.read_player_state(bus_name).await;
+                    if !self.is_active(bus_name).await {
+                        continue;
+                    }
+                    if let Some(state) = state {
+                        self.publish_active_state(&state, Some(position_us)).await;
+                    } else if let Some(state) = self.discover_player(Some(bus_name)).await {
+                        self.publish_active_state(&state, None).await;
                     } else {
-                        *self.active.lock().await = None;
-                        self.daemon.clear_music_state().await;
+                        self.clear_active_state().await;
                     }
                 }
                 continue;
@@ -464,30 +476,28 @@ impl MprisMonitor {
             }
 
             debug!("mpris: PropertiesChanged from {bus_name}");
+            let _update = self.update_lock.lock().await;
             if let Some(state) = self.read_player_state(bus_name).await {
                 let is_active = {
-                    let mut active = self.active.lock().await;
+                    let active = self.active.lock().await;
                     if state.playing {
                         match active.as_ref() {
-                            Some(current) if current.bus_name != state.bus_name => {
-                                *active = Some(state.clone());
-                                true
-                            }
-                            None => {
-                                *active = Some(state.clone());
-                                true
-                            }
+                            Some(current) if current.bus_name != state.bus_name => true,
+                            None => true,
                             _ => active.as_ref().map(|a| a.bus_name.as_str()) == Some(bus_name),
                         }
                     } else {
-                        if active.as_ref().map(|a| a.bus_name.as_str()) == Some(bus_name) {
-                            active.as_mut().unwrap().playing = false;
-                        }
                         active.as_ref().map(|a| a.bus_name.as_str()) == Some(bus_name)
                     }
                 };
                 if is_active {
-                    self.push_to_watch(&state).await;
+                    self.publish_active_state(&state, None).await;
+                }
+            } else if self.is_active(bus_name).await {
+                if let Some(state) = self.discover_player(Some(bus_name)).await {
+                    self.publish_active_state(&state, None).await;
+                } else {
+                    self.clear_active_state().await;
                 }
             }
         }
