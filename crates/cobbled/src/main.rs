@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start the weather provider: GeoClue2 location → Open-Meteo → watch.
+    // Start the weather provider: Location portal → Open-Meteo → watch.
     {
         let daemon6 = daemon.clone();
         tokio::spawn(async move {
