@@ -514,8 +514,8 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
 
 mod state;
 pub(crate) use state::{
-    BUS_NAME, DaemonError, DaemonEvent, DaemonState, HealthProfile, MUSIC_APP_UUID, MusicState,
-    OBJECT_PATH, dbus_val, watch_pref_owned_value,
+    BUS_NAME, DaemonError, DaemonEvent, DaemonState, HealthProfile, MUSIC_APP_UUID, OBJECT_PATH,
+    dbus_val, watch_pref_owned_value,
 };
 
 /// Render watch version info as a self-describing `a{sv}` map. Optional fields
@@ -726,7 +726,6 @@ impl CobbleDaemon {
                 device_config_blob_db_version: 0,
                 device_config_error: None,
                 battery_level: None,
-                music: MusicState::default(),
             })),
             config_revision,
             integration_config,
@@ -949,42 +948,26 @@ impl CobbleDaemon {
         value
     }
 
-    /// Re-send the last pushed music state to the watch — used to answer the
-    /// watch's GetCurrentTrack request (e.g. when its music app opens).
-    pub(crate) async fn replay_music_state(&self) {
-        let (pebble, music) = {
-            let s = self.state.lock().unwrap();
-            (s.pebble.clone(), s.music.clone())
+    /// Clear now-playing information when no live media source is available.
+    pub(crate) async fn clear_music_state(&self) {
+        let Some(pebble) = self.state.lock().unwrap().pebble.clone() else {
+            return;
         };
-        let Some(pebble) = pebble else { return };
-        debug!(
-            "replaying music to watch: player={} track={} state={}",
-            music.player.is_some(),
-            music.track.is_some(),
-            music.play_state.is_some(),
-        );
-        if let Some((pkg, name)) = music.player {
-            let _ = pebble.update_music_player_info(&pkg, &name).await;
-        }
-        if let Some((artist, album, title, len, count, num)) = music.track {
-            let _ = pebble
-                .update_music_track(&artist, &album, &title, Some(len), Some(count), Some(num))
-                .await;
-        }
-        if let Some((state, pos, rate, shuffle, repeat)) = music.play_state {
-            let _ = pebble
-                .update_music_play_state(
-                    MusicPlaybackState::from_u8(state),
-                    pos,
-                    rate,
-                    MusicShuffle::from_u8(shuffle),
-                    MusicRepeat::from_u8(repeat),
-                )
-                .await;
-        }
-        if let Some(volume) = music.volume {
-            let _ = pebble.update_music_volume(volume).await;
-        }
+        debug!("clearing music state on watch");
+        let _ = pebble.update_music_player_info("", "").await;
+        let _ = pebble
+            .update_music_track("", "", "", Some(0), Some(0), Some(0))
+            .await;
+        let _ = pebble
+            .update_music_play_state(
+                MusicPlaybackState::Paused,
+                0,
+                0,
+                MusicShuffle::Off,
+                MusicRepeat::Off,
+            )
+            .await;
+        let _ = pebble.update_music_volume(0).await;
     }
 
     /// Cache a battery level, but only while connected and only if it changed.
@@ -1052,7 +1035,6 @@ impl CobbleDaemon {
         state.watch_settings.clear();
         state.watch_setting_raw.clear();
         state.battery_level = None;
-        state.music = MusicState::default();
         let _ = state.event_tx.send(DaemonEvent::ConnectionChanged(false));
         drop(state);
         self.connection_tx.send_replace(false);
@@ -2125,9 +2107,7 @@ impl CobbleDaemon {
         pebble
             .update_music_player_info(&pkg, &name)
             .await
-            .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        self.state.lock().unwrap().music.player = Some((pkg, name));
-        Ok(())
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Push the current track metadata. `track_length_ms`/`track_count`/
@@ -2152,16 +2132,7 @@ impl CobbleDaemon {
                 Some(track_number),
             )
             .await
-            .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        self.state.lock().unwrap().music.track = Some((
-            artist,
-            album,
-            title,
-            track_length_ms,
-            track_count,
-            track_number,
-        ));
-        Ok(())
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Push playback state. `state`: 0=paused 1=playing 2=rewinding
@@ -2185,10 +2156,7 @@ impl CobbleDaemon {
                 MusicRepeat::from_u8(repeat),
             )
             .await
-            .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        self.state.lock().unwrap().music.play_state =
-            Some((state, track_position_ms, play_rate_pct, shuffle, repeat));
-        Ok(())
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Push the current volume (0–100).
@@ -2202,9 +2170,7 @@ impl CobbleDaemon {
         pebble
             .update_music_volume(volume_percent)
             .await
-            .map_err(|e| DaemonError::Failed(e.to_string()))?;
-        self.state.lock().unwrap().music.volume = Some(volume_percent);
-        Ok(())
+            .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
     /// Reboot the watch. It drops the link and the daemon reconnects.
@@ -2479,9 +2445,8 @@ impl CobbleDaemon {
 
     /// Emitted when the watch sends a media-control action. `action` is one of
     /// play, pause, play_pause, next_track, previous_track, volume_up,
-    /// volume_down, get_current_track. The transport actions (play/pause/next/…)
-    /// are surfaced but not acted on yet; `get_current_track` is handled by
-    /// replaying the cached music state to the watch.
+    /// volume_down, get_current_track. Actions are surfaced to D-Bus clients
+    /// and forwarded to the MPRIS monitor.
     #[zbus(signal)]
     pub async fn music_action_received(
         signal_emitter: &SignalEmitter<'_>,
@@ -3000,20 +2965,17 @@ pub async fn run_signal_emitter(
             DaemonEvent::AppRunState { uuid, running } => {
                 let _ = CobbleDaemon::app_run_state_changed(emitter, &uuid, running).await;
                 // This firmware doesn't send GetCurrentTrack, but it does launch
-                // the Music app — replay the cached now-playing so it displays.
+                // the Music app. Ask MPRIS for a fresh snapshot so Position is
+                // current rather than relying on previously sent state.
                 if running && uuid == MUSIC_APP_UUID {
-                    daemon.replay_music_state().await;
+                    let _ = daemon.music_action_tx().send("get_current_track".into());
                 }
             }
             DaemonEvent::MusicAction(action) => {
                 let _ = CobbleDaemon::music_action_received(emitter, &action).await;
-                // The watch asks for the now-playing when its music app opens;
-                // replay the last pushed state so it actually displays something.
-                if action == "get_current_track" {
-                    daemon.replay_music_state().await;
-                }
                 // Forward the action to the MPRIS monitor so it can control
-                // the desktop media player (play/pause/next/volume/…).
+                // the desktop media player. GetCurrentTrack performs a live
+                // MPRIS refresh or clears the watch when no player is available.
                 let _ = daemon.music_action_tx().send(action);
             }
             DaemonEvent::PhoneAction(action) => {

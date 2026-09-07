@@ -306,40 +306,6 @@ newly discovered and locally changed dates are pending even before an upload
 attempt. Error text is sanitized and contains no response body, authorization
 header, or API key.
 
-#### Manual verification checklist
-
-Run this checklist with a dedicated test athlete/account and a dedicated test
-date. Do not use production credentials in a repository, issue, log, or screen
-capture.
-
-1. Record the remote wellness document for the test date before syncing,
-   including fields that Cobble does not own (for example, mood, calories, or
-   notes).
-2. Configure the test account through the GUI or the TOML example above.
-   Confirm that the API key field is masked in the GUI, the configuration file
-   is readable only by its owner on Unix, and daemon logs contain no key.
-3. Trigger `SyncWellness` or the GUI’s **Sync Now** control. Confirm that the
-   request updates only `steps`, `sleepSecs`, `avgSleepingHR`, and `restingHR`;
-   missing local observations are omitted rather than sent as zeroes or nulls.
-4. Compare the remote document with the baseline. Confirm that unrelated
-   fields are unchanged, and query `GetWellnessSyncStatus` to confirm the
-   account, exported-date count, and successful-sync timestamp.
-5. Trigger the same sync again and restart the daemon. Confirm that the
-   durable ledger prevents an unchanged date from being treated as new work.
-6. Add or correct a local health record for the test date, trigger another
-   sync, and confirm that only the corresponding owned field changes remotely.
-7. Temporarily use an invalid key. Confirm that the status and logs expose
-   only a sanitized error, then restore the key and reload the configuration
-   without losing the local health data.
-8. Change the athlete ID and confirm that the new account is backfilled. Disable
-   the integration and confirm that outbound requests stop while local state
-   remains available; re-enable it only after cleanup.
-9. Remove the dedicated test data or reset the test account according to the
-   provider’s policy.
-
-This checklist requires a reachable Intervals.icu test account and is not part
-of the automated build; no live provider test is run by default.
-
 #### Field ownership and conflict policy
 
 Cobble is authoritative only for the fields it emits: `steps`, `sleepSecs`,
