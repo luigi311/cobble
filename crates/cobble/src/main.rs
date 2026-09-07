@@ -967,6 +967,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 window.set_action_busy(true);
                 window.set_action_error(false);
+                window.set_action_progress(-1);
                 window.set_action_status("Choose a PBW file…".into());
                 drop(window);
 
@@ -983,6 +984,7 @@ fn main() -> anyhow::Result<()> {
                             if let Some(w) = weak.upgrade() {
                                 w.set_action_busy(false);
                                 w.set_action_error(false);
+                                w.set_action_progress(-1);
                                 w.set_action_status("".into());
                             }
                         })
@@ -996,15 +998,30 @@ fn main() -> anyhow::Result<()> {
                     let status_weak = weak.clone();
                     slint::invoke_from_event_loop(move || {
                         if let Some(w) = status_weak.upgrade() {
+                            w.set_action_progress(0);
                             w.set_action_status(status.into());
                         }
                     })
                     .ok();
 
                     let result = async {
-                        CobbleClient::new()
-                            .await?
-                            .install_pbw_bytes(pbw)
+                        let client = CobbleClient::new().await?;
+                        let progress_weak = weak.clone();
+                        client
+                            .install_pbw_bytes_with_progress(pbw, move |transferred, total| {
+                                let percent = if total == 0 {
+                                    100
+                                } else {
+                                    (u64::from(transferred) * 100 / u64::from(total)) as u32
+                                } as i32;
+                                let update_weak = progress_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(w) = update_weak.upgrade() {
+                                        w.set_action_progress(percent);
+                                    }
+                                })
+                                .ok();
+                            })
                             .await
                             .map(|_| ())
                     }
@@ -1012,6 +1029,7 @@ fn main() -> anyhow::Result<()> {
                     slint::invoke_from_event_loop(move || {
                         if let Some(w) = weak.upgrade() {
                             w.set_action_busy(false);
+                            w.set_action_progress(-1);
                             match result {
                                 Ok(()) => {
                                     w.set_action_error(false);

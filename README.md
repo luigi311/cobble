@@ -137,6 +137,10 @@ async def main():
 
         # Sideload a watchapp/watchface. The client reads the file and sends
         # its bytes to the daemon, which selects the correct watch variant.
+        @cobble.on_install_progress
+        def install_progress(transferred, total):
+            print(f"install: {transferred * 100 // total}%")
+
         installed = await cobble.install_pbw("/path/to/watchapp.pbw")
         print("installed", installed["name"], installed["uuid"])
         await asyncio.sleep(60)
@@ -274,6 +278,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Signal | `AckReceived` | `(u)` | txn |
 | Signal | `NackReceived` | `(u)` | txn |
 | Signal | `ConnectionChanged` | `(b)` | connected |
+| Signal | `InstallPbwProgress` | `(u, u)` | payload bytes acknowledged by the watch, total payload bytes |
 | Signal | `HealthDataReceived` | `(u, ay, u, u, u, y, q, ay)` | tag, app\_uuid, session\_timestamp, items\_left, crc, item\_type, item\_size, data |
 | Signal | `HealthProfileReceived` | `(a{sv})` | watch health profile, emitted on connect and on change |
 | Signal | `WatchSettingReceived` | `(s, v)` | key, value — emitted per general watch setting as it syncs |
@@ -356,7 +361,7 @@ unchanged Cobble payload, but it is not a remote conflict-resolution system.
 - [x] Music
   - [x] Push now-playing / playback state / volume to the watch
   - [x] Parse inbound control actions (play/pause/next/volume)
-- [ ] PBW install
+- [x] PBW install (GUI progress uses watch-acknowledged payload bytes)
 
 ### cobbled (Daemon)
 - [x] Pings

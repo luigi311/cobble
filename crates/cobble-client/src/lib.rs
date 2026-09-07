@@ -573,6 +573,9 @@ pub trait CobbleDaemon {
     #[zbus(signal)]
     fn device_config_changed(&self, revision: u64, state: &str) -> Result<()>;
 
+    #[zbus(signal)]
+    fn install_pbw_progress(&self, transferred_bytes: u32, total_bytes: u32) -> Result<()>;
+
     // ---- Health ----
 
     async fn activate_health(
@@ -791,6 +794,35 @@ impl CobbleClient {
     /// Install PBW bytes and return its UUID/name/version/platform metadata.
     pub async fn install_pbw_bytes(&self, pbw: Vec<u8>) -> Result<VarDict> {
         self.proxy().await?.install_pbw(pbw).await
+    }
+
+    /// Install PBW bytes and report payload bytes acknowledged by the watch.
+    pub async fn install_pbw_bytes_with_progress<F>(
+        &self,
+        pbw: Vec<u8>,
+        mut on_progress: F,
+    ) -> Result<VarDict>
+    where
+        F: FnMut(u32, u32),
+    {
+        use futures_util::StreamExt;
+
+        let proxy = self.proxy().await?;
+        let mut progress = proxy.receive_install_pbw_progress().await?;
+        let mut install = Box::pin(proxy.install_pbw(pbw));
+        loop {
+            tokio::select! {
+                result = &mut install => return result,
+                signal = progress.next() => {
+                    let Some(signal) = signal else {
+                        return install.await;
+                    };
+                    if let Ok(args) = signal.args() {
+                        on_progress(args.transferred_bytes, args.total_bytes);
+                    }
+                }
+            }
+        }
     }
 
     /// Read and install a PBW file. The bytes, not the path, are sent to the

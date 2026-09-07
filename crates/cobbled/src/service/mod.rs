@@ -49,6 +49,7 @@
 //!     HealthProfileReceived(a{sv} profile)
 //!     WatchSettingReceived(s key, v value)
 //!     DeviceConfigChanged(t revision, s state)
+//!     InstallPbwProgress(u transferred_bytes, u total_bytes)
 //!     BatteryChanged(n level)  watch battery percentage (-1 = unknown)
 //!     AppRunStateChanged(s uuid, b running)  app opened/closed on the watch
 //!     MusicActionReceived(s action)  media-control action from the watch
@@ -1222,12 +1223,38 @@ impl CobbleDaemon {
     /// Install a PBW supplied as bytes. Bytes cross the D-Bus boundary instead
     /// of a filesystem path so sandboxed GUI clients and the daemon do not need
     /// shared path visibility.
-    async fn install_pbw(&self, pbw: Vec<u8>) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+    async fn install_pbw(
+        &self,
+        pbw: Vec<u8>,
+        #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
+    ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
         let pebble = self.require_pebble()?;
-        let info = pebble
-            .install_pbw(&pbw)
-            .await
-            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let install = pebble.install_pbw_with_progress(&pbw, move |progress| {
+            let _ = progress_tx.send(progress);
+        });
+        tokio::pin!(install);
+        let info = loop {
+            tokio::select! {
+                result = &mut install => {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        let _ = Self::install_pbw_progress(
+                            &signal_emitter,
+                            progress.transferred_bytes,
+                            progress.total_bytes,
+                        ).await;
+                    }
+                    break result.map_err(|error| DaemonError::Failed(error.to_string()))?;
+                }
+                Some(progress) = progress_rx.recv() => {
+                    let _ = Self::install_pbw_progress(
+                        &signal_emitter,
+                        progress.transferred_bytes,
+                        progress.total_bytes,
+                    ).await;
+                }
+            }
+        };
         Ok(HashMap::from([
             ("uuid".into(), dbus_val(info.uuid.to_string())),
             ("name".into(), dbus_val(info.name)),
@@ -2390,6 +2417,14 @@ impl CobbleDaemon {
         signal_emitter: &SignalEmitter<'_>,
         revision: u64,
         state: &str,
+    ) -> zbus::Result<()>;
+
+    /// Emitted after each PBW payload chunk is acknowledged by the watch.
+    #[zbus(signal)]
+    pub async fn install_pbw_progress(
+        signal_emitter: &SignalEmitter<'_>,
+        transferred_bytes: u32,
+        total_bytes: u32,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]

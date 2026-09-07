@@ -81,6 +81,15 @@ pub struct Pebble {
     install_operation: Arc<AsyncMutex<()>>,
 }
 
+/// Confirmed byte-level progress for a PBW installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallProgress {
+    /// Payload bytes acknowledged by the watch across all PBW objects.
+    pub transferred_bytes: u32,
+    /// Total executable, resource, and worker payload bytes to transfer.
+    pub total_bytes: u32,
+}
+
 #[cfg(test)]
 mod connection_state_tests {
     use super::*;
@@ -546,12 +555,44 @@ impl Pebble {
     /// AppFetch request, then its executable, resources, and worker are sent as
     /// separate PutBytes sessions exactly as the official companion does.
     pub async fn install_pbw(&self, pbw: &[u8]) -> Result<PbwInfo, PebbleError> {
+        self.install_pbw_with_progress(pbw, |_| {}).await
+    }
+
+    /// Install a PBW and report each confirmed payload transfer increment.
+    ///
+    /// The first callback reports zero transferred bytes. Subsequent callbacks
+    /// only run after the watch acknowledges a PutBytes chunk, so progress
+    /// reflects bytes accepted by the watch rather than bytes merely queued.
+    pub async fn install_pbw_with_progress<F>(
+        &self,
+        pbw: &[u8],
+        mut on_progress: F,
+    ) -> Result<PbwInfo, PebbleError>
+    where
+        F: FnMut(InstallProgress),
+    {
         if !self.is_connected() {
             return Err(PebbleError::NotConnected);
         }
         let _operation = self.install_operation.lock().await;
         let watch = self.get_watch_version().await?;
         let bundle = PbwBundle::parse(pbw, watch.watch_type())?;
+        let total_bytes = std::iter::once(bundle.executable.len())
+            .chain(bundle.resources.iter().map(Vec::len))
+            .chain(bundle.worker.iter().map(Vec::len))
+            .try_fold(0_u32, |total, blob| {
+                let size = u32::try_from(blob).map_err(|_| {
+                    PebbleError::Other("PBW object exceeds PutBytes size limit".into())
+                })?;
+                total.checked_add(size).ok_or_else(|| {
+                    PebbleError::Other("PBW payload exceeds progress size limit".into())
+                })
+            })?;
+        let mut progress = InstallProgress {
+            transferred_bytes: 0,
+            total_bytes,
+        };
+        on_progress(progress);
         let uuid = bundle.info.uuid;
         let (fetch_sender, fetch_receiver) = oneshot::channel();
         self.inner
@@ -601,15 +642,29 @@ impl Pebble {
                 app_id,
                 PutBytesObjectType::AppExecutable,
                 &bundle.executable,
+                &mut progress,
+                &mut on_progress,
             )
             .await?;
             if let Some(resources) = &bundle.resources {
-                self.transfer_app_blob(app_id, PutBytesObjectType::AppResource, resources)
-                    .await?;
+                self.transfer_app_blob(
+                    app_id,
+                    PutBytesObjectType::AppResource,
+                    resources,
+                    &mut progress,
+                    &mut on_progress,
+                )
+                .await?;
             }
             if let Some(worker) = &bundle.worker {
-                self.transfer_app_blob(app_id, PutBytesObjectType::Worker, worker)
-                    .await?;
+                self.transfer_app_blob(
+                    app_id,
+                    PutBytesObjectType::Worker,
+                    worker,
+                    &mut progress,
+                    &mut on_progress,
+                )
+                .await?;
             }
             Ok(bundle.info)
         }
@@ -619,12 +674,17 @@ impl Pebble {
         result
     }
 
-    async fn transfer_app_blob(
+    async fn transfer_app_blob<F>(
         &self,
         app_id: u32,
         object_type: PutBytesObjectType,
         data: &[u8],
-    ) -> Result<(), PebbleError> {
+        progress: &mut InstallProgress,
+        on_progress: &mut F,
+    ) -> Result<(), PebbleError>
+    where
+        F: FnMut(InstallProgress),
+    {
         let size = u32::try_from(data.len())
             .map_err(|_| PebbleError::Other("PBW object exceeds PutBytes size limit".into()))?;
         let init = self
@@ -637,6 +697,12 @@ impl Pebble {
                     build_put(cookie, chunk).map_err(|error| PebbleError::Other(error.into()))?;
                 self.send_put_bytes_confirmed(&put, Some(cookie), "put")
                     .await?;
+                let chunk_size = u32::try_from(chunk.len()).expect("PutBytes chunks fit in u32");
+                progress.transferred_bytes = progress
+                    .transferred_bytes
+                    .checked_add(chunk_size)
+                    .expect("PBW payload total was validated before transfer");
+                on_progress(*progress);
             }
             let crc32 = calculate_crc32(data);
             self.send_put_bytes_confirmed(&build_commit(cookie, crc32), Some(cookie), "commit")

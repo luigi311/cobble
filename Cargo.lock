@@ -817,6 +817,7 @@ dependencies = [
  "cobble-config",
  "cobble-contracts",
  "futures-util",
+ "tokio",
  "toml 0.8.23",
  "zbus",
  "zvariant",

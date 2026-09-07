@@ -42,6 +42,6 @@ pub use error::PebbleError;
 pub use pbw::{PbwBundle, PbwInfo};
 pub use pebble::{
     AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
-    MusicActionHandler, NackHandler, Pebble, PhoneActionHandler, PreferenceWriteConfirmation,
-    Screenshot, WatchPrefHandler,
+    InstallProgress, MusicActionHandler, NackHandler, Pebble, PhoneActionHandler,
+    PreferenceWriteConfirmation, Screenshot, WatchPrefHandler,
 };

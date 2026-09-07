@@ -201,6 +201,7 @@ export component AppWindow inherits Window {
     callback factory-reset();
     in-out property <string> action-status: "";
     in-out property <bool> action-error: false;
+    in-out property <int> action-progress: -1;
     callback workout-period-changed(int);
     callback workout-go-back();
     callback workout-go-forward();
@@ -1023,11 +1024,28 @@ export component AppWindow inherits Window {
                         color: Palette.muted; font-size: 12px; horizontal-alignment: center;
                     }
 
-                    Text { text: "Install Watch App"; color: Palette.muted; font-size: 12px; }
                     ActionButton {
-                        label: root.action-busy ? "Installing…" : "Choose PBW to Install";
+                        label: root.action-busy ? "Installing…" : "Install PBW";
                         enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
                         clicked => { root.install-pbw(); }
+                    }
+
+                    if root.action-busy && root.action-progress >= 0: VerticalLayout {
+                        spacing: 6px;
+                        HorizontalLayout {
+                            Text { text: root.action-status; color: Palette.accent; font-size: 13px; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: root.action-progress + "%"; color: Palette.accent; font-size: 13px; }
+                        }
+                        Rectangle {
+                            height: 8px; border-radius: 4px; background: Palette.surface;
+                            Rectangle {
+                                x: 0px;
+                                width: parent.width * root.action-progress / 100;
+                                height: parent.height; border-radius: 4px; background: Palette.accent;
+                                animate width { duration: 120ms; easing: ease-in-out; }
+                            }
+                        }
                     }
 
                     ActionButton {
@@ -1083,7 +1101,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.action-status != "": Text {
+                    if root.action-status != "" && !(root.action-busy && root.action-progress >= 0): Text {
                         text: root.action-status;
                         color: root.action-error ? Palette.red : root.action-busy ? Palette.accent : Palette.green;
                         font-size: 13px; horizontal-alignment: center;

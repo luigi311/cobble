@@ -53,6 +53,8 @@ BatteryHandler = Callable[[int | None], None]
 AppRunStateHandler = Callable[[str, bool], None]
 # media-control action name from the watch (play/pause/next_track/…)
 MusicActionHandler = Callable[[str], None]
+# bytes acknowledged by the watch, total PBW payload bytes
+InstallProgressHandler = Callable[[int, int], None]
 DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
 DaemonConfigChangedHandler = Callable[[int], None]
 
@@ -98,6 +100,7 @@ class CobbleClient:
         self._battery_handlers: list[BatteryHandler] = []
         self._app_run_state_handlers: list[AppRunStateHandler] = []
         self._music_action_handlers: list[MusicActionHandler] = []
+        self._install_progress_handlers: list[InstallProgressHandler] = []
         self._device_config_handlers: list[DeviceConfigChangedHandler] = []
         self._daemon_config_handlers: list[DaemonConfigChangedHandler] = []
 
@@ -152,6 +155,7 @@ class CobbleClient:
         self._iface.on_battery_changed(self._dispatch_battery)
         self._iface.on_app_run_state_changed(self._dispatch_app_run_state)
         self._iface.on_music_action_received(self._dispatch_music_action)
+        self._iface.on_install_pbw_progress(self._dispatch_install_progress)
 
     async def close(self) -> None:
         bus, self._bus = self._bus, None
@@ -763,6 +767,13 @@ class CobbleClient:
         self._app_run_state_handlers.append(fn)
         return fn
 
+    def on_install_progress(
+        self, fn: InstallProgressHandler
+    ) -> InstallProgressHandler:
+        """Register a handler receiving acknowledged and total PBW payload bytes."""
+        self._install_progress_handlers.append(fn)
+        return fn
+
     # ------------------------------------------------------------------ #
     # signal dispatch (D-Bus -> local handlers)
     # ------------------------------------------------------------------ #
@@ -834,6 +845,10 @@ class CobbleClient:
     def _dispatch_music_action(self, action: str) -> None:
         for h in self._music_action_handlers:
             _safe(h, action)
+
+    def _dispatch_install_progress(self, transferred_bytes: int, total_bytes: int) -> None:
+        for h in self._install_progress_handlers:
+            _safe(h, int(transferred_bytes), int(total_bytes))
 
     # ------------------------------------------------------------------ #
     def _require_iface(self):
