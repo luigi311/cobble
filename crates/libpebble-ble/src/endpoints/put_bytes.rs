@@ -19,7 +19,10 @@ pub fn build_app_init(size: u32, object_type: PutBytesObjectType, app_id: u32) -
     out.push(0x01);
     out.extend_from_slice(&size.to_be_bytes());
     out.push(object_type as u8 | 0x80);
-    out.extend_from_slice(&app_id.to_le_bytes());
+    // AppFetch reports this id little-endian, but PutBytes fields use the
+    // protocol's default big-endian encoding. `app_id` is already decoded to
+    // a number by the time it reaches this builder.
+    out.extend_from_slice(&app_id.to_be_bytes());
     out
 }
 
@@ -106,7 +109,17 @@ mod tests {
     fn app_init_matches_libpebble() {
         assert_eq!(
             build_app_init(1000, PutBytesObjectType::AppExecutable, 0x1234_5678),
-            [0x01, 0, 0, 3, 0xe8, 0x85, 0x78, 0x56, 0x34, 0x12]
+            [0x01, 0, 0, 3, 0xe8, 0x85, 0x12, 0x34, 0x56, 0x78]
+        );
+    }
+
+    #[test]
+    fn app_fetch_id_is_reencoded_for_put_bytes() {
+        // AppFetch encodes bank 119 as 77 00 00 00. After parsing it to a
+        // number, PutBytesAppInit must encode it as 00 00 00 77.
+        assert_eq!(
+            build_app_init(1, PutBytesObjectType::AppExecutable, 119),
+            [0x01, 0, 0, 0, 1, 0x85, 0, 0, 0, 0x77]
         );
     }
 
