@@ -1,6 +1,7 @@
-//! Location acquisition: GeoClue2 (GPS) → IP geolocation with DB cache.
+//! Location acquisition: desktop Location portal → IP geolocation with DB cache.
 //!
-//! * **GeoClue2** (session D-Bus): accurate GPS when the daemon is installed.
+//! * **Location portal**: asks the desktop for a city-level location with the
+//!   user's permission.
 //! * **ifconfig.me**: gets the current public IP address.
 //! * **ipapi.co** (free HTTPS API): city-level IP geolocation, cached in the
 //!   database to avoid rate limits.
@@ -9,6 +10,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ashpd::desktop::location::{Accuracy, CreateSessionOptions, LocationProxy};
+use futures::StreamExt;
 use tracing::debug;
 
 use crate::http;
@@ -16,99 +19,68 @@ use cobble_db::{AppDb, IpLocation};
 
 /// Get coordinates and a human-readable city name.
 ///
-/// Tries GeoClue2 first.  Falls back to IP-based geolocation (cached in the
-/// database, fetched from ipapi.co only if not already cached for the current
-/// IP).
+/// Tries the desktop Location portal first. Falls back to IP-based geolocation
+/// (cached in the database, fetched from ipapi.co only if not already cached
+/// for the current IP).
 pub async fn get_location(db: Option<Arc<Mutex<AppDb>>>) -> anyhow::Result<(f64, f64, String)> {
-    if let Ok((lat, lon, name)) = try_geoclue().await {
-        return Ok((lat, lon, name));
+    match try_location_portal().await {
+        Ok(location) => return Ok(location),
+        Err(e) => debug!("Location portal unavailable ({e}); falling back to IP geolocation"),
     }
-    debug!("GeoClue2 unavailable; falling back to IP geolocation");
     try_ip_geolocation(db).await
 }
 
-async fn try_geoclue() -> anyhow::Result<(f64, f64, String)> {
-    let conn = zbus::Connection::session().await?;
-
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.GeoClue2"),
-            "/org/freedesktop/GeoClue2/Manager",
-            Some("org.freedesktop.GeoClue2.Manager"),
-            "GetClient",
-            &(),
-        )
+async fn try_location_portal() -> anyhow::Result<(f64, f64, String)> {
+    let proxy = LocationProxy::new()
         .await
-        .map_err(|e| anyhow::anyhow!("GeoClue2 GetClient: {e}"))?;
-    let client_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize()?;
+        .map_err(|e| anyhow::anyhow!("Location portal: {e}"))?;
+    let session = proxy
+        .create_session(CreateSessionOptions::default().set_accuracy(Accuracy::City))
+        .await
+        .map_err(|e| anyhow::anyhow!("Location portal CreateSession: {e}"))?;
+    let location = async {
+        let mut updates = proxy
+            .receive_location_updated()
+            .await
+            .map_err(|e| anyhow::anyhow!("Location portal LocationUpdated: {e}"))?;
 
-    conn.call_method(
-        Some("org.freedesktop.GeoClue2"),
-        client_path.as_str(),
-        Some("org.freedesktop.GeoClue2.Client"),
-        "Start",
-        &(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("GeoClue2 Start: {e}"))?;
+        // Poll Start and LocationUpdated together so an immediate update cannot race
+        // with signal subscription. A generous timeout leaves time for a first-run
+        // permission prompt without holding up the IP fallback indefinitely.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (_, location) = tokio::try_join!(
+                async {
+                    proxy
+                        .start(&session, None, Default::default())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Location portal Start: {e}"))?
+                        .response()
+                        .map_err(|e| anyhow::anyhow!("Location portal permission: {e}"))?;
+                    Ok::<(), anyhow::Error>(())
+                },
+                async {
+                    updates
+                        .next()
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("Location portal update stream ended"))
+                }
+            )?;
+            Ok::<_, anyhow::Error>(location)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Location portal update timed out"))?
+    }
+    .await;
 
-    let lat = get_prop_f64(
-        &conn,
-        client_path.as_str(),
-        "org.freedesktop.GeoClue2.Client",
-        "Latitude",
-        Duration::from_secs(5),
-    )
-    .await?;
-    let lon = get_prop_f64(
-        &conn,
-        client_path.as_str(),
-        "org.freedesktop.GeoClue2.Client",
-        "Longitude",
-        Duration::from_secs(5),
-    )
-    .await?;
+    if let Err(e) = session.close().await {
+        debug!("Location portal session close failed: {e}");
+    }
 
-    let _ = conn
-        .call_method(
-            Some("org.freedesktop.GeoClue2"),
-            client_path.as_str(),
-            Some("org.freedesktop.GeoClue2.Client"),
-            "Stop",
-            &(),
-        )
-        .await;
-
+    let location = location?;
+    let lat = location.latitude();
+    let lon = location.longitude();
     let name = reverse_geocode(lat, lon).await?;
     Ok((lat, lon, name))
-}
-
-async fn get_prop_f64(
-    conn: &zbus::Connection,
-    path: &str,
-    iface: &str,
-    prop: &str,
-    timeout: Duration,
-) -> anyhow::Result<f64> {
-    let reply = tokio::time::timeout(
-        timeout,
-        conn.call_method(
-            Some("org.freedesktop.GeoClue2"),
-            path,
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &(iface, prop),
-        ),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("GeoClue2 {prop} read timed out"))?
-    .map_err(|e| anyhow::anyhow!("GeoClue2 {prop}: {e}"))?;
-
-    let body = reply.body();
-    let v: zbus::zvariant::Value<'_> = body.deserialize()?;
-    let ov = zbus::zvariant::OwnedValue::try_from(v)?;
-    let val: f64 = ov.try_into()?;
-    Ok(val)
 }
 
 // ── IP geolocation (with DB cache) ──────────────────────────────────────

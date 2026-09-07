@@ -32,3 +32,4 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 fastrand = "2"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ashpd = { version = "0.13", default-features = false, features = ["location", "tokio"] }

@@ -369,7 +369,7 @@ unchanged Cobble payload, but it is not a remote conflict-resolution system.
   - [x] Categorization (Text/Call/Other)
 - [x] Phone calls
   - [x] Actions
-- [x] Weather (Open-Meteo auto-fetch, GeoClue2/ipapi.co location, 3h refresh, connection-gated)
+- [x] Weather (Open-Meteo auto-fetch, Location portal/ipapi.co location, 3h refresh, connection-gated)
 - [x] Health
   - [x] Steps
   - [x] Sleep
@@ -402,7 +402,7 @@ unchanged Cobble payload, but it is not a remote conflict-resolution system.
 - [x] Intervals.icu wellness export (durable backfill, retries, GUI status/control)
 - [x] Watch info + device management (version, color, battery, screenshot, reboot/reset/forget)
 - [x] Music push + MPRIS auto-discovery (desktop players → watch metadata + watch controls → desktop player, system volume via pactl/wpctl)
-- [x] Weather (Open-Meteo auto-fetch, GeoClue2/ipapi.co location, 3h refresh, connection-gated)
+- [x] Weather (Open-Meteo auto-fetch, Location portal/ipapi.co location, 3h refresh, connection-gated)
 
 Every libpebble-ble capability is exposed over D-Bus and supported by the
 Python client — see the [D-Bus interface](#d-bus-interface-orgcobbledaemon) table.
