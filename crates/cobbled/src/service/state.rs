@@ -126,14 +126,6 @@ impl HealthProfile {
     }
 }
 
-#[derive(Default, Clone)]
-pub(crate) struct MusicState {
-    pub(crate) player: Option<(String, String)>,
-    pub(crate) track: Option<(String, String, String, u32, u32, u32)>,
-    pub(crate) play_state: Option<(u8, u32, u32, u8, u8)>,
-    pub(crate) volume: Option<u8>,
-}
-
 pub(crate) fn watch_pref_owned_value(v: &WatchPrefValue) -> OwnedValue {
     let value = match v {
         WatchPrefValue::Bool(b) => Value::from(*b),
@@ -179,5 +171,4 @@ pub(crate) struct DaemonState {
     pub(crate) device_config_blob_db_version: u8,
     pub(crate) device_config_error: Option<String>,
     pub(crate) battery_level: Option<u8>,
-    pub(crate) music: MusicState,
 }

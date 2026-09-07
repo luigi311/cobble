@@ -82,18 +82,37 @@ impl MprisMonitor {
 
             if !old_owner.is_empty() {
                 debug!("mpris: player {name} disappeared");
-                let mut active = self.active.lock().await;
-                if active.as_ref().map(|a| a.bus_name.as_str()) == Some(name.as_str()) {
-                    *active = None;
+                let was_active = {
+                    let mut active = self.active.lock().await;
+                    if active.as_ref().map(|a| a.bus_name.as_str()) == Some(name.as_str()) {
+                        *active = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if was_active {
+                    let mut replacement = None;
+                    let mut fallback = None;
                     if let Ok(players) = self.list_players().await {
-                        for p in players {
-                            if p != name
-                                && let Some(s) = self.read_player_state(&p).await
+                        for player in players {
+                            if player != name
+                                && let Some(state) = self.read_player_state(&player).await
                             {
-                                *active = Some(s);
-                                break;
+                                if state.playing {
+                                    replacement = Some(state);
+                                    break;
+                                }
+                                fallback.get_or_insert(state);
                             }
                         }
+                    }
+                    let replacement = replacement.or(fallback);
+                    if let Some(state) = replacement {
+                        *self.active.lock().await = Some(state.clone());
+                        self.push_to_watch(&state).await;
+                    } else {
+                        self.daemon.clear_music_state().await;
                     }
                 }
             }
@@ -121,6 +140,23 @@ impl MprisMonitor {
             _ => {}
         }
 
+        // Position is not continuously reported through PropertiesChanged, so
+        // refresh the complete state directly from MPRIS when the watch opens
+        // its music app. Never replay stale media if the player is gone.
+        if action == "get_current_track" {
+            let player = { self.active.lock().await.clone() };
+            if let Some(player) = player
+                && let Some(state) = self.read_player_state(&player.bus_name).await
+            {
+                *self.active.lock().await = Some(state.clone());
+                self.push_to_watch(&state).await;
+            } else {
+                *self.active.lock().await = None;
+                self.daemon.clear_music_state().await;
+            }
+            return;
+        }
+
         let player = { self.active.lock().await.clone() };
         let Some(player) = player else {
             debug!("mpris: no active player to handle action {action}");
@@ -136,11 +172,7 @@ impl MprisMonitor {
             "play_pause" => call_method(&self.conn, bus, path, iface, "PlayPause").await,
             "next_track" => call_method(&self.conn, bus, path, iface, "Next").await,
             "previous_track" => call_method(&self.conn, bus, path, iface, "Previous").await,
-            "get_current_track" => {
-                if let Some(state) = self.read_player_state(bus).await {
-                    self.push_to_watch(&state).await;
-                }
-            }
+            "get_current_track" => unreachable!(),
             // volume_up/volume_down handled above.
             "volume_up" | "volume_down" => unreachable!(),
             other => debug!("mpris: unhandled action '{other}'"),
@@ -201,11 +233,10 @@ impl MprisMonitor {
     }
 
     async fn read_player_state(&self, bus_name: &str) -> Option<PlayerState> {
-        let playing = self
+        let status = self
             .get_prop::<String>(bus_name, "org.mpris.MediaPlayer2.Player", "PlaybackStatus")
-            .await
-            .map(|s| s == "Playing")
-            .unwrap_or(false);
+            .await?;
+        let playing = status == "Playing";
         let identity = self.read_identity(bus_name).await.unwrap_or_default();
         Some(PlayerState {
             bus_name: bus_name.to_string(),
@@ -269,12 +300,12 @@ impl MprisMonitor {
             .unwrap_or(0);
         let track_number = track_number.max(0) as u32;
 
-        if !artist.is_empty() || !title.is_empty() {
-            let _ = self
-                .daemon
-                .set_music_track(artist, album, title, track_length_ms, 0, track_number)
-                .await;
-        }
+        // An empty metadata map means there is no current track. Send the
+        // empty update as well so the watch does not retain the previous one.
+        let _ = self
+            .daemon
+            .set_music_track(artist, album, title, track_length_ms, 0, track_number)
+            .await;
 
         let status: String = self
             .get_prop(
