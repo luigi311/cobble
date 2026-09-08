@@ -41,7 +41,7 @@ pub use endpoints::watch_pref::{
 pub use error::PebbleError;
 pub use pbw::{PbwBundle, PbwInfo};
 pub use pebble::{
-    AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
-    InstallProgress, MusicActionHandler, NackHandler, Pebble, PhoneActionHandler,
-    PreferenceWriteConfirmation, Screenshot, WatchPrefHandler,
+    AckHandler, AppFetchHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler,
+    HealthDataHandler, InstallProgress, MusicActionHandler, NackHandler, Pebble,
+    PhoneActionHandler, PreferenceWriteConfirmation, Screenshot, WatchPrefHandler,
 };

@@ -143,6 +143,11 @@ async def main():
 
         installed = await cobble.install_pbw("/path/to/watchapp.pbw")
         print("installed", installed["name"], installed["uuid"])
+
+        # Cobble retains the PBW so it can satisfy a later watch AppFetch
+        # request without keeping this client alive.
+        print(await cobble.list_installed_apps())
+        # await cobble.uninstall_app(installed["uuid"])
         await asyncio.sleep(60)
 
 asyncio.run(main())
@@ -244,6 +249,8 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `LaunchApp` | `(s)` | uuid |
 | Method | `StopApp` | `(s)` | uuid |
 | Method | `InstallPbw` | `(ay) → a{sv}` | PBW bytes → installed uuid/name/version/watchface/platform metadata |
+| Method | `ListInstalledApps` | `() → aa{sv}` | retained PBW metadata and install state (`installing`, `installed`, or `failed`) |
+| Method | `UninstallApp` | `(s)` | remove app metadata from the connected watch and delete its retained PBW |
 | Method | `UpdateTime` | `()` | sync watch clock to system time |
 | Method | `Notify` | `(s, s, s) → u` | title, body, subtitle → token |
 | Method | `Ping` | `() → b` | daemon liveness probe |
@@ -278,7 +285,8 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Signal | `AckReceived` | `(u)` | txn |
 | Signal | `NackReceived` | `(u)` | txn |
 | Signal | `ConnectionChanged` | `(b)` | connected |
-| Signal | `InstallPbwProgress` | `(u, u)` | payload bytes acknowledged by the watch, total payload bytes |
+| Signal | `InstallPbwProgress` | `(u, u)` | payload bytes acknowledged by the watch, total payload bytes; unicast to the client performing the install |
+| Signal | `InstalledAppsChanged` | `()` | retained PBW registry changed |
 | Signal | `HealthDataReceived` | `(u, ay, u, u, u, y, q, ay)` | tag, app\_uuid, session\_timestamp, items\_left, crc, item\_type, item\_size, data |
 | Signal | `HealthProfileReceived` | `(a{sv})` | watch health profile, emitted on connect and on change |
 | Signal | `WatchSettingReceived` | `(s, v)` | key, value — emitted per general watch setting as it syncs |
@@ -361,7 +369,7 @@ unchanged Cobble payload, but it is not a remote conflict-resolution system.
 - [x] Music
   - [x] Push now-playing / playback state / volume to the watch
   - [x] Parse inbound control actions (play/pause/next/volume)
-- [x] PBW install (GUI progress uses watch-acknowledged payload bytes)
+- [x] PBW lifecycle (install/list/uninstall, failure recovery, background AppFetch, and caller-scoped acknowledged-byte progress)
 
 ### cobbled (Daemon)
 - [x] Pings

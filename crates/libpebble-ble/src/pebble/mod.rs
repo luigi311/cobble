@@ -27,14 +27,14 @@ use tracing::{debug, warn};
 use crate::{
     endpoints::{
         Endpoint,
-        app_fetch::build_app_fetch_start,
+        app_fetch::{build_app_fetch_busy, build_app_fetch_invalid_uuid, build_app_fetch_start},
         app_message::{AppMessageValue, build_app_message_push},
         app_run_state::{AppRunStateCmd, build_app_run_state},
         blob_db::{
             BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
-            build_blobdb_insert, build_blobdb_insert_with_timestamp, build_blobdb_raw_str_insert,
-            build_blobdb2_mark_all_dirty, build_notification, build_preference_insert,
-            build_weather_blob, build_weather_prefs_blob,
+            build_blobdb_delete, build_blobdb_insert, build_blobdb_insert_with_timestamp,
+            build_blobdb_raw_str_insert, build_blobdb2_mark_all_dirty, build_notification,
+            build_preference_insert, build_weather_blob, build_weather_prefs_blob,
         },
         datalog::build_report_sessions,
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
@@ -66,8 +66,9 @@ mod inner;
 
 use dispatch::rand_u16;
 pub use inner::{
-    AckHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler, HealthDataHandler,
-    MusicActionHandler, NackHandler, PhoneActionHandler, Screenshot, WatchPrefHandler,
+    AckHandler, AppFetchHandler, AppMessageHandler, AppRunStateHandler, BatteryHandler,
+    HealthDataHandler, MusicActionHandler, NackHandler, PhoneActionHandler, Screenshot,
+    WatchPrefHandler,
 };
 pub(crate) use inner::{PebbleInner, RawScreenshot, ScreenshotAccumulator};
 
@@ -88,6 +89,79 @@ pub struct InstallProgress {
     pub transferred_bytes: u32,
     /// Total executable, resource, and worker payload bytes to transfer.
     pub total_bytes: u32,
+}
+
+fn initial_install_progress(bundle: &PbwBundle) -> Result<InstallProgress, PebbleError> {
+    let total_bytes = std::iter::once(bundle.executable.len())
+        .chain(bundle.resources.iter().map(Vec::len))
+        .chain(bundle.worker.iter().map(Vec::len))
+        .try_fold(0_u32, |total, blob| {
+            let size = u32::try_from(blob)
+                .map_err(|_| PebbleError::Other("PBW object exceeds PutBytes size limit".into()))?;
+            total
+                .checked_add(size)
+                .ok_or_else(|| PebbleError::Other("PBW payload exceeds progress size limit".into()))
+        })?;
+    Ok(InstallProgress {
+        transferred_bytes: 0,
+        total_bytes,
+    })
+}
+
+struct AppFetchPendingGuard {
+    inner: Arc<Mutex<PebbleInner>>,
+    uuid: uuid::Uuid,
+}
+
+impl Drop for AppFetchPendingGuard {
+    fn drop(&mut self) {
+        self.inner
+            .lock()
+            .unwrap()
+            .app_fetch_pending
+            .remove(&self.uuid);
+    }
+}
+
+struct PutBytesPendingGuard {
+    inner: Arc<Mutex<PebbleInner>>,
+}
+
+impl Drop for PutBytesPendingGuard {
+    fn drop(&mut self) {
+        self.inner.lock().unwrap().put_bytes_pending.take();
+    }
+}
+
+struct BlobDbPendingGuard {
+    inner: Arc<Mutex<PebbleInner>>,
+    token: u16,
+}
+
+impl Drop for BlobDbPendingGuard {
+    fn drop(&mut self) {
+        self.inner
+            .lock()
+            .unwrap()
+            .blobdb_pending
+            .remove(&self.token);
+    }
+}
+
+struct PutBytesSessionGuard<'a> {
+    pebble: &'a Pebble,
+    cookie: u32,
+    finished: bool,
+}
+
+impl Drop for PutBytesSessionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self
+                .pebble
+                .send_pebble(Endpoint::PutBytes, &build_abort(self.cookie));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +197,44 @@ mod connection_state_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn cancellation_guards_remove_pending_protocol_waiters() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let uuid = uuid::Uuid::new_v4();
+
+        let (fetch_sender, _fetch_receiver) = oneshot::channel();
+        inner
+            .lock()
+            .unwrap()
+            .app_fetch_pending
+            .insert(uuid, fetch_sender);
+        drop(AppFetchPendingGuard {
+            inner: Arc::clone(&inner),
+            uuid,
+        });
+        assert!(!inner.lock().unwrap().app_fetch_pending.contains_key(&uuid));
+
+        let (put_sender, _put_receiver) = oneshot::channel::<PutBytesResponse>();
+        inner.lock().unwrap().put_bytes_pending = Some(put_sender);
+        drop(PutBytesPendingGuard {
+            inner: Arc::clone(&inner),
+        });
+        assert!(inner.lock().unwrap().put_bytes_pending.is_none());
+
+        let token = 27;
+        let (blob_sender, _blob_receiver) = oneshot::channel::<BlobDBStatus>();
+        inner
+            .lock()
+            .unwrap()
+            .blobdb_pending
+            .insert(token, blob_sender);
+        drop(BlobDbPendingGuard {
+            inner: Arc::clone(&inner),
+            token,
+        });
+        assert!(!inner.lock().unwrap().blobdb_pending.contains_key(&token));
     }
 }
 
@@ -200,6 +312,12 @@ impl Pebble {
             .unwrap()
             .app_run_state_handlers
             .push(handler);
+    }
+
+    /// Register a handler for AppFetch requests that are not part of the
+    /// currently executing foreground PBW installation.
+    pub fn on_app_fetch(&self, handler: AppFetchHandler) {
+        self.inner.lock().unwrap().app_fetch_handlers.push(handler);
     }
 
     /// Register a handler called with each media-control action the watch sends
@@ -577,21 +695,7 @@ impl Pebble {
         let _operation = self.install_operation.lock().await;
         let watch = self.get_watch_version().await?;
         let bundle = PbwBundle::parse(pbw, watch.watch_type())?;
-        let total_bytes = std::iter::once(bundle.executable.len())
-            .chain(bundle.resources.iter().map(Vec::len))
-            .chain(bundle.worker.iter().map(Vec::len))
-            .try_fold(0_u32, |total, blob| {
-                let size = u32::try_from(blob).map_err(|_| {
-                    PebbleError::Other("PBW object exceeds PutBytes size limit".into())
-                })?;
-                total.checked_add(size).ok_or_else(|| {
-                    PebbleError::Other("PBW payload exceeds progress size limit".into())
-                })
-            })?;
-        let mut progress = InstallProgress {
-            transferred_bytes: 0,
-            total_bytes,
-        };
+        let mut progress = initial_install_progress(&bundle)?;
         on_progress(progress);
         let uuid = bundle.info.uuid;
         let (fetch_sender, fetch_receiver) = oneshot::channel();
@@ -600,8 +704,12 @@ impl Pebble {
             .unwrap()
             .app_fetch_pending
             .insert(uuid, fetch_sender);
+        let _fetch_guard = AppFetchPendingGuard {
+            inner: Arc::clone(&self.inner),
+            uuid,
+        };
 
-        let result = async {
+        async {
             let token = rand_u16();
             let key = *uuid.as_bytes();
             let metadata = bundle.metadata_blob();
@@ -668,10 +776,124 @@ impl Pebble {
             }
             Ok(bundle.info)
         }
-        .await;
+        .await
+    }
 
-        self.inner.lock().unwrap().app_fetch_pending.remove(&uuid);
-        result
+    /// Parse a PBW for the connected watch without changing watch state.
+    pub async fn inspect_pbw(&self, pbw: &[u8]) -> Result<PbwInfo, PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let watch = self.get_watch_version().await?;
+        Ok(PbwBundle::parse(pbw, watch.watch_type())?.info)
+    }
+
+    /// Fulfill an unsolicited AppFetch request from a retained PBW.
+    pub async fn fulfill_app_fetch(&self, pbw: &[u8], app_id: u32) -> Result<PbwInfo, PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let _operation = match self.install_operation.try_lock() {
+            Ok(operation) => operation,
+            Err(_) => {
+                self.send_pebble(Endpoint::AppFetch, &build_app_fetch_busy())?;
+                return Err(PebbleError::Other(
+                    "another PBW transfer is already in progress".into(),
+                ));
+            }
+        };
+        let watch = match self.get_watch_version().await {
+            Ok(watch) => watch,
+            Err(error) => {
+                let _ = self.send_pebble(Endpoint::AppFetch, &build_app_fetch_invalid_uuid());
+                return Err(error);
+            }
+        };
+        let bundle = match PbwBundle::parse(pbw, watch.watch_type()) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                let _ = self.send_pebble(Endpoint::AppFetch, &build_app_fetch_invalid_uuid());
+                return Err(error);
+            }
+        };
+        self.send_pebble(Endpoint::AppFetch, &build_app_fetch_start())?;
+        let mut progress = initial_install_progress(&bundle)?;
+        let mut ignore_progress = |_| {};
+        self.transfer_app_bundle(app_id, &bundle, &mut progress, &mut ignore_progress)
+            .await?;
+        Ok(bundle.info)
+    }
+
+    /// Reject an AppFetch request whose PBW is not retained locally.
+    pub fn reject_app_fetch(&self) -> Result<(), PebbleError> {
+        self.send_pebble(Endpoint::AppFetch, &build_app_fetch_invalid_uuid())
+    }
+
+    /// Remove an application's BlobDB metadata from the connected watch.
+    pub async fn uninstall_app(&self, app_uuid: &str) -> Result<(), PebbleError> {
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        let uuid = uuid::Uuid::parse_str(app_uuid)
+            .map_err(|error| PebbleError::Other(format!("invalid UUID: {error}")))?;
+        let _operation = self.install_operation.lock().await;
+        let _ = self.stop_app(app_uuid).await;
+        let token = rand_u16();
+        let payload = build_blobdb_delete(BlobDBId::App, uuid.as_bytes(), token);
+        let status = self
+            .send_blobdb_confirmed(token, "PBW app metadata delete", &payload)
+            .await?;
+        if matches!(
+            status,
+            BlobDBStatus::Success | BlobDBStatus::KeyDoesNotExist
+        ) {
+            Ok(())
+        } else {
+            Err(PebbleError::Other(format!(
+                "watch rejected PBW app removal: {status:?}"
+            )))
+        }
+    }
+
+    async fn transfer_app_bundle<F>(
+        &self,
+        app_id: u32,
+        bundle: &PbwBundle,
+        progress: &mut InstallProgress,
+        on_progress: &mut F,
+    ) -> Result<(), PebbleError>
+    where
+        F: FnMut(InstallProgress),
+    {
+        self.transfer_app_blob(
+            app_id,
+            PutBytesObjectType::AppExecutable,
+            &bundle.executable,
+            progress,
+            on_progress,
+        )
+        .await?;
+        if let Some(resources) = &bundle.resources {
+            self.transfer_app_blob(
+                app_id,
+                PutBytesObjectType::AppResource,
+                resources,
+                progress,
+                on_progress,
+            )
+            .await?;
+        }
+        if let Some(worker) = &bundle.worker {
+            self.transfer_app_blob(
+                app_id,
+                PutBytesObjectType::Worker,
+                worker,
+                progress,
+                on_progress,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn transfer_app_blob<F>(
@@ -691,6 +913,11 @@ impl Pebble {
             .send_put_bytes_confirmed(&build_app_init(size, object_type, app_id), None, "init")
             .await?;
         let cookie = init.cookie;
+        let mut session_guard = PutBytesSessionGuard {
+            pebble: self,
+            cookie,
+            finished: false,
+        };
         let transfer = async {
             for chunk in data.chunks(2000) {
                 let put =
@@ -714,8 +941,8 @@ impl Pebble {
             Ok(())
         }
         .await;
-        if transfer.is_err() {
-            let _ = self.send_pebble(Endpoint::PutBytes, &build_abort(cookie));
+        if transfer.is_ok() {
+            session_guard.finished = true;
         }
         transfer
     }
@@ -736,10 +963,10 @@ impl Pebble {
             }
             inner.put_bytes_pending = Some(sender);
         }
-        if let Err(error) = self.send_pebble(Endpoint::PutBytes, payload) {
-            self.inner.lock().unwrap().put_bytes_pending.take();
-            return Err(error);
-        }
+        let _pending_guard = PutBytesPendingGuard {
+            inner: Arc::clone(&self.inner),
+        };
+        self.send_pebble(Endpoint::PutBytes, payload)?;
         let mut connected = self.connected_rx.clone();
         let response = match timeout(Duration::from_secs(20), async {
             tokio::select! {
@@ -751,7 +978,6 @@ impl Pebble {
         {
             Ok(result) => result?,
             Err(_) => {
-                self.inner.lock().unwrap().put_bytes_pending.take();
                 return Err(PebbleError::Timeout(format!("PutBytes {phase}")));
             }
         };
@@ -1023,10 +1249,11 @@ impl Pebble {
             .unwrap()
             .blobdb_pending
             .insert(token, sender);
-        if let Err(error) = self.send_pebble(Endpoint::BlobDb, payload) {
-            self.inner.lock().unwrap().blobdb_pending.remove(&token);
-            return Err(error);
-        }
+        let _pending_guard = BlobDbPendingGuard {
+            inner: Arc::clone(&self.inner),
+            token,
+        };
+        self.send_pebble(Endpoint::BlobDb, payload)?;
         let mut connected = self.connected_rx.clone();
         let status = match timeout(Duration::from_secs(10), async {
             tokio::select! {
@@ -1036,11 +1263,9 @@ impl Pebble {
         }).await {
             Ok(Ok(status)) => status,
             Ok(Err(error)) => {
-                self.inner.lock().unwrap().blobdb_pending.remove(&token);
                 return Err(error);
             }
             Err(_) => {
-                self.inner.lock().unwrap().blobdb_pending.remove(&token);
                 return Err(PebbleError::Timeout(format!("BlobDB write for {key}")));
             }
         };

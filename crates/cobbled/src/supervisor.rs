@@ -71,6 +71,11 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
             pebble.on_app_run_state(Arc::new(move |uuid, running| {
                 let _ = tx.send(DaemonEvent::AppRunState { uuid, running });
             }) as AppRunStateHandler);
+            let daemon_for_fetch = daemon.clone();
+            let pebble_for_fetch = Arc::clone(&pebble);
+            pebble.on_app_fetch(Arc::new(move |uuid, app_id| {
+                daemon_for_fetch.on_app_fetch_request(Arc::clone(&pebble_for_fetch), uuid, app_id);
+            }));
             let tx = event_tx.clone();
             pebble.on_music_action(Arc::new(move |action: MusicAction| {
                 let _ = tx.send(DaemonEvent::MusicAction(action.as_str().to_string()));

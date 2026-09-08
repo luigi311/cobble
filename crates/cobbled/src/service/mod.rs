@@ -12,6 +12,8 @@
 //!     LaunchApp(s uuid)
 //!     StopApp(s uuid)
 //!     InstallPbw(ay pbw) -> a{sv}  parse and install a PBW byte stream
+//!     ListInstalledApps() -> aa{sv}
+//!     UninstallApp(s uuid)
 //!     UpdateTime()
 //!     Notify(s title, s body, s subtitle) -> u token
 //!     Ping() -> b
@@ -50,6 +52,7 @@
 //!     WatchSettingReceived(s key, v value)
 //!     DeviceConfigChanged(t revision, s state)
 //!     InstallPbwProgress(u transferred_bytes, u total_bytes)
+//!     InstalledAppsChanged()
 //!     BatteryChanged(n level)  watch battery percentage (-1 = unknown)
 //!     AppRunStateChanged(s uuid, b running)  app opened/closed on the watch
 //!     MusicActionReceived(s action)  media-control action from the watch
@@ -74,13 +77,22 @@ use libpebble_ble::{
 
 use cobble_config::{Config, IntervalsIcuConfig};
 use cobble_contracts::{CONFIG_API_VERSION, DEVICE_CONFIG_API_VERSION, DeviceConfigState};
-use cobble_db::{AppDb, DateRange, WellnessExportStatus};
+use cobble_db::{AppDb, DateRange, PbwAppRecord, WellnessExportStatus};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{debug, warn};
-use zbus::{Connection, interface, object_server::SignalEmitter, zvariant::OwnedValue};
+use zbus::{
+    Connection, interface, message::Header, object_server::SignalEmitter, zvariant::OwnedValue,
+};
 
 use crate::codec::{WireDict, decode_wire_dict, encode_wire_dict};
 use crate::notification::app_name_to_category;
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 fn editable_general_preference(key: &str) -> Option<&'static str> {
     Some(match key {
@@ -647,6 +659,33 @@ struct CachedWellnessStatus {
     status: WellnessExportStatus,
 }
 
+struct PbwInstallStateGuard {
+    db: Arc<Mutex<AppDb>>,
+    event_tx: mpsc::UnboundedSender<DaemonEvent>,
+    uuid: String,
+    settled: bool,
+}
+
+impl Drop for PbwInstallStateGuard {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Err(error) = self
+            .db
+            .lock()
+            .unwrap()
+            .mark_pbw_app_failed(&self.uuid, unix_timestamp())
+        {
+            warn!(
+                "could not mark cancelled PBW install {} failed: {error}",
+                self.uuid
+            );
+        }
+        let _ = self.event_tx.send(DaemonEvent::InstalledAppsChanged);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CobbleDaemon
 // ---------------------------------------------------------------------------
@@ -676,6 +715,8 @@ pub struct CobbleDaemon {
     phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
     config_operation: Arc<AsyncMutex<()>>,
     device_config_operation: Arc<AsyncMutex<()>>,
+    /// Serializes cache state changes with watch-side PBW install/removal.
+    pbw_operation: Arc<AsyncMutex<()>>,
 }
 
 impl CobbleDaemon {
@@ -740,6 +781,7 @@ impl CobbleDaemon {
             connection_tx,
             config_operation: Arc::new(AsyncMutex::new(())),
             device_config_operation: Arc::new(AsyncMutex::new(())),
+            pbw_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -772,6 +814,53 @@ impl CobbleDaemon {
     /// Returns the shared app database handle, if available.
     pub fn db(&self) -> Option<Arc<Mutex<AppDb>>> {
         self.state.lock().unwrap().db.clone()
+    }
+
+    fn app_db(&self) -> Result<Arc<Mutex<AppDb>>, DaemonError> {
+        self.db()
+            .ok_or_else(|| DaemonError::Failed("app database is unavailable".into()))
+    }
+
+    fn notify_installed_apps_changed(&self) {
+        let _ = self.event_tx().send(DaemonEvent::InstalledAppsChanged);
+    }
+
+    /// Dispatch an unsolicited AppFetch without blocking the protocol receive
+    /// callback. Each task uses the Pebble install lock; overlapping requests
+    /// receive the protocol's BUSY response.
+    pub fn on_app_fetch_request(&self, pebble: Arc<Pebble>, uuid: String, app_id: u32) {
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            let cached =
+                daemon
+                    .db()
+                    .and_then(|db| match db.lock().unwrap().load_cached_pbw_app(&uuid) {
+                        Ok(cached) => cached,
+                        Err(error) => {
+                            warn!("PBW cache lookup failed for {uuid}: {error}");
+                            None
+                        }
+                    });
+            let Some(cached) = cached else {
+                warn!("no cached PBW available for requested app {uuid}");
+                let _ = pebble.reject_app_fetch();
+                return;
+            };
+
+            match pebble.fulfill_app_fetch(&cached.pbw, app_id).await {
+                Ok(_) => {
+                    let now = unix_timestamp();
+                    if let Some(db) = daemon.db()
+                        && let Err(error) = db.lock().unwrap().mark_pbw_app_installed(&uuid, now)
+                    {
+                        warn!("could not mark fetched PBW {uuid} installed: {error}");
+                    }
+                    daemon.notify_installed_apps_changed();
+                    debug!("fulfilled cached AppFetch for {uuid}");
+                }
+                Err(error) => warn!("cached AppFetch for {uuid} failed: {error}"),
+            }
+        });
     }
 
     /// Returns a clone of the music-action sender; used by the signal
@@ -1226,15 +1315,55 @@ impl CobbleDaemon {
     async fn install_pbw(
         &self,
         pbw: Vec<u8>,
+        #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
     ) -> Result<HashMap<String, OwnedValue>, DaemonError> {
+        let _operation = self.pbw_operation.lock().await;
         let pebble = self.require_pebble()?;
+        let db = self.app_db()?;
+        let inspected = pebble
+            .inspect_pbw(&pbw)
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        let uuid = inspected.uuid.to_string();
+        let now = unix_timestamp();
+        db.lock()
+            .unwrap()
+            .stage_pbw_app(
+                &PbwAppRecord {
+                    uuid: uuid.clone(),
+                    name: inspected.name.clone(),
+                    version: inspected.version.clone(),
+                    watchface: inspected.watchface,
+                    platform: inspected.platform.codename().into(),
+                    state: "installing".into(),
+                    installed_at: None,
+                    updated_at: now,
+                },
+                &pbw,
+            )
+            .map_err(|error| DaemonError::Failed(format!("cache PBW: {error}")))?;
+        self.notify_installed_apps_changed();
+        let mut install_state = PbwInstallStateGuard {
+            db: Arc::clone(&db),
+            event_tx: self.event_tx(),
+            uuid: uuid.clone(),
+            settled: false,
+        };
+
+        // Progress is operation-local: do not leak one client's install to
+        // every process listening on the bus.
+        let signal_emitter = if let Some(sender) = header.sender() {
+            signal_emitter.set_destination(sender.clone().into())
+        } else {
+            signal_emitter
+        };
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let install = pebble.install_pbw_with_progress(&pbw, move |progress| {
             let _ = progress_tx.send(progress);
         });
         tokio::pin!(install);
-        let info = loop {
+        let result = loop {
             tokio::select! {
                 result = &mut install => {
                     while let Ok(progress) = progress_rx.try_recv() {
@@ -1244,7 +1373,7 @@ impl CobbleDaemon {
                             progress.total_bytes,
                         ).await;
                     }
-                    break result.map_err(|error| DaemonError::Failed(error.to_string()))?;
+                    break result;
                 }
                 Some(progress) = progress_rx.recv() => {
                     let _ = Self::install_pbw_progress(
@@ -1255,6 +1384,36 @@ impl CobbleDaemon {
                 }
             }
         };
+        let info = match result {
+            Ok(info) => {
+                db.lock()
+                    .unwrap()
+                    .mark_pbw_app_installed(&uuid, unix_timestamp())
+                    .map_err(|error| DaemonError::Failed(format!("update PBW cache: {error}")))?;
+                install_state.settled = true;
+                self.notify_installed_apps_changed();
+                info
+            }
+            Err(error) => {
+                // If rollback cannot reach the watch, retain the PBW in a
+                // failed state so a later AppFetch can still repair the entry.
+                let rolled_back = pebble.uninstall_app(&uuid).await.is_ok();
+                let cache_result = if rolled_back {
+                    db.lock().unwrap().delete_pbw_app(&uuid).map(|_| ())
+                } else {
+                    db.lock()
+                        .unwrap()
+                        .mark_pbw_app_failed(&uuid, unix_timestamp())
+                };
+                if let Err(cache_error) = cache_result {
+                    warn!("PBW failure cleanup for {uuid} failed: {cache_error}");
+                } else {
+                    install_state.settled = true;
+                }
+                self.notify_installed_apps_changed();
+                return Err(DaemonError::Failed(error.to_string()));
+            }
+        };
         Ok(HashMap::from([
             ("uuid".into(), dbus_val(info.uuid.to_string())),
             ("name".into(), dbus_val(info.name)),
@@ -1262,6 +1421,48 @@ impl CobbleDaemon {
             ("watchface".into(), dbus_val(info.watchface)),
             ("platform".into(), dbus_val(info.platform.codename())),
         ]))
+    }
+
+    async fn list_installed_apps(&self) -> Result<Vec<HashMap<String, OwnedValue>>, DaemonError> {
+        let apps = self
+            .app_db()?
+            .lock()
+            .unwrap()
+            .list_pbw_apps()
+            .map_err(|error| DaemonError::Failed(format!("list PBW apps: {error}")))?;
+        Ok(apps
+            .into_iter()
+            .map(|app| {
+                HashMap::from([
+                    ("uuid".into(), dbus_val(app.uuid)),
+                    ("name".into(), dbus_val(app.name)),
+                    ("version".into(), dbus_val(app.version)),
+                    ("watchface".into(), dbus_val(app.watchface)),
+                    ("platform".into(), dbus_val(app.platform)),
+                    ("state".into(), dbus_val(app.state)),
+                    (
+                        "installed_at".into(),
+                        dbus_val(app.installed_at.unwrap_or(0)),
+                    ),
+                ])
+            })
+            .collect())
+    }
+
+    async fn uninstall_app(&self, app_uuid: String) -> Result<(), DaemonError> {
+        let _operation = self.pbw_operation.lock().await;
+        let pebble = self.require_pebble()?;
+        pebble
+            .uninstall_app(&app_uuid)
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))?;
+        self.app_db()?
+            .lock()
+            .unwrap()
+            .delete_pbw_app(&app_uuid)
+            .map_err(|error| DaemonError::Failed(format!("delete cached PBW: {error}")))?;
+        self.notify_installed_apps_changed();
+        Ok(())
     }
 
     async fn update_time(&self) -> Result<(), DaemonError> {
@@ -2427,6 +2628,10 @@ impl CobbleDaemon {
         total_bytes: u32,
     ) -> zbus::Result<()>;
 
+    /// Emitted when the durable sideloaded-app registry changes.
+    #[zbus(signal)]
+    pub async fn installed_apps_changed(signal_emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
     #[zbus(signal)]
     pub async fn app_message_received(
         signal_emitter: &SignalEmitter<'_>,
@@ -2556,6 +2761,48 @@ mod tests {
         assert!(compatibility_health_patch(170, u16::MAX, 35, 0, false).is_err());
         assert!(compatibility_health_patch(170, 70, 0, 0, false).is_err());
         assert!(compatibility_health_patch(170, 70, 35, 3, false).is_err());
+    }
+
+    #[test]
+    fn dropped_pbw_install_marks_staged_entry_failed() {
+        let path = test_path().with_extension("db");
+        let db = Arc::new(Mutex::new(AppDb::open(&path).unwrap()));
+        let uuid = "5bfacb04-9449-461e-b3e6-7637d490ed53";
+        db.lock()
+            .unwrap()
+            .stage_pbw_app(
+                &PbwAppRecord {
+                    uuid: uuid.into(),
+                    name: "Cancelled".into(),
+                    version: "1.0".into(),
+                    watchface: false,
+                    platform: "basalt".into(),
+                    state: "installing".into(),
+                    installed_at: None,
+                    updated_at: 1,
+                },
+                b"pbw",
+            )
+            .unwrap();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        drop(PbwInstallStateGuard {
+            db: Arc::clone(&db),
+            event_tx,
+            uuid: uuid.into(),
+            settled: false,
+        });
+
+        assert_eq!(
+            db.lock().unwrap().list_pbw_apps().unwrap()[0].state,
+            "failed"
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DaemonEvent::InstalledAppsChanged)
+        ));
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2973,6 +3220,9 @@ pub async fn run_signal_emitter(
             }
             DaemonEvent::DaemonConfigChanged(revision) => {
                 let _ = CobbleDaemon::daemon_config_changed(emitter, revision).await;
+            }
+            DaemonEvent::InstalledAppsChanged => {
+                let _ = CobbleDaemon::installed_apps_changed(emitter).await;
             }
             DaemonEvent::ConnectionChanged(c) => {
                 let _ = CobbleDaemon::connection_changed(emitter, c).await;

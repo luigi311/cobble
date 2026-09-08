@@ -172,6 +172,21 @@ CREATE TABLE IF NOT EXISTS wellness_export_state (
 );
 CREATE INDEX IF NOT EXISTS idx_wellness_export_retry
     ON wellness_export_state(provider, account_id, next_attempt_at);
+
+-- Durable sideloaded-app registry. Keeping the original PBW allows the daemon
+-- to satisfy AppFetch after the watch evicts an app binary or reconnects.
+CREATE TABLE IF NOT EXISTS pbw_apps (
+    uuid         TEXT    PRIMARY KEY,
+    name         TEXT    NOT NULL,
+    version      TEXT    NOT NULL,
+    watchface    INTEGER NOT NULL,
+    platform     TEXT    NOT NULL,
+    state        TEXT    NOT NULL CHECK(state IN ('installing', 'installed', 'failed')),
+    pbw          BLOB    NOT NULL,
+    installed_at INTEGER,
+    updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pbw_apps_updated ON pbw_apps(updated_at DESC);
 "#;
 
 pub const VIEWS_DDL: &str = r#"

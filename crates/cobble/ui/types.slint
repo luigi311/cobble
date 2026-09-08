@@ -31,6 +31,15 @@ export struct WatchDevice {
     name: string,
 }
 
+export struct InstalledApp {
+    uuid: string,
+    name: string,
+    version: string,
+    platform: string,
+    state: string,
+    watchface: bool,
+}
+
 export struct DeviceConfigEntry {
     group: string,
     label: string,

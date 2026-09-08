@@ -26,6 +26,11 @@ pub fn build_app_fetch_start() -> [u8; 2] {
     [FETCH_APP, 0x01]
 }
 
+/// Tell the watch that another PutBytes session is currently active.
+pub fn build_app_fetch_busy() -> [u8; 2] {
+    [FETCH_APP, 0x02]
+}
+
 /// Tell the watch that this companion does not have the requested UUID.
 pub fn build_app_fetch_invalid_uuid() -> [u8; 2] {
     [FETCH_APP, 0x03]
@@ -48,5 +53,12 @@ mod tests {
                 app_id: 0x7856_3412
             })
         );
+    }
+
+    #[test]
+    fn response_statuses_match_the_protocol() {
+        assert_eq!(build_app_fetch_start(), [FETCH_APP, 0x01]);
+        assert_eq!(build_app_fetch_busy(), [FETCH_APP, 0x02]);
+        assert_eq!(build_app_fetch_invalid_uuid(), [FETCH_APP, 0x03]);
     }
 }

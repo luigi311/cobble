@@ -57,6 +57,7 @@ MusicActionHandler = Callable[[str], None]
 InstallProgressHandler = Callable[[int, int], None]
 DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
 DaemonConfigChangedHandler = Callable[[int], None]
+InstalledAppsChangedHandler = Callable[[], None]
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -103,6 +104,7 @@ class CobbleClient:
         self._install_progress_handlers: list[InstallProgressHandler] = []
         self._device_config_handlers: list[DeviceConfigChangedHandler] = []
         self._daemon_config_handlers: list[DaemonConfigChangedHandler] = []
+        self._installed_apps_handlers: list[InstalledAppsChangedHandler] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -156,6 +158,7 @@ class CobbleClient:
         self._iface.on_app_run_state_changed(self._dispatch_app_run_state)
         self._iface.on_music_action_received(self._dispatch_music_action)
         self._iface.on_install_pbw_progress(self._dispatch_install_progress)
+        self._iface.on_installed_apps_changed(self._dispatch_installed_apps_changed)
 
     async def close(self) -> None:
         bus, self._bus = self._bus, None
@@ -260,6 +263,23 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
         return {key: _unwrap(value) for key, value in raw.items()}
+
+    async def list_installed_apps(self) -> list[dict]:
+        """List PBWs retained for installed and recoverable watch apps."""
+        self._require_iface()
+        try:
+            apps = await self._iface.call_list_installed_apps()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return [{key: _unwrap(value) for key, value in app.items()} for app in apps]
+
+    async def uninstall_app(self, app_uuid: str) -> None:
+        """Remove an app from the connected watch and the daemon's PBW cache."""
+        self._require_iface()
+        try:
+            await self._iface.call_uninstall_app(app_uuid)
+        except DBusError as e:
+            raise self._translate(e) from e
 
     async def ping_daemon(self) -> bool:
         """Round-trip probe that the daemon is actually servicing calls."""
@@ -774,6 +794,13 @@ class CobbleClient:
         self._install_progress_handlers.append(fn)
         return fn
 
+    def on_installed_apps_changed(
+        self, fn: InstalledAppsChangedHandler
+    ) -> InstalledAppsChangedHandler:
+        """Register a handler for changes to the retained app registry."""
+        self._installed_apps_handlers.append(fn)
+        return fn
+
     # ------------------------------------------------------------------ #
     # signal dispatch (D-Bus -> local handlers)
     # ------------------------------------------------------------------ #
@@ -849,6 +876,10 @@ class CobbleClient:
     def _dispatch_install_progress(self, transferred_bytes: int, total_bytes: int) -> None:
         for h in self._install_progress_handlers:
             _safe(h, int(transferred_bytes), int(total_bytes))
+
+    def _dispatch_installed_apps_changed(self) -> None:
+        for handler in self._installed_apps_handlers:
+            _safe(handler)
 
     # ------------------------------------------------------------------ #
     def _require_iface(self):

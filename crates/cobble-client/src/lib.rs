@@ -501,6 +501,35 @@ pub struct WatchInfo {
     pub color: String,
 }
 
+/// A PBW retained by the daemon for installation and watch-initiated fetches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledApp {
+    pub uuid: String,
+    pub name: String,
+    pub version: String,
+    pub watchface: bool,
+    pub platform: String,
+    /// One of `installing`, `installed`, or `failed`.
+    pub state: String,
+    pub installed_at: Option<i64>,
+}
+
+fn decode_installed_app(map: &VarDict) -> Result<InstalledApp> {
+    let installed_at = map
+        .get("installed_at")
+        .and_then(|value| i64::try_from(value).ok())
+        .filter(|timestamp| *timestamp != 0);
+    Ok(InstalledApp {
+        uuid: required_string(map, "uuid")?,
+        name: required_string(map, "name")?,
+        version: required_string(map, "version")?,
+        watchface: required_bool(map, "watchface")?,
+        platform: required_string(map, "platform")?,
+        state: required_string(map, "state")?,
+        installed_at,
+    })
+}
+
 /// A daemon/watch status change delivered to [`CobbleClient::watch_status`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusEvent {
@@ -518,6 +547,8 @@ pub enum StatusEvent {
         revision: u64,
         state: DeviceConfigState,
     },
+    /// The daemon's retained PBW/app registry changed.
+    InstalledAppsChanged,
 }
 
 /// Typed zbus proxy for `org.cobble.Daemon`.
@@ -554,6 +585,8 @@ pub trait CobbleDaemon {
     async fn launch_app(&self, app_uuid: &str) -> Result<()>;
     async fn stop_app(&self, app_uuid: &str) -> Result<()>;
     async fn install_pbw(&self, pbw: Vec<u8>) -> Result<VarDict>;
+    async fn list_installed_apps(&self) -> Result<Vec<VarDict>>;
+    async fn uninstall_app(&self, app_uuid: &str) -> Result<()>;
     async fn update_time(&self) -> Result<()>;
     async fn notify(&self, title: &str, body: &str, subtitle: &str) -> Result<u32>;
     async fn ping(&self) -> Result<bool>;
@@ -575,6 +608,9 @@ pub trait CobbleDaemon {
 
     #[zbus(signal)]
     fn install_pbw_progress(&self, transferred_bytes: u32, total_bytes: u32) -> Result<()>;
+
+    #[zbus(signal)]
+    fn installed_apps_changed(&self) -> Result<()>;
 
     // ---- Health ----
 
@@ -833,6 +869,23 @@ impl CobbleClient {
             Error::Failure(format!("read PBW file {}: {error}", path.display()))
         })?;
         self.install_pbw_bytes(pbw).await
+    }
+
+    /// List PBWs retained by the daemon, including incomplete installs that can
+    /// be recovered through a watch-initiated AppFetch request.
+    pub async fn list_installed_apps(&self) -> Result<Vec<InstalledApp>> {
+        self.proxy()
+            .await?
+            .list_installed_apps()
+            .await?
+            .iter()
+            .map(decode_installed_app)
+            .collect()
+    }
+
+    /// Remove an app from the connected watch and the daemon's PBW cache.
+    pub async fn uninstall_app(&self, app_uuid: &str) -> Result<()> {
+        self.proxy().await?.uninstall_app(app_uuid).await
     }
 
     pub async fn update_time(&self) -> Result<()> {
@@ -1199,7 +1252,12 @@ impl CobbleClient {
                 })
             })
             .boxed();
-        let mut events = select_all([owner, conn, batt, config, device_config]);
+        let installed_apps = proxy
+            .receive_installed_apps_changed()
+            .await?
+            .map(|_| StatusEvent::InstalledAppsChanged)
+            .boxed();
+        let mut events = select_all([owner, conn, batt, config, device_config, installed_apps]);
 
         while let Some(ev) = events.next().await {
             on_event(ev.clone());
@@ -1286,5 +1344,23 @@ mod tests {
         assert_eq!(snapshot.health.availability, FieldAvailability::NotReceived);
         assert!(snapshot.health.value.is_none());
         assert!(snapshot.capabilities.supported.contains("complete_refresh"));
+    }
+
+    #[test]
+    fn installed_app_decoder_maps_zero_timestamp_to_none() {
+        let map = HashMap::from([
+            ("uuid".into(), wire_value("a-uuid").unwrap()),
+            ("name".into(), wire_value("Example").unwrap()),
+            ("version".into(), wire_value("1.2").unwrap()),
+            ("watchface".into(), wire_value(false).unwrap()),
+            ("platform".into(), wire_value("basalt").unwrap()),
+            ("state".into(), wire_value("installing").unwrap()),
+            ("installed_at".into(), wire_value(0_i64).unwrap()),
+        ]);
+
+        let app = decode_installed_app(&map).unwrap();
+        assert_eq!(app.name, "Example");
+        assert_eq!(app.installed_at, None);
+        assert!(!app.watchface);
     }
 }

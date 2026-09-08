@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
     let db_path = config::resolved_db_path(&cfg)?;
     let app_db: Option<Arc<Mutex<AppDb>>> = match AppDb::open(&db_path) {
         Ok(db) => {
+            if let Err(error) = db.recover_interrupted_pbw_installs() {
+                warn!("could not recover interrupted PBW installs: {error}");
+            }
             info!("app DB opened at {}", db_path.display());
             Some(Arc::new(Mutex::new(db)))
         }

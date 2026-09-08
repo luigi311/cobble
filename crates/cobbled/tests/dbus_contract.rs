@@ -54,6 +54,8 @@ exit 1
         "FactoryReset",
         "Forget",
         "InstallPbw",
+        "ListInstalledApps",
+        "UninstallApp",
     ] {
         assert!(
             xml.contains(&format!("<method name=\"{method}\">")),
@@ -65,6 +67,7 @@ exit 1
         "DeviceConfigChanged",
         "ConnectionChanged",
         "InstallPbwProgress",
+        "InstalledAppsChanged",
     ] {
         assert!(
             xml.contains(&format!("<signal name=\"{signal}\">")),
@@ -76,4 +79,6 @@ exit 1
     assert!(xml.contains("<arg name=\"pbw\" type=\"ay\" direction=\"in\"/>"));
     assert!(xml.contains("<arg name=\"transferred_bytes\" type=\"u\"/>"));
     assert!(xml.contains("<arg name=\"total_bytes\" type=\"u\"/>"));
+    assert!(xml.contains("<arg name=\"app_uuid\" type=\"s\" direction=\"in\"/>"));
+    assert!(xml.contains("type=\"aa{sv}\" direction=\"out\""));
 }

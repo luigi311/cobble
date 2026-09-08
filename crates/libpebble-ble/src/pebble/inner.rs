@@ -36,6 +36,9 @@ pub type WatchPrefHandler = Arc<dyn Fn(u8, String, Vec<u8>) + Send + Sync + 'sta
 pub type BatteryHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
 /// Handler called when an app opens/closes on the watch: `(app_uuid, running)`.
 pub type AppRunStateHandler = Arc<dyn Fn(String, bool) + Send + Sync + 'static>;
+/// Handler called for an AppFetch request not owned by a foreground install.
+/// Arguments are the app UUID and watch-assigned app bank ID.
+pub type AppFetchHandler = Arc<dyn Fn(String, u32) + Send + Sync + 'static>;
 /// Handler called with a media-control action the watch sent (play/pause/next/…).
 pub type MusicActionHandler = Arc<dyn Fn(MusicAction) + Send + Sync + 'static>;
 /// Handler called when the watch sends a phone control action (answer/hangup).
@@ -84,6 +87,7 @@ pub(crate) struct PebbleInner {
     /// Latest watch battery percentage (0–100); `None` until first read.
     pub(crate) battery_level: Option<u8>,
     pub(crate) app_run_state_handlers: Vec<AppRunStateHandler>,
+    pub(crate) app_fetch_handlers: Vec<AppFetchHandler>,
     pub(crate) music_action_handlers: Vec<MusicActionHandler>,
     pub(crate) phone_action_handlers: Vec<PhoneActionHandler>,
     /// In-flight screenshot reassembly, if a `take_screenshot` is awaiting.
@@ -134,6 +138,7 @@ impl PebbleInner {
             battery_handlers: Vec::new(),
             battery_level: None,
             app_run_state_handlers: Vec::new(),
+            app_fetch_handlers: Vec::new(),
             music_action_handlers: Vec::new(),
             phone_action_handlers: Vec::new(),
             screenshot: None,

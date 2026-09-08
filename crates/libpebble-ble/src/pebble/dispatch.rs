@@ -133,12 +133,19 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
                 if let Some(waiter) = waiter {
                     let _ = waiter.send(request.app_id);
                 } else {
-                    warn!("no PBW available for requested app {}", request.uuid);
-                    if let Some(reply) =
-                        pebble_pack(Endpoint::AppFetch, &build_app_fetch_invalid_uuid())
-                        && let Some(server) = &inner.lock().unwrap().gatt_server
-                    {
-                        server.send(reply);
+                    let handlers = inner.lock().unwrap().app_fetch_handlers.clone();
+                    if handlers.is_empty() {
+                        warn!("no PBW provider for requested app {}", request.uuid);
+                        if let Some(reply) =
+                            pebble_pack(Endpoint::AppFetch, &build_app_fetch_invalid_uuid())
+                            && let Some(server) = &inner.lock().unwrap().gatt_server
+                        {
+                            server.send(reply);
+                        }
+                    } else {
+                        for handler in handlers {
+                            handler(request.uuid.to_string(), request.app_id);
+                        }
                     }
                 }
             } else {
@@ -550,5 +557,59 @@ mod helpers {
         use std::sync::atomic::{AtomicU16, Ordering};
         static COUNTER: AtomicU16 = AtomicU16::new(1);
         COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+
+    fn app_fetch_message(uuid: Uuid, app_id: u32) -> Vec<u8> {
+        let mut payload = vec![0x01];
+        payload.extend_from_slice(uuid.as_bytes());
+        payload.extend_from_slice(&app_id.to_le_bytes());
+        pebble_pack(Endpoint::AppFetch, &payload).unwrap()
+    }
+
+    #[test]
+    fn unsolicited_app_fetch_reaches_registered_provider() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let received = Arc::new(Mutex::new(None));
+        let received_for_handler = Arc::clone(&received);
+        inner
+            .lock()
+            .unwrap()
+            .app_fetch_handlers
+            .push(Arc::new(move |uuid, app_id| {
+                *received_for_handler.lock().unwrap() = Some((uuid, app_id));
+            }));
+        let uuid = Uuid::parse_str("5bfacb04-9449-461e-b3e6-7637d490ed53").unwrap();
+
+        on_pebble_message(app_fetch_message(uuid, 119), &inner);
+
+        assert_eq!(*received.lock().unwrap(), Some((uuid.to_string(), 119)));
+    }
+
+    #[test]
+    fn foreground_install_waiter_takes_priority_over_provider() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let provider_called = Arc::new(Mutex::new(false));
+        let provider_called_for_handler = Arc::clone(&provider_called);
+        let uuid = Uuid::parse_str("5bfacb04-9449-461e-b3e6-7637d490ed53").unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        {
+            let mut state = inner.lock().unwrap();
+            state.app_fetch_pending.insert(uuid, sender);
+            state.app_fetch_handlers.push(Arc::new(move |_, _| {
+                *provider_called_for_handler.lock().unwrap() = true
+            }));
+        }
+
+        on_pebble_message(app_fetch_message(uuid, 42), &inner);
+
+        assert_eq!(receiver.try_recv(), Ok(42));
+        assert!(!*provider_called.lock().unwrap());
     }
 }

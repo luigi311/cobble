@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
     let _rt_guard = rt.enter();
 
     refresh_wellness_status(window.as_weak(), rt.handle());
+    refresh_installed_apps(window.as_weak(), rt.handle());
 
     {
         let weak = window.as_weak();
@@ -150,6 +151,28 @@ fn main() -> anyhow::Result<()> {
                                             apply_device_config(&window, &snapshot);
                                             *device_baseline.lock().unwrap() = Some(snapshot);
                                         }
+                                    })
+                                    .ok();
+                                });
+                            }
+                            if matches!(
+                                ev,
+                                StatusEvent::InstalledAppsChanged
+                                    | StatusEvent::DaemonRunning(true)
+                            ) {
+                                let weak_apps = weak2.clone();
+                                tokio::spawn(async move {
+                                    let apps = match CobbleClient::new().await {
+                                        Ok(client) => client.list_installed_apps().await.ok(),
+                                        Err(_) => None,
+                                    };
+                                    slint::invoke_from_event_loop(move || {
+                                        let (Some(window), Some(apps)) =
+                                            (weak_apps.upgrade(), apps)
+                                        else {
+                                            return;
+                                        };
+                                        apply_installed_apps(&window, apps);
                                     })
                                     .ok();
                                 });
@@ -1048,6 +1071,20 @@ fn main() -> anyhow::Result<()> {
                 });
             }
         });
+        window.on_uninstall_app({
+            let rt = rt_handle.clone();
+            let w = w.clone();
+            move |app_uuid| {
+                let app_uuid = app_uuid.to_string();
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Removing app…",
+                    "App removed.",
+                    move |client| async move { client.uninstall_app(&app_uuid).await },
+                )
+            }
+        });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
@@ -1176,6 +1213,37 @@ fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Ha
     });
 }
 
+fn refresh_installed_apps(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
+    rt.spawn(async move {
+        let apps = match CobbleClient::new().await {
+            Ok(client) => client.list_installed_apps().await.ok(),
+            Err(_) => None,
+        };
+        slint::invoke_from_event_loop(move || {
+            let (Some(window), Some(apps)) = (weak.upgrade(), apps) else {
+                return;
+            };
+            apply_installed_apps(&window, apps);
+        })
+        .ok();
+    });
+}
+
+fn apply_installed_apps(window: &AppWindow, apps: Vec<cobble_client::InstalledApp>) {
+    let apps: Vec<InstalledApp> = apps
+        .into_iter()
+        .map(|app| InstalledApp {
+            uuid: app.uuid.into(),
+            name: app.name.into(),
+            version: app.version.into(),
+            platform: app.platform.into(),
+            state: app.state.into(),
+            watchface: app.watchface,
+        })
+        .collect();
+    window.set_installed_apps(ModelRc::new(VecModel::from(apps)));
+}
+
 async fn wait_for_wellness_sync(client: &CobbleClient) -> Result<VarDict, String> {
     loop {
         let status = client
@@ -1267,6 +1335,7 @@ fn apply_status(w: &AppWindow, ev: StatusEvent) {
         }
         StatusEvent::DaemonConfigChanged(_) => {}
         StatusEvent::DeviceConfigChanged { .. } => {}
+        StatusEvent::InstalledAppsChanged => {}
     }
 }
 

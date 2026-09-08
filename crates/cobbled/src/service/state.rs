@@ -54,6 +54,7 @@ pub enum DaemonEvent {
         raw: Vec<u8>,
     },
     DaemonConfigChanged(u64),
+    InstalledAppsChanged,
     DeviceConfigChanged {
         revision: u64,
         state: DeviceConfigState,
