@@ -1027,7 +1027,7 @@ export component AppWindow inherits Window {
                     }
 
                     ActionButton {
-                        label: root.action-busy ? "Installing…" : "Install PBW";
+                        label: root.action-progress >= 0 ? "Installing…" : "Install PBW";
                         enabled: root.watch-connected && !root.action-busy && root.confirm-action == "";
                         clicked => { root.install-pbw(); }
                     }

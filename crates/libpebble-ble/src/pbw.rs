@@ -137,7 +137,11 @@ impl PbwBundle {
         out[27] = self.header.sdk_minor;
         // bytes 28 and 29 are legacy app-face fields and remain zero.
         let name = self.info.name.as_bytes();
-        out[30..30 + name.len().min(96)].copy_from_slice(&name[..name.len().min(96)]);
+        let mut name_len = name.len().min(95);
+        while !self.info.name.is_char_boundary(name_len) {
+            name_len -= 1;
+        }
+        out[30..30 + name_len].copy_from_slice(&name[..name_len]);
         out
     }
 }
@@ -332,6 +336,37 @@ mod tests {
         assert_eq!(&metadata[24..28], &[255, 7, 5, 19]);
         assert_eq!(&metadata[30..38], b"Test App");
         assert!(metadata[38..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn metadata_name_is_nul_terminated_and_truncated_at_utf8_boundary() {
+        let mut bundle = PbwBundle {
+            info: PbwInfo {
+                uuid: Uuid::nil(),
+                name: "é".repeat(48),
+                version: "1.0".into(),
+                watchface: false,
+                platform: WatchType::Basalt,
+            },
+            executable: vec![],
+            resources: None,
+            worker: None,
+            header: BinaryHeader {
+                sdk_major: 5,
+                sdk_minor: 19,
+                flags: 0,
+                icon: 0,
+            },
+        };
+
+        let metadata = bundle.metadata_blob();
+        assert_eq!(&metadata[30..124], "é".repeat(47).as_bytes());
+        assert_eq!(&metadata[124..126], &[0, 0]);
+
+        bundle.info.name = "a".repeat(96);
+        let metadata = bundle.metadata_blob();
+        assert_eq!(&metadata[30..125], "a".repeat(95).as_bytes());
+        assert_eq!(metadata[125], 0);
     }
 
     #[test]

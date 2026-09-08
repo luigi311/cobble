@@ -1016,7 +1016,7 @@ fn main() -> anyhow::Result<()> {
                     };
 
                     let file_name = file.file_name();
-                    let pbw = file.read().await;
+                    let file_path = file.path().to_path_buf();
                     let status = format!("Installing {file_name}…");
                     let status_weak = weak.clone();
                     slint::invoke_from_event_loop(move || {
@@ -1028,6 +1028,12 @@ fn main() -> anyhow::Result<()> {
                     .ok();
 
                     let result = async {
+                        let pbw = tokio::fs::read(&file_path).await.map_err(|error| {
+                            cobble_client::Error::Failure(format!(
+                                "read PBW file {}: {error}",
+                                file_path.display()
+                            ))
+                        })?;
                         let client = CobbleClient::new().await?;
                         let progress_weak = weak.clone();
                         client
