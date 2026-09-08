@@ -1,3 +1,19 @@
+cobbled (0.7.0-1) unstable; urgency=medium
+
+  * Add Telephony and Telegram Desktop notification categorization.
+  * Correct Pebble notification icon identifiers.
+  * Use the desktop location portal for weather positioning.
+  * Improve MPRIS synchronization with live player refreshes, seek-position
+    updates, and serialized state changes.
+  * Add PBW sideloading with compatible-platform selection and
+    watch-acknowledged install progress.
+  * Add the complete PBW lifecycle: durable app caching, installed-app listing
+    and removal, background AppFetch recovery, and failure/cancellation cleanup.
+  * Harden PBW handling with correct app-bank encoding, caller-scoped progress,
+    propagated file-read errors, and UTF-8-safe metadata names.
+
+ -- Luis Garcia <git@luigi311.com>  Tue, 08 Sep 2026 02:16:35 +0000
+
 cobbled (0.6.0-1) unstable; urgency=medium
 
   * Reorganize structure, update to rust 2024, fix ip address caching, adjust logging by @luigi311 in #32
