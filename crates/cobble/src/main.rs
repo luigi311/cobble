@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
     let _rt_guard = rt.enter();
 
     refresh_wellness_status(window.as_weak(), rt.handle());
+    refresh_installed_apps(window.as_weak(), rt.handle());
 
     {
         let weak = window.as_weak();
@@ -150,6 +151,28 @@ fn main() -> anyhow::Result<()> {
                                             apply_device_config(&window, &snapshot);
                                             *device_baseline.lock().unwrap() = Some(snapshot);
                                         }
+                                    })
+                                    .ok();
+                                });
+                            }
+                            if matches!(
+                                ev,
+                                StatusEvent::InstalledAppsChanged
+                                    | StatusEvent::DaemonRunning(true)
+                            ) {
+                                let weak_apps = weak2.clone();
+                                tokio::spawn(async move {
+                                    let apps = match CobbleClient::new().await {
+                                        Ok(client) => client.list_installed_apps().await.ok(),
+                                        Err(_) => None,
+                                    };
+                                    slint::invoke_from_event_loop(move || {
+                                        let (Some(window), Some(apps)) =
+                                            (weak_apps.upgrade(), apps)
+                                        else {
+                                            return;
+                                        };
+                                        apply_installed_apps(&window, apps);
                                     })
                                     .ok();
                                 });
@@ -957,6 +980,117 @@ fn main() -> anyhow::Result<()> {
                 )
             }
         });
+        window.on_install_pbw({
+            let rt = rt_handle.clone();
+            let w = w.clone();
+            move || {
+                let Some(window) = w.upgrade() else { return };
+                if window.get_action_busy() {
+                    return;
+                }
+                window.set_action_busy(true);
+                window.set_action_error(false);
+                window.set_action_progress(-1);
+                window.set_action_status("Choose a PBW file…".into());
+                drop(window);
+
+                let weak = w.clone();
+                rt.spawn(async move {
+                    let selected = rfd::AsyncFileDialog::new()
+                        .set_title("Install Pebble App")
+                        .add_filter("Pebble watch app", &["pbw"])
+                        .pick_file()
+                        .await;
+
+                    let Some(file) = selected else {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(w) = weak.upgrade() {
+                                w.set_action_busy(false);
+                                w.set_action_error(false);
+                                w.set_action_progress(-1);
+                                w.set_action_status("".into());
+                            }
+                        })
+                        .ok();
+                        return;
+                    };
+
+                    let file_name = file.file_name();
+                    let file_path = file.path().to_path_buf();
+                    let status = format!("Installing {file_name}…");
+                    let status_weak = weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = status_weak.upgrade() {
+                            w.set_action_progress(0);
+                            w.set_action_status(status.into());
+                        }
+                    })
+                    .ok();
+
+                    let result = async {
+                        let pbw = tokio::fs::read(&file_path).await.map_err(|error| {
+                            cobble_client::Error::Failure(format!(
+                                "read PBW file {}: {error}",
+                                file_path.display()
+                            ))
+                        })?;
+                        let client = CobbleClient::new().await?;
+                        let progress_weak = weak.clone();
+                        client
+                            .install_pbw_bytes_with_progress(pbw, move |transferred, total| {
+                                let percent = if total == 0 {
+                                    100
+                                } else {
+                                    (u64::from(transferred) * 100 / u64::from(total)) as u32
+                                } as i32;
+                                let update_weak = progress_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(w) = update_weak.upgrade() {
+                                        w.set_action_progress(percent);
+                                    }
+                                })
+                                .ok();
+                            })
+                            .await
+                            .map(|_| ())
+                    }
+                    .await;
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_action_busy(false);
+                            w.set_action_progress(-1);
+                            match result {
+                                Ok(()) => {
+                                    w.set_action_error(false);
+                                    w.set_action_status("PBW installed successfully.".into());
+                                }
+                                Err(error) => {
+                                    w.set_action_error(true);
+                                    w.set_action_status(
+                                        action_error_message(&error.to_string()).into(),
+                                    );
+                                }
+                            }
+                        }
+                    })
+                    .ok();
+                });
+            }
+        });
+        window.on_uninstall_app({
+            let rt = rt_handle.clone();
+            let w = w.clone();
+            move |app_uuid| {
+                let app_uuid = app_uuid.to_string();
+                spawn_action(
+                    &rt,
+                    w.clone(),
+                    "Removing app…",
+                    "App removed.",
+                    move |client| async move { client.uninstall_app(&app_uuid).await },
+                )
+            }
+        });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
@@ -1036,6 +1170,12 @@ fn action_error_message(error: &str) -> String {
         "The watch disconnected before the action completed.".into()
     } else if lower.contains("timeout") || lower.contains("timed out") {
         "The watch did not respond in time. Please reconnect and try again.".into()
+    } else if lower.contains("read pbw file") {
+        "The PBW file could not be read. Check its path and permissions.".into()
+    } else if lower.contains("pbw") && lower.contains("no variant") {
+        "The PBW does not contain a compatible build for this watch.".into()
+    } else if lower.contains("invalid pbw") || lower.contains("pblapp") {
+        "The selected file is not a valid PBW.".into()
     } else if lower.contains("rejected") || lower.contains("nack") {
         "The watch rejected this action.".into()
     } else if lower.contains("serviceunknown") || lower.contains("name has no owner") {
@@ -1077,6 +1217,37 @@ fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Ha
             tokio::time::sleep(delay).await;
         }
     });
+}
+
+fn refresh_installed_apps(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
+    rt.spawn(async move {
+        let apps = match CobbleClient::new().await {
+            Ok(client) => client.list_installed_apps().await.ok(),
+            Err(_) => None,
+        };
+        slint::invoke_from_event_loop(move || {
+            let (Some(window), Some(apps)) = (weak.upgrade(), apps) else {
+                return;
+            };
+            apply_installed_apps(&window, apps);
+        })
+        .ok();
+    });
+}
+
+fn apply_installed_apps(window: &AppWindow, apps: Vec<cobble_client::InstalledApp>) {
+    let apps: Vec<InstalledApp> = apps
+        .into_iter()
+        .map(|app| InstalledApp {
+            uuid: app.uuid.into(),
+            name: app.name.into(),
+            version: app.version.into(),
+            platform: app.platform.into(),
+            state: app.state.into(),
+            watchface: app.watchface,
+        })
+        .collect();
+    window.set_installed_apps(ModelRc::new(VecModel::from(apps)));
 }
 
 async fn wait_for_wellness_sync(client: &CobbleClient) -> Result<VarDict, String> {
@@ -1170,6 +1341,7 @@ fn apply_status(w: &AppWindow, ev: StatusEvent) {
         }
         StatusEvent::DaemonConfigChanged(_) => {}
         StatusEvent::DeviceConfigChanged { .. } => {}
+        StatusEvent::InstalledAppsChanged => {}
     }
 }
 

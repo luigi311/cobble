@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 use super::PebbleInner;
+use crate::endpoints::app_fetch::{build_app_fetch_invalid_uuid, parse_app_fetch_request};
 use crate::endpoints::app_message::{AppMessageCmd, build_app_message_ack, parse_app_message};
 use crate::endpoints::app_run_state::{AppRunStateCmd, parse_app_run_state};
 use crate::endpoints::blob_db::{
@@ -23,6 +24,7 @@ use crate::endpoints::music::parse_music_command;
 use crate::endpoints::phone_control::parse_phone_action;
 use crate::endpoints::phone_version::build_phone_version_response;
 use crate::endpoints::ping::{build_pong, parse_ping};
+use crate::endpoints::put_bytes::parse_response as parse_put_bytes_response;
 use crate::endpoints::screenshot::{ScreenshotResponseCode, parse_screenshot_header};
 use crate::endpoints::system::{
     WATCH_VERSION_RESPONSE, parse_factory_data_response, parse_watch_color,
@@ -117,6 +119,39 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
                 }
             }
         }
+        Some(Endpoint::AppFetch) => {
+            if let Some(request) = parse_app_fetch_request(payload) {
+                debug!(
+                    "app fetch request: uuid={} app_id={}",
+                    request.uuid, request.app_id
+                );
+                let waiter = inner
+                    .lock()
+                    .unwrap()
+                    .app_fetch_pending
+                    .remove(&request.uuid);
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(request.app_id);
+                } else {
+                    let handlers = inner.lock().unwrap().app_fetch_handlers.clone();
+                    if handlers.is_empty() {
+                        warn!("no PBW provider for requested app {}", request.uuid);
+                        if let Some(reply) =
+                            pebble_pack(Endpoint::AppFetch, &build_app_fetch_invalid_uuid())
+                            && let Some(server) = &inner.lock().unwrap().gatt_server
+                        {
+                            server.send(reply);
+                        }
+                    } else {
+                        for handler in handlers {
+                            handler(request.uuid.to_string(), request.app_id);
+                        }
+                    }
+                }
+            } else {
+                warn!("AppFetch: malformed request ({} bytes)", payload.len());
+            }
+        }
         Some(Endpoint::MusicControl) => {
             if let Some(action) = parse_music_command(payload) {
                 debug!("music action from watch: {}", action.as_str());
@@ -162,6 +197,22 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
         }
         Some(Endpoint::BlobDbV2) => {
             on_blobdb2_message(payload.to_vec(), inner);
+        }
+        Some(Endpoint::PutBytes) => {
+            if let Some(response) = parse_put_bytes_response(payload) {
+                debug!(
+                    "PutBytes {} cookie={}",
+                    if response.acknowledged { "ACK" } else { "NACK" },
+                    response.cookie
+                );
+                if let Some(waiter) = inner.lock().unwrap().put_bytes_pending.take() {
+                    let _ = waiter.send(response);
+                } else {
+                    debug!("discarding stale PutBytes response");
+                }
+            } else {
+                warn!("PutBytes: malformed response ({} bytes)", payload.len());
+            }
         }
         _ => {
             trace!("rx unknown endpoint={endpoint_raw} len={}", payload.len());
@@ -506,5 +557,59 @@ mod helpers {
         use std::sync::atomic::{AtomicU16, Ordering};
         static COUNTER: AtomicU16 = AtomicU16::new(1);
         COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+
+    fn app_fetch_message(uuid: Uuid, app_id: u32) -> Vec<u8> {
+        let mut payload = vec![0x01];
+        payload.extend_from_slice(uuid.as_bytes());
+        payload.extend_from_slice(&app_id.to_le_bytes());
+        pebble_pack(Endpoint::AppFetch, &payload).unwrap()
+    }
+
+    #[test]
+    fn unsolicited_app_fetch_reaches_registered_provider() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let received = Arc::new(Mutex::new(None));
+        let received_for_handler = Arc::clone(&received);
+        inner
+            .lock()
+            .unwrap()
+            .app_fetch_handlers
+            .push(Arc::new(move |uuid, app_id| {
+                *received_for_handler.lock().unwrap() = Some((uuid, app_id));
+            }));
+        let uuid = Uuid::parse_str("5bfacb04-9449-461e-b3e6-7637d490ed53").unwrap();
+
+        on_pebble_message(app_fetch_message(uuid, 119), &inner);
+
+        assert_eq!(*received.lock().unwrap(), Some((uuid.to_string(), 119)));
+    }
+
+    #[test]
+    fn foreground_install_waiter_takes_priority_over_provider() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let provider_called = Arc::new(Mutex::new(false));
+        let provider_called_for_handler = Arc::clone(&provider_called);
+        let uuid = Uuid::parse_str("5bfacb04-9449-461e-b3e6-7637d490ed53").unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        {
+            let mut state = inner.lock().unwrap();
+            state.app_fetch_pending.insert(uuid, sender);
+            state.app_fetch_handlers.push(Arc::new(move |_, _| {
+                *provider_called_for_handler.lock().unwrap() = true
+            }));
+        }
+
+        on_pebble_message(app_fetch_message(uuid, 42), &inner);
+
+        assert_eq!(receiver.try_recv(), Ok(42));
+        assert!(!*provider_called.lock().unwrap());
     }
 }

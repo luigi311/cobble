@@ -53,6 +53,9 @@ exit 1
         "CreateCoreDump",
         "FactoryReset",
         "Forget",
+        "InstallPbw",
+        "ListInstalledApps",
+        "UninstallApp",
     ] {
         assert!(
             xml.contains(&format!("<method name=\"{method}\">")),
@@ -63,6 +66,8 @@ exit 1
         "DaemonConfigChanged",
         "DeviceConfigChanged",
         "ConnectionChanged",
+        "InstallPbwProgress",
+        "InstalledAppsChanged",
     ] {
         assert!(
             xml.contains(&format!("<signal name=\"{signal}\">")),
@@ -71,4 +76,9 @@ exit 1
     }
     assert!(xml.contains("<arg name=\"expected_revision\" type=\"t\" direction=\"in\"/>"));
     assert!(xml.contains("<arg name=\"patch\" type=\"a{sv}\" direction=\"in\"/>"));
+    assert!(xml.contains("<arg name=\"pbw\" type=\"ay\" direction=\"in\"/>"));
+    assert!(xml.contains("<arg name=\"transferred_bytes\" type=\"u\"/>"));
+    assert!(xml.contains("<arg name=\"total_bytes\" type=\"u\"/>"));
+    assert!(xml.contains("<arg name=\"app_uuid\" type=\"s\" direction=\"in\"/>"));
+    assert!(xml.contains("type=\"aa{sv}\" direction=\"out\""));
 }

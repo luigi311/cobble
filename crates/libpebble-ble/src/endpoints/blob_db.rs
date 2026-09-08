@@ -147,6 +147,17 @@ pub fn build_blobdb_insert(
     Ok(out)
 }
 
+/// Delete one UUID-keyed record from a BlobDB database.
+pub fn build_blobdb_delete(db: BlobDBId, key: &[u8; 16], token: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(21);
+    out.push(BlobDBCommand::Delete as u8);
+    out.extend_from_slice(&token.to_le_bytes());
+    out.push(db as u8);
+    out.push(16);
+    out.extend_from_slice(key);
+    out
+}
+
 /// Like `build_blobdb_insert` but with a NUL-terminated string key.
 pub fn build_blobdb_str_insert(
     db: BlobDBId,
@@ -710,5 +721,16 @@ mod preference_routing_tests {
             &[BlobDBCommand::Insert as u8, 0x34, 0x12, 9, 10]
         );
         assert_eq!(&app_config[5..15], b"weatherApp");
+    }
+
+    #[test]
+    fn uuid_delete_matches_blobdb_wire_layout() {
+        let key = [0x5a; 16];
+        let delete = build_blobdb_delete(BlobDBId::App, &key, 0x1234);
+        assert_eq!(
+            &delete[..5],
+            &[BlobDBCommand::Delete as u8, 0x34, 0x12, 2, 16]
+        );
+        assert_eq!(&delete[5..], &key);
     }
 }

@@ -9,12 +9,15 @@ use anyhow::Context;
 use chrono::NaiveDate;
 use libpebble_ble::DatalogData;
 use libpebble_ble::endpoints::datalog::tag as datalog_tag;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use tracing::{debug, warn};
 
 use crate::schema;
 use crate::time::DateRange;
-use crate::types::{DailyWellness, IpLocation, WellnessExportState, WellnessExportStatus};
+use crate::types::{
+    CachedPbwApp, DailyWellness, IpLocation, PbwAppRecord, WellnessExportState,
+    WellnessExportStatus,
+};
 
 // Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
@@ -31,6 +34,19 @@ struct RawRecord {
     id: i64,
     data: Vec<u8>,
     item_size: usize,
+}
+
+fn pbw_app_record_from_row(row: &Row<'_>) -> rusqlite::Result<PbwAppRecord> {
+    Ok(PbwAppRecord {
+        uuid: row.get(0)?,
+        name: row.get(1)?,
+        version: row.get(2)?,
+        watchface: row.get(3)?,
+        platform: row.get(4)?,
+        state: row.get(5)?,
+        installed_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
 }
 
 impl AppDb {
@@ -69,6 +85,99 @@ impl AppDb {
     /// Return the oldest watch-local date with steps or primary sleep/nap data.
     pub fn oldest_wellness_date(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
         crate::queries::oldest_wellness_date(&self.conn)
+    }
+
+    // ── PBW app registry ───────────────────────────────────────────────
+
+    /// Mark installs interrupted by a daemon restart as failed while keeping
+    /// their PBWs available for a later watch AppFetch recovery.
+    pub fn recover_interrupted_pbw_installs(&self) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE pbw_apps SET state = 'failed' WHERE state = 'installing'",
+            [],
+        )?)
+    }
+
+    /// Store or replace a PBW before its watch-side installation begins.
+    pub fn stage_pbw_app(&self, app: &PbwAppRecord, pbw: &[u8]) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO pbw_apps
+                 (uuid, name, version, watchface, platform, state, pbw, installed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'installing', ?6, NULL, ?7)
+             ON CONFLICT(uuid) DO UPDATE SET
+                 name = excluded.name,
+                 version = excluded.version,
+                 watchface = excluded.watchface,
+                 platform = excluded.platform,
+                 state = 'installing',
+                 pbw = excluded.pbw,
+                 installed_at = NULL,
+                 updated_at = excluded.updated_at",
+            params![
+                app.uuid,
+                app.name,
+                app.version,
+                app.watchface,
+                app.platform,
+                pbw,
+                app.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a retained PBW as installed after its final PutBytes ACK.
+    pub fn mark_pbw_app_installed(&self, uuid: &str, now: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE pbw_apps
+             SET state = 'installed', installed_at = COALESCE(installed_at, ?2), updated_at = ?2
+             WHERE uuid = ?1",
+            params![uuid, now],
+        )?;
+        Ok(())
+    }
+
+    /// Retain a failed PBW so a later AppFetch can recover the watch entry.
+    pub fn mark_pbw_app_failed(&self, uuid: &str, now: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE pbw_apps SET state = 'failed', updated_at = ?2 WHERE uuid = ?1",
+            params![uuid, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pbw_apps(&self) -> anyhow::Result<Vec<PbwAppRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, name, version, watchface, platform, state, installed_at, updated_at
+             FROM pbw_apps ORDER BY updated_at DESC, name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], pbw_app_record_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn load_cached_pbw_app(&self, uuid: &str) -> anyhow::Result<Option<CachedPbwApp>> {
+        self.conn
+            .query_row(
+                "SELECT uuid, name, version, watchface, platform, state,
+                        installed_at, updated_at, pbw
+                 FROM pbw_apps WHERE uuid = ?1",
+                [uuid],
+                |row| {
+                    Ok(CachedPbwApp {
+                        app: pbw_app_record_from_row(row)?,
+                        pbw: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_pbw_app(&self, uuid: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM pbw_apps WHERE uuid = ?1", [uuid])?
+            > 0)
     }
 
     /// Return the newest watch-local date with steps or primary sleep/nap data.
@@ -622,6 +731,56 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         schema::initialize_schema(&conn).unwrap();
         AppDb { conn }
+    }
+
+    fn pbw_app(uuid: &str, updated_at: i64) -> PbwAppRecord {
+        PbwAppRecord {
+            uuid: uuid.into(),
+            name: "Example App".into(),
+            version: "1.2".into(),
+            watchface: false,
+            platform: "basalt".into(),
+            state: "installing".into(),
+            installed_at: None,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn pbw_registry_retains_payload_and_tracks_lifecycle() {
+        let db = memory_db();
+        let uuid = "5bfacb04-9449-461e-b3e6-7637d490ed53";
+        db.stage_pbw_app(&pbw_app(uuid, 100), b"first-pbw").unwrap();
+
+        let cached = db.load_cached_pbw_app(uuid).unwrap().unwrap();
+        assert_eq!(cached.pbw, b"first-pbw");
+        assert_eq!(cached.app.state, "installing");
+        assert_eq!(cached.app.installed_at, None);
+
+        assert_eq!(db.recover_interrupted_pbw_installs().unwrap(), 1);
+        assert_eq!(db.list_pbw_apps().unwrap()[0].state, "failed");
+
+        db.mark_pbw_app_installed(uuid, 200).unwrap();
+        let installed = db.list_pbw_apps().unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].state, "installed");
+        assert_eq!(installed[0].installed_at, Some(200));
+
+        db.mark_pbw_app_failed(uuid, 300).unwrap();
+        assert_eq!(db.list_pbw_apps().unwrap()[0].state, "failed");
+
+        let mut replacement = pbw_app(uuid, 400);
+        replacement.version = "2.0".into();
+        db.stage_pbw_app(&replacement, b"replacement-pbw").unwrap();
+        let cached = db.load_cached_pbw_app(uuid).unwrap().unwrap();
+        assert_eq!(cached.pbw, b"replacement-pbw");
+        assert_eq!(cached.app.version, "2.0");
+        assert_eq!(cached.app.state, "installing");
+        assert_eq!(cached.app.installed_at, None);
+
+        assert!(db.delete_pbw_app(uuid).unwrap());
+        assert!(db.load_cached_pbw_app(uuid).unwrap().is_none());
+        assert!(!db.delete_pbw_app(uuid).unwrap());
     }
 
     #[test]

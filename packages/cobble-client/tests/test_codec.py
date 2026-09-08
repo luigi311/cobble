@@ -112,3 +112,13 @@ def test_device_config_changed_handler_tolerates_unknown_state():
     client._dispatch_device_config_changed(18, "future_state")
 
     assert changes == [(18, DeviceConfigState.INVALID)]
+
+
+def test_install_progress_handler_receives_acknowledged_and_total_bytes():
+    client = CobbleClient()
+    updates = []
+    client.on_install_progress(lambda transferred, total: updates.append((transferred, total)))
+
+    client._dispatch_install_progress(4_000, 10_000)
+
+    assert updates == [(4_000, 10_000)]

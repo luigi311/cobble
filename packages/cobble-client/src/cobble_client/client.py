@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 from dbus_fast import DBusError, Variant
 from dbus_fast.aio import MessageBus
@@ -52,8 +53,11 @@ BatteryHandler = Callable[[int | None], None]
 AppRunStateHandler = Callable[[str, bool], None]
 # media-control action name from the watch (play/pause/next_track/…)
 MusicActionHandler = Callable[[str], None]
+# bytes acknowledged by the watch, total PBW payload bytes
+InstallProgressHandler = Callable[[int, int], None]
 DeviceConfigChangedHandler = Callable[[int, DeviceConfigState], None]
 DaemonConfigChangedHandler = Callable[[int], None]
+InstalledAppsChangedHandler = Callable[[], None]
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -97,8 +101,10 @@ class CobbleClient:
         self._battery_handlers: list[BatteryHandler] = []
         self._app_run_state_handlers: list[AppRunStateHandler] = []
         self._music_action_handlers: list[MusicActionHandler] = []
+        self._install_progress_handlers: list[InstallProgressHandler] = []
         self._device_config_handlers: list[DeviceConfigChangedHandler] = []
         self._daemon_config_handlers: list[DaemonConfigChangedHandler] = []
+        self._installed_apps_handlers: list[InstalledAppsChangedHandler] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -151,6 +157,8 @@ class CobbleClient:
         self._iface.on_battery_changed(self._dispatch_battery)
         self._iface.on_app_run_state_changed(self._dispatch_app_run_state)
         self._iface.on_music_action_received(self._dispatch_music_action)
+        self._iface.on_install_pbw_progress(self._dispatch_install_progress)
+        self._iface.on_installed_apps_changed(self._dispatch_installed_apps_changed)
 
     async def close(self) -> None:
         bus, self._bus = self._bus, None
@@ -243,6 +251,33 @@ class CobbleClient:
         self._require_iface()
         try:
             await self._iface.call_stop_app(app_uuid)
+        except DBusError as e:
+            raise self._translate(e) from e
+
+    async def install_pbw(self, path: str | Path) -> dict:
+        """Install a PBW file and return its UUID/name/version/platform metadata."""
+        self._require_iface()
+        pbw = Path(path).read_bytes()
+        try:
+            raw = await self._iface.call_install_pbw(pbw)
+        except DBusError as e:
+            raise self._translate(e) from e
+        return {key: _unwrap(value) for key, value in raw.items()}
+
+    async def list_installed_apps(self) -> list[dict]:
+        """List PBWs retained for installed and recoverable watch apps."""
+        self._require_iface()
+        try:
+            apps = await self._iface.call_list_installed_apps()
+        except DBusError as e:
+            raise self._translate(e) from e
+        return [{key: _unwrap(value) for key, value in app.items()} for app in apps]
+
+    async def uninstall_app(self, app_uuid: str) -> None:
+        """Remove an app from the connected watch and the daemon's PBW cache."""
+        self._require_iface()
+        try:
+            await self._iface.call_uninstall_app(app_uuid)
         except DBusError as e:
             raise self._translate(e) from e
 
@@ -752,6 +787,20 @@ class CobbleClient:
         self._app_run_state_handlers.append(fn)
         return fn
 
+    def on_install_progress(
+        self, fn: InstallProgressHandler
+    ) -> InstallProgressHandler:
+        """Register a handler receiving acknowledged and total PBW payload bytes."""
+        self._install_progress_handlers.append(fn)
+        return fn
+
+    def on_installed_apps_changed(
+        self, fn: InstalledAppsChangedHandler
+    ) -> InstalledAppsChangedHandler:
+        """Register a handler for changes to the retained app registry."""
+        self._installed_apps_handlers.append(fn)
+        return fn
+
     # ------------------------------------------------------------------ #
     # signal dispatch (D-Bus -> local handlers)
     # ------------------------------------------------------------------ #
@@ -823,6 +872,14 @@ class CobbleClient:
     def _dispatch_music_action(self, action: str) -> None:
         for h in self._music_action_handlers:
             _safe(h, action)
+
+    def _dispatch_install_progress(self, transferred_bytes: int, total_bytes: int) -> None:
+        for h in self._install_progress_handlers:
+            _safe(h, int(transferred_bytes), int(total_bytes))
+
+    def _dispatch_installed_apps_changed(self) -> None:
+        for handler in self._installed_apps_handlers:
+            _safe(handler)
 
     # ------------------------------------------------------------------ #
     def _require_iface(self):

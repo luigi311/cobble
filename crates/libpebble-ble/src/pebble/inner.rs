@@ -9,12 +9,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::endpoints::app_message::AppMessageValue;
 use crate::endpoints::blob_db::{BlobDB2Incoming, BlobDBStatus};
 use crate::endpoints::datalog::{DatalogData, DatalogSession};
 use crate::endpoints::music::MusicAction;
 use crate::endpoints::phone_control::PhoneAction;
+use crate::endpoints::put_bytes::PutBytesResponse;
 use crate::endpoints::screenshot::ScreenshotVersion;
 use crate::endpoints::system::{WatchColorInfo, WatchVersionInfo};
 use crate::transport::gatt_server::PebbleGattServerHandle;
@@ -34,6 +36,9 @@ pub type WatchPrefHandler = Arc<dyn Fn(u8, String, Vec<u8>) + Send + Sync + 'sta
 pub type BatteryHandler = Arc<dyn Fn(u8) + Send + Sync + 'static>;
 /// Handler called when an app opens/closes on the watch: `(app_uuid, running)`.
 pub type AppRunStateHandler = Arc<dyn Fn(String, bool) + Send + Sync + 'static>;
+/// Handler called for an AppFetch request not owned by a foreground install.
+/// Arguments are the app UUID and watch-assigned app bank ID.
+pub type AppFetchHandler = Arc<dyn Fn(String, u32) + Send + Sync + 'static>;
 /// Handler called with a media-control action the watch sent (play/pause/next/…).
 pub type MusicActionHandler = Arc<dyn Fn(MusicAction) + Send + Sync + 'static>;
 /// Handler called when the watch sends a phone control action (answer/hangup).
@@ -82,6 +87,7 @@ pub(crate) struct PebbleInner {
     /// Latest watch battery percentage (0–100); `None` until first read.
     pub(crate) battery_level: Option<u8>,
     pub(crate) app_run_state_handlers: Vec<AppRunStateHandler>,
+    pub(crate) app_fetch_handlers: Vec<AppFetchHandler>,
     pub(crate) music_action_handlers: Vec<MusicActionHandler>,
     pub(crate) phone_action_handlers: Vec<PhoneActionHandler>,
     /// In-flight screenshot reassembly, if a `take_screenshot` is awaiting.
@@ -97,6 +103,10 @@ pub(crate) struct PebbleInner {
     pub(crate) blobdb2_pending: HashMap<u16, oneshot::Sender<BlobDB2Incoming>>,
     /// Regular BlobDB token → status returned by the watch.
     pub(crate) blobdb_pending: HashMap<u16, oneshot::Sender<BlobDBStatus>>,
+    /// App UUID → watch-assigned app id from the next AppFetch request.
+    pub(crate) app_fetch_pending: HashMap<Uuid, oneshot::Sender<u32>>,
+    /// The serialized PutBytes operation's next command response.
+    pub(crate) put_bytes_pending: Option<oneshot::Sender<PutBytesResponse>>,
     /// Latest raw records observed through BlobDB2, keyed by wire DB and key.
     pub(crate) observed_preferences: HashMap<(u8, String), Vec<u8>>,
     /// Monotonic notification of BlobDB2 SyncDone messages: `(generation, db)`.
@@ -128,6 +138,7 @@ impl PebbleInner {
             battery_handlers: Vec::new(),
             battery_level: None,
             app_run_state_handlers: Vec::new(),
+            app_fetch_handlers: Vec::new(),
             music_action_handlers: Vec::new(),
             phone_action_handlers: Vec::new(),
             screenshot: None,
@@ -136,6 +147,8 @@ impl PebbleInner {
             pending_order: VecDeque::new(),
             blobdb2_pending: HashMap::new(),
             blobdb_pending: HashMap::new(),
+            app_fetch_pending: HashMap::new(),
+            put_bytes_pending: None,
             observed_preferences: HashMap::new(),
             sync_done_tx,
             watch_version_pending: Vec::new(),

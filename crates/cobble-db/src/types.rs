@@ -1,5 +1,25 @@
 use chrono::NaiveDate;
 
+/// Metadata for one PBW retained by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PbwAppRecord {
+    pub uuid: String,
+    pub name: String,
+    pub version: String,
+    pub watchface: bool,
+    pub platform: String,
+    pub state: String,
+    pub installed_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+/// A retained PBW and its registry metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPbwApp {
+    pub app: PbwAppRecord,
+    pub pbw: Vec<u8>,
+}
+
 /// Cached IP geolocation result.
 #[derive(Debug, Clone)]
 pub struct IpLocation {
