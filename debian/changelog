@@ -1,3 +1,17 @@
+cobbled (0.8.0-1) unstable; urgency=medium
+
+  * Add isolated PebbleKit JS execution so watchapp JavaScript failures cannot
+    bring down cobbled.
+  * Add persistent localStorage, AppMessage, geolocation, and HTTP support for
+    PebbleKit JS applications.
+  * Add app configuration pages through an isolated WebKit helper, including
+    browser fallback and configuration response delivery.
+  * Harden helper IPC, configuration cancellation, remote URL validation, and
+    PBW metadata backfills.
+  * Run asynchronous XMLHttpRequest work outside the JavaScript caller path.
+
+ -- Luis Garcia <git@luigi311.com>  Wed, 09 Sep 2026 21:04:52 +0000
+
 cobbled (0.7.0-1) unstable; urgency=medium
 
   * Add Telephony and Telegram Desktop notification categorization.

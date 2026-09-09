@@ -1,6 +1,6 @@
 [package]
 name = "cobble-config-webview"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Isolated webview process for Pebble app configuration pages."
 
