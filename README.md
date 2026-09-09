@@ -16,6 +16,13 @@ crates/libpebble-ble   Rust BLE/protocol library. Owns BlueZ (via bluer),
 crates/cobbled         Rust daemon. Wraps one libpebble-ble Pebble instance,
                        exports org.cobble.Daemon on the session bus, handles
                        reconnection, forwards desktop notifications to the watch.
+          ↕
+crates/cobbled-pkjs    Isolated QuickJS helper for PBW phone-side JavaScript.
+                       One subprocess runs for the active watchapp, so broken
+                       companion code cannot crash or wedge the BLE daemon.
+crates/cobble-config-  Isolated WebKitGTK helper for app configuration pages.
+webview                It persists browser storage per app and returns only the
+                       pebblejs://close response to the GUI.
           ↑
 packages/              Python client. cobble-client is the only Python
 cobble-client          package; it wraps the D-Bus proxy behind the same API
@@ -24,6 +31,27 @@ cobble-client          package; it wraps the D-Bus proxy behind the same API
 ```
 
 The library never learns the daemon exists. The client never opens a BLE link.
+
+## PebbleKit JS
+
+When a sideloaded app with `pebble-js-app.js` opens on the watch, `cobbled`
+starts a short-lived `cobbled-pkjs` child process and connects it to the active
+watchapp over private newline-delimited JSON pipes. The helper provides the
+`ready` and `appmessage` events, `Pebble.sendAppMessage`, timers, persistent
+per-app `localStorage`, geolocation, and HTTP through `XMLHttpRequest` or
+`fetch`. Closing the app or disconnecting the watch terminates the helper.
+
+PBW parsing and JavaScript execution happen only in that child. A malformed
+script, QuickJS failure, or forced helper termination is logged and ends the
+PKJS session without taking down the BLE connection or D-Bus service. For
+development builds, `COBBLED_PKJS_BIN` can point the daemon at a helper binary;
+installed builds find it next to `cobbled`.
+
+Configurable apps expose a Configure button in the GUI. Cobble asks the active
+PKJS session for its URL, opens that page in `cobble-config-webview`, and sends
+the page's `pebblejs://close` response back as `webviewclosed`. WebKit and page
+failures remain outside both `cobble` and `cobbled`. For development builds,
+`COBBLE_CONFIG_WEBVIEW_BIN` can override the helper path.
 
 ## Rust library structure
 
@@ -176,8 +204,10 @@ uv run pytest
 # Build the release binary
 cargo build --release
 
-# Copy the binary somewhere on your PATH
+# Copy the daemon and helper binaries somewhere on your PATH
 sudo install -m755 target/release/cobbled /usr/local/bin/
+sudo install -m755 target/release/cobbled-pkjs /usr/local/bin/
+sudo install -m755 target/release/cobble-config-webview /usr/local/bin/
 
 # Or build the .deb (requires cargo-deb or debhelper setup)
 dpkg-buildpackage -us -uc -b
@@ -248,9 +278,11 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `SendAppMessage` | `(s, a{i(sv)}, b) → u` | uuid, data, wait_ack → txn |
 | Method | `LaunchApp` | `(s)` | uuid |
 | Method | `StopApp` | `(s)` | uuid |
-| Method | `InstallPbw` | `(ay) → a{sv}` | PBW bytes → installed uuid/name/version/watchface/platform metadata |
+| Method | `InstallPbw` | `(ay) → a{sv}` | PBW bytes → installed uuid/name/version/watchface/configurable/platform metadata |
 | Method | `ListInstalledApps` | `() → aa{sv}` | retained PBW metadata and install state (`installing`, `installed`, or `failed`) |
 | Method | `UninstallApp` | `(s)` | remove app metadata from the connected watch and delete its retained PBW |
+| Method | `RequestAppConfiguration` | `(s) → s` | start the app's PKJS session and obtain its configuration URL |
+| Method | `SubmitAppConfiguration` | `(ss)` | deliver the configuration page response to that PKJS session |
 | Method | `UpdateTime` | `()` | sync watch clock to system time |
 | Method | `Notify` | `(s, s, s) → u` | title, body, subtitle → token |
 | Method | `Ping` | `() → b` | daemon liveness probe |

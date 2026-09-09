@@ -18,6 +18,9 @@ use tokio::{
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+const PBW_METADATA_BACKFILL: &str = "pbw_metadata";
+const PBW_METADATA_BACKFILL_VERSION: i64 = 1;
+
 mod call_monitor;
 mod codec;
 mod config;
@@ -28,13 +31,16 @@ mod location;
 mod mpris_monitor;
 mod notification;
 mod notify_monitor;
+mod pkjs;
 mod service;
 mod supervisor;
 mod weather;
 
 use cobble_db::AppDb;
 use integrations::worker;
+use libpebble_ble::PbwBundle;
 use notify_monitor::NotificationMonitor;
+use pkjs::PkjsManager;
 use service::{BUS_NAME, CobbleDaemon, OBJECT_PATH, run_signal_emitter};
 use supervisor::run_supervisor;
 
@@ -93,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = db.recover_interrupted_pbw_installs() {
                 warn!("could not recover interrupted PBW installs: {error}");
             }
+            if let Err(error) = refresh_pbw_metadata(&db) {
+                warn!("could not refresh retained PBW metadata: {error:#}");
+            }
             info!("app DB opened at {}", db_path.display());
             Some(Arc::new(Mutex::new(db)))
         }
@@ -103,6 +112,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let pkjs = PkjsManager::start(
+        app_db.clone(),
+        db_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("pkjs"),
+    );
     let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
     let (wellness_sync_tx, wellness_sync_rx) = watch::channel(0_u64);
     let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
@@ -127,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         app_db.clone(),
         music_action_tx,
         phone_action_tx,
+        pkjs.clone(),
     );
 
     // Build the session D-Bus connection.
@@ -177,8 +194,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the reconnect supervisor in the background.
     let daemon_for_super = daemon.clone();
+    let pkjs_for_super = pkjs.clone();
     tokio::spawn(async move {
-        run_supervisor(daemon_for_super).await;
+        run_supervisor(daemon_for_super, pkjs_for_super).await;
     });
 
     // Watch the config file for external changes (manual edits, GUI saves)
@@ -243,7 +261,106 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     daemon.set_stopping();
+    pkjs.shutdown().await;
     notify_monitor.stop().await;
 
     Ok(())
+}
+
+fn refresh_pbw_metadata(db: &AppDb) -> anyhow::Result<()> {
+    if db.maintenance_version(PBW_METADATA_BACKFILL)? >= PBW_METADATA_BACKFILL_VERSION {
+        return Ok(());
+    }
+
+    let mut parse_failures = Vec::new();
+    for app in db.list_pbw_apps()? {
+        let cached = db
+            .load_cached_pbw_app(&app.uuid)?
+            .ok_or_else(|| anyhow::anyhow!("retained PBW {} disappeared", app.uuid))?;
+        let configurable = match PbwBundle::is_configurable(&cached.pbw) {
+            Ok(configurable) => configurable,
+            Err(error) => {
+                parse_failures.push(format!("{}: {error}", app.uuid));
+                continue;
+            }
+        };
+        if configurable != app.configurable
+            && !db.set_pbw_app_configurable(&app.uuid, configurable)?
+        {
+            anyhow::bail!(
+                "retained PBW {} disappeared during metadata update",
+                app.uuid
+            );
+        }
+    }
+
+    if !parse_failures.is_empty() {
+        anyhow::bail!(
+            "could not parse retained PBW metadata: {}",
+            parse_failures.join("; ")
+        );
+    }
+
+    db.set_maintenance_version(PBW_METADATA_BACKFILL, PBW_METADATA_BACKFILL_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cobble_db::PbwAppRecord;
+
+    #[test]
+    fn pbw_metadata_backfill_stays_incomplete_after_parse_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = AppDb::open(&directory.path().join("app.db")).unwrap();
+        let app = |uuid: &str, updated_at| PbwAppRecord {
+            uuid: uuid.into(),
+            name: "Invalid".into(),
+            version: "1.0".into(),
+            watchface: false,
+            configurable: false,
+            platform: "basalt".into(),
+            state: "installed".into(),
+            installed_at: Some(1),
+            updated_at,
+        };
+        let first_uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let second_uuid = "fedcba98-7654-3210-fedc-ba9876543210";
+        db.stage_pbw_app(&app(first_uuid, 1), b"not a PBW").unwrap();
+        db.stage_pbw_app(&app(second_uuid, 2), b"also not a PBW")
+            .unwrap();
+
+        let error = refresh_pbw_metadata(&db).unwrap_err().to_string();
+        assert!(error.contains(first_uuid), "{error}");
+        assert!(error.contains(second_uuid), "{error}");
+        assert_eq!(db.maintenance_version(PBW_METADATA_BACKFILL).unwrap(), 0);
+    }
+
+    #[test]
+    fn completed_pbw_metadata_backfill_skips_future_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = AppDb::open(&directory.path().join("app.db")).unwrap();
+        refresh_pbw_metadata(&db).unwrap();
+        assert_eq!(
+            db.maintenance_version(PBW_METADATA_BACKFILL).unwrap(),
+            PBW_METADATA_BACKFILL_VERSION
+        );
+        db.stage_pbw_app(
+            &PbwAppRecord {
+                uuid: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                name: "Invalid".into(),
+                version: "1.0".into(),
+                watchface: false,
+                configurable: false,
+                platform: "basalt".into(),
+                state: "installed".into(),
+                installed_at: Some(1),
+                updated_at: 1,
+            },
+            b"not a PBW",
+        )
+        .unwrap();
+
+        refresh_pbw_metadata(&db).unwrap();
+    }
 }

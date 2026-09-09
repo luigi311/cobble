@@ -508,6 +508,7 @@ pub struct InstalledApp {
     pub name: String,
     pub version: String,
     pub watchface: bool,
+    pub configurable: bool,
     pub platform: String,
     /// One of `installing`, `installed`, or `failed`.
     pub state: String,
@@ -524,6 +525,7 @@ fn decode_installed_app(map: &VarDict) -> Result<InstalledApp> {
         name: required_string(map, "name")?,
         version: required_string(map, "version")?,
         watchface: required_bool(map, "watchface")?,
+        configurable: required_bool(map, "configurable")?,
         platform: required_string(map, "platform")?,
         state: required_string(map, "state")?,
         installed_at,
@@ -587,6 +589,8 @@ pub trait CobbleDaemon {
     async fn install_pbw(&self, pbw: Vec<u8>) -> Result<VarDict>;
     async fn list_installed_apps(&self) -> Result<Vec<VarDict>>;
     async fn uninstall_app(&self, app_uuid: &str) -> Result<()>;
+    async fn request_app_configuration(&self, app_uuid: &str) -> Result<String>;
+    async fn submit_app_configuration(&self, app_uuid: &str, response: &str) -> Result<()>;
     async fn update_time(&self) -> Result<()>;
     async fn notify(&self, title: &str, body: &str, subtitle: &str) -> Result<u32>;
     async fn ping(&self) -> Result<bool>;
@@ -886,6 +890,20 @@ impl CobbleClient {
     /// Remove an app from the connected watch and the daemon's PBW cache.
     pub async fn uninstall_app(&self, app_uuid: &str) -> Result<()> {
         self.proxy().await?.uninstall_app(app_uuid).await
+    }
+
+    pub async fn request_app_configuration(&self, app_uuid: &str) -> Result<String> {
+        self.proxy()
+            .await?
+            .request_app_configuration(app_uuid)
+            .await
+    }
+
+    pub async fn submit_app_configuration(&self, app_uuid: &str, response: &str) -> Result<()> {
+        self.proxy()
+            .await?
+            .submit_app_configuration(app_uuid, response)
+            .await
     }
 
     pub async fn update_time(&self) -> Result<()> {
@@ -1353,6 +1371,7 @@ mod tests {
             ("name".into(), wire_value("Example").unwrap()),
             ("version".into(), wire_value("1.2").unwrap()),
             ("watchface".into(), wire_value(false).unwrap()),
+            ("configurable".into(), wire_value(true).unwrap()),
             ("platform".into(), wire_value("basalt").unwrap()),
             ("state".into(), wire_value("installing").unwrap()),
             ("installed_at".into(), wire_value(0_i64).unwrap()),
@@ -1362,5 +1381,6 @@ mod tests {
         assert_eq!(app.name, "Example");
         assert_eq!(app.installed_at, None);
         assert!(!app.watchface);
+        assert!(app.configurable);
     }
 }

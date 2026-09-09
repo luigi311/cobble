@@ -56,6 +56,8 @@ exit 1
         "InstallPbw",
         "ListInstalledApps",
         "UninstallApp",
+        "RequestAppConfiguration",
+        "SubmitAppConfiguration",
     ] {
         assert!(
             xml.contains(&format!("<method name=\"{method}\">")),

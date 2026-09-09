@@ -2,9 +2,12 @@
 members = [
     "crates/libpebble-ble",
     "crates/cobble-contracts",
+    "crates/cobble-pkjs-protocol",
     "crates/cobble-config",
     "crates/cobble-db",
     "crates/cobbled",
+    "crates/cobbled-pkjs",
+    "crates/cobble-config-webview",
     "crates/cobble-client",
     "crates/cobble",
 ]

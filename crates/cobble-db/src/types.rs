@@ -7,6 +7,7 @@ pub struct PbwAppRecord {
     pub name: String,
     pub version: String,
     pub watchface: bool,
+    pub configurable: bool,
     pub platform: String,
     pub state: String,
     pub installed_at: Option<i64>,

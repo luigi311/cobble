@@ -14,6 +14,8 @@
 //!     InstallPbw(ay pbw) -> a{sv}  parse and install a PBW byte stream
 //!     ListInstalledApps() -> aa{sv}
 //!     UninstallApp(s uuid)
+//!     RequestAppConfiguration(s uuid) -> s url
+//!     SubmitAppConfiguration(s uuid, s response)
 //!     UpdateTime()
 //!     Notify(s title, s body, s subtitle) -> u token
 //!     Ping() -> b
@@ -86,6 +88,9 @@ use zbus::{
 
 use crate::codec::{WireDict, decode_wire_dict, encode_wire_dict};
 use crate::notification::app_name_to_category;
+use crate::pkjs::PkjsManager;
+
+const MAX_APP_CONFIGURATION_RESPONSE_BYTES: usize = 1024 * 1024;
 
 fn unix_timestamp() -> i64 {
     SystemTime::now()
@@ -717,6 +722,7 @@ pub struct CobbleDaemon {
     device_config_operation: Arc<AsyncMutex<()>>,
     /// Serializes cache state changes with watch-side PBW install/removal.
     pbw_operation: Arc<AsyncMutex<()>>,
+    pkjs: PkjsManager,
 }
 
 impl CobbleDaemon {
@@ -732,6 +738,7 @@ impl CobbleDaemon {
         db: Option<Arc<Mutex<AppDb>>>,
         music_action_tx: mpsc::UnboundedSender<String>,
         phone_action_tx: mpsc::UnboundedSender<(String, u32)>,
+        pkjs: PkjsManager,
     ) -> Self {
         let (config_revision, _) = watch::channel(0);
         let (integration_config, _) = watch::channel(config.integrations.intervals_icu.clone());
@@ -782,6 +789,7 @@ impl CobbleDaemon {
             config_operation: Arc::new(AsyncMutex::new(())),
             device_config_operation: Arc::new(AsyncMutex::new(())),
             pbw_operation: Arc::new(AsyncMutex::new(())),
+            pkjs,
         }
     }
 
@@ -1335,6 +1343,7 @@ impl CobbleDaemon {
                     name: inspected.name.clone(),
                     version: inspected.version.clone(),
                     watchface: inspected.watchface,
+                    configurable: inspected.configurable,
                     platform: inspected.platform.codename().into(),
                     state: "installing".into(),
                     installed_at: None,
@@ -1419,6 +1428,7 @@ impl CobbleDaemon {
             ("name".into(), dbus_val(info.name)),
             ("version".into(), dbus_val(info.version)),
             ("watchface".into(), dbus_val(info.watchface)),
+            ("configurable".into(), dbus_val(info.configurable)),
             ("platform".into(), dbus_val(info.platform.codename())),
         ]))
     }
@@ -1438,6 +1448,7 @@ impl CobbleDaemon {
                     ("name".into(), dbus_val(app.name)),
                     ("version".into(), dbus_val(app.version)),
                     ("watchface".into(), dbus_val(app.watchface)),
+                    ("configurable".into(), dbus_val(app.configurable)),
                     ("platform".into(), dbus_val(app.platform)),
                     ("state".into(), dbus_val(app.state)),
                     (
@@ -1463,6 +1474,48 @@ impl CobbleDaemon {
             .map_err(|error| DaemonError::Failed(format!("delete cached PBW: {error}")))?;
         self.notify_installed_apps_changed();
         Ok(())
+    }
+
+    async fn request_app_configuration(&self, app_uuid: String) -> Result<String, DaemonError> {
+        let app = self
+            .app_db()?
+            .lock()
+            .unwrap()
+            .load_pbw_app_record(&app_uuid)
+            .map_err(|error| DaemonError::Failed(format!("load retained PBW: {error}")))?
+            .ok_or_else(|| DaemonError::Failed(format!("app {app_uuid} is not retained")))?;
+        if app.state != "installed" {
+            return Err(DaemonError::Failed(format!(
+                "app {app_uuid} is not fully installed"
+            )));
+        }
+        if !app.configurable {
+            return Err(DaemonError::Failed(format!(
+                "app {app_uuid} is not configurable"
+            )));
+        }
+
+        let pebble = self.require_pebble()?;
+        self.pkjs
+            .request_configuration(app_uuid, Arc::downgrade(&pebble))
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))
+    }
+
+    async fn submit_app_configuration(
+        &self,
+        app_uuid: String,
+        response: String,
+    ) -> Result<(), DaemonError> {
+        if response.len() > MAX_APP_CONFIGURATION_RESPONSE_BYTES {
+            return Err(DaemonError::Failed(
+                "app configuration response exceeds the size limit".into(),
+            ));
+        }
+        self.pkjs
+            .submit_configuration(app_uuid, response)
+            .await
+            .map_err(|error| DaemonError::Failed(error.to_string()))
     }
 
     async fn update_time(&self) -> Result<(), DaemonError> {
@@ -2776,6 +2829,7 @@ mod tests {
                     name: "Cancelled".into(),
                     version: "1.0".into(),
                     watchface: false,
+                    configurable: false,
                     platform: "basalt".into(),
                     state: "installing".into(),
                     installed_at: None,
@@ -2863,6 +2917,7 @@ mod tests {
             None,
             music_tx,
             phone_tx,
+            PkjsManager::unavailable(),
         );
         let mut integration_rx = daemon.integration_config_changed();
         let revision_rx = daemon.config_changed();
@@ -2899,6 +2954,7 @@ mod tests {
             None,
             music_tx,
             phone_tx,
+            PkjsManager::unavailable(),
         );
         let patch = HashMap::from([
             ("adapter".into(), dbus_val("hci7")),
@@ -2948,6 +3004,7 @@ mod tests {
             None,
             music_tx,
             phone_tx,
+            PkjsManager::unavailable(),
         );
 
         daemon
@@ -2998,6 +3055,7 @@ mod tests {
             None,
             music_tx,
             phone_tx,
+            PkjsManager::unavailable(),
         );
 
         let empty = daemon.get_device_config();
@@ -3098,6 +3156,7 @@ mod tests {
             Some(db),
             music_tx,
             phone_tx,
+            PkjsManager::unavailable(),
         );
 
         daemon.sync_wellness().unwrap();

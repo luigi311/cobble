@@ -198,12 +198,15 @@ export component AppWindow inherits Window {
     callback reset-into-recovery();
     callback create-core-dump();
     callback install-pbw();
+    callback configure-app(string, string);
+    callback cancel-app-configuration();
     callback uninstall-app(string);
     callback forget-watch();
     callback factory-reset();
     in-out property <string> action-status: "";
     in-out property <bool> action-error: false;
     in-out property <int> action-progress: -1;
+    in-out property <bool> action-cancellable: false;
     callback workout-period-changed(int);
     callback workout-go-back();
     callback workout-go-forward();
@@ -1050,6 +1053,13 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.action-cancellable: ActionButton {
+                        label: "Cancel Configuration";
+                        danger: true;
+                        enabled: root.action-busy;
+                        clicked => { root.cancel-app-configuration(); }
+                    }
+
                     Text {
                         text: "Installed Apps";
                         color: Palette.text; font-size: 14px; font-weight: 600;
@@ -1078,6 +1088,18 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            if app.configurable && app.state == "installed": Rectangle {
+                                width: 82px; height: 34px; border-radius: 7px; background: Palette.bg;
+                                opacity: root.watch-connected && !root.action-busy ? 1.0 : 0.4;
+                                Text {
+                                    text: "Configure"; color: Palette.accent; font-size: 12px; font-weight: 600;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    enabled: root.watch-connected && !root.action-busy;
+                                    clicked => { root.configure-app(app.uuid, app.name); }
+                                }
+                            }
                             Rectangle {
                                 width: 74px; height: 34px; border-radius: 7px; background: Palette.bg;
                                 opacity: root.watch-connected && !root.action-busy ? 1.0 : 0.4;

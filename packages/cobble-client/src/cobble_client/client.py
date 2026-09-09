@@ -281,6 +281,22 @@ class CobbleClient:
         except DBusError as e:
             raise self._translate(e) from e
 
+    async def request_app_configuration(self, app_uuid: str) -> str:
+        """Start the app's PKJS session and return its configuration page URL."""
+        self._require_iface()
+        try:
+            return str(await self._iface.call_request_app_configuration(app_uuid))
+        except DBusError as e:
+            raise self._translate(e) from e
+
+    async def submit_app_configuration(self, app_uuid: str, response: str) -> None:
+        """Deliver a configuration page response to the active PKJS session."""
+        self._require_iface()
+        try:
+            await self._iface.call_submit_app_configuration(app_uuid, response)
+        except DBusError as e:
+            raise self._translate(e) from e
+
     async def ping_daemon(self) -> bool:
         """Round-trip probe that the daemon is actually servicing calls."""
         self._require_iface()

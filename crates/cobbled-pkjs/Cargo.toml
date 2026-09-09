@@ -1,0 +1,25 @@
+[package]
+name = "cobbled-pkjs"
+version = "0.7.0"
+edition = "2024"
+description = "Isolated PebbleKit JS companion runtime for cobbled."
+
+[[bin]]
+name = "cobbled-pkjs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+cobble-pkjs-protocol = { path = "../cobble-pkjs-protocol" }
+rquickjs = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+uuid = "1"
+
+[dev-dependencies]
+tempfile = "3"

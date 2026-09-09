@@ -13,13 +13,14 @@ use libpebble_ble::{
 };
 use tracing::{debug, info, warn};
 
+use crate::pkjs::PkjsManager;
 use crate::service::{CobbleDaemon, DaemonEvent};
 
 /// BlobDB id of the WatchPrefs database (matches `BlobDBId::WatchPrefs`); the
 /// only DB whose writebacks carry health/settings keys we decode.
 const WATCH_PREFS_DB: u8 = 12;
 
-pub async fn run_supervisor(daemon: CobbleDaemon) {
+pub async fn run_supervisor(daemon: CobbleDaemon, pkjs: PkjsManager) {
     let mut backoff = 2.0f64;
 
     while !daemon.is_stopping() {
@@ -48,7 +49,9 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
         {
             let event_tx = daemon.event_tx();
             let tx = event_tx.clone();
+            let pkjs_for_messages = pkjs.clone();
             pebble.on_app_message(Arc::new(move |uuid, data| {
+                pkjs_for_messages.app_message(uuid.clone(), data.clone());
                 let _ = tx.send(DaemonEvent::AppMessageReceived { uuid, data });
             }));
             let tx = event_tx.clone();
@@ -68,7 +71,14 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
                 let _ = tx.send(DaemonEvent::BatteryChanged(level));
             }) as BatteryHandler);
             let tx = event_tx.clone();
-            pebble.on_app_run_state(Arc::new(move |uuid, running| {
+            let pkjs_for_runs = pkjs.clone();
+            let pebble_for_runs = Arc::downgrade(&pebble);
+            pebble.on_app_run_state(Arc::new(move |uuid: String, running: bool| {
+                if running {
+                    pkjs_for_runs.app_started(uuid.clone(), pebble_for_runs.clone());
+                } else {
+                    pkjs_for_runs.app_stopped(uuid.clone());
+                }
                 let _ = tx.send(DaemonEvent::AppRunState { uuid, running });
             }) as AppRunStateHandler);
             let daemon_for_fetch = daemon.clone();
@@ -215,6 +225,7 @@ pub async fn run_supervisor(daemon: CobbleDaemon) {
         }
 
         daemon.set_disconnected();
+        pkjs.disconnected();
         let _ = pebble.disconnect().await;
 
         if daemon.is_stopping() {

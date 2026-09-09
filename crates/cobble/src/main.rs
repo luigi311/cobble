@@ -1,16 +1,21 @@
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use cobble_client::{
     ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigPatch,
     DeviceConfigSnapshot, DeviceConfigState, DistanceUnits, FieldAvailability, HealthConfigPatch,
     HrmMeasurementInterval, IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
 };
+use serde::{Deserialize, Serialize};
 use slint::{ModelRc, VecModel};
-use tracing::warn;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, info, warn};
 
 slint::include_modules!();
 
@@ -35,6 +40,8 @@ fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(initial_snapshot.clone()));
     let device_revision = Arc::new(Mutex::new(0u64));
     let device_baseline: Arc<Mutex<Option<DeviceConfigSnapshot>>> = Arc::new(Mutex::new(None));
+    let config_webview_cancel = Arc::new(Mutex::new(None));
+    let config_webview_generation = Arc::new(AtomicU64::new(0));
     if let Some(snapshot) = &initial_snapshot {
         apply_daemon_config(&window, snapshot);
     } else {
@@ -1091,6 +1098,106 @@ fn main() -> anyhow::Result<()> {
                 )
             }
         });
+        window.on_configure_app({
+            let rt = rt_handle.clone();
+            let w = w.clone();
+            let config_webview_cancel = Arc::clone(&config_webview_cancel);
+            let config_webview_generation = Arc::clone(&config_webview_generation);
+            move |app_uuid, app_name| {
+                let Some(window) = w.upgrade() else { return };
+                if window.get_action_busy() {
+                    return;
+                }
+                window.set_action_busy(true);
+                window.set_action_error(false);
+                window.set_action_progress(-1);
+                window.set_action_cancellable(true);
+                window.set_action_status(format!("Opening {app_name} settings…").into());
+                drop(window);
+
+                let generation = config_webview_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                *config_webview_cancel.lock().unwrap() = Some((generation, cancel));
+                let weak = w.clone();
+                let app_uuid = app_uuid.to_string();
+                let app_name = app_name.to_string();
+                let active_cancel = Arc::clone(&config_webview_cancel);
+                let active_generation = Arc::clone(&config_webview_generation);
+                rt.spawn(async move {
+                    let mut cancelled = cancelled;
+                    let result = async {
+                        let client = CobbleClient::new().await?;
+                        let url = tokio::select! {
+                            result = client.request_app_configuration(&app_uuid) => result?,
+                            _ = &mut cancelled => return Ok(None),
+                        };
+                        match run_config_webview(&app_uuid, &app_name, &url, cancelled).await {
+                            Ok(ConfigWebviewResult::Submitted(response)) => {
+                                client
+                                    .submit_app_configuration(&app_uuid, &response)
+                                    .await?;
+                                Ok(Some("App settings saved."))
+                            }
+                            Ok(ConfigWebviewResult::Cancelled) => Ok(None),
+                            Err(error) => Err(cobble_client::Error::Failure(error.to_string())),
+                        }
+                    }
+                    .await;
+                    if let Err(error) = &result {
+                        warn!("app configuration failed for {app_uuid}: {error}");
+                    }
+                    if active_generation.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    let mut active = active_cancel.lock().unwrap();
+                    if active.as_ref().is_some_and(|(id, _)| *id == generation) {
+                        active.take();
+                    }
+                    drop(active);
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_action_busy(false);
+                            w.set_action_cancellable(false);
+                            match result {
+                                Ok(Some(message)) => {
+                                    w.set_action_error(false);
+                                    w.set_action_status(message.into());
+                                }
+                                Ok(None) => {
+                                    w.set_action_error(false);
+                                    w.set_action_status("".into());
+                                }
+                                Err(error) => {
+                                    w.set_action_error(true);
+                                    w.set_action_status(
+                                        configuration_error_message(&error.to_string()).into(),
+                                    );
+                                }
+                            }
+                        }
+                    })
+                    .ok();
+                });
+            }
+        });
+        window.on_cancel_app_configuration({
+            let w = w.clone();
+            let config_webview_cancel = Arc::clone(&config_webview_cancel);
+            let config_webview_generation = Arc::clone(&config_webview_generation);
+            move || {
+                let Some((_, cancel)) = config_webview_cancel.lock().unwrap().take() else {
+                    return;
+                };
+                config_webview_generation.fetch_add(1, Ordering::Relaxed);
+                let _ = cancel.send(());
+                if let Some(window) = w.upgrade() {
+                    window.set_action_busy(false);
+                    window.set_action_cancellable(false);
+                    window.set_action_error(false);
+                    window.set_action_status("Configuration cancelled.".into());
+                }
+            }
+        });
         window.on_forget_watch({
             let rt = rt_handle.clone();
             let w = w.clone();
@@ -1122,6 +1229,143 @@ fn main() -> anyhow::Result<()> {
     window.run()?;
     drop(rt);
     Ok(())
+}
+
+const MAX_CONFIG_WEBVIEW_MESSAGE_BYTES: usize = 1024 * 1024;
+
+#[derive(Serialize)]
+struct ConfigWebviewRequest<'a> {
+    uuid: &'a str,
+    title: &'a str,
+    url: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ConfigWebviewResponse {
+    Submitted { response: String },
+    Cancelled,
+    Fatal { message: String },
+}
+
+enum ConfigWebviewResult {
+    Submitted(String),
+    Cancelled,
+}
+
+async fn run_config_webview(
+    app_uuid: &str,
+    app_name: &str,
+    url: &str,
+    mut cancelled: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<ConfigWebviewResult> {
+    let binary = config_webview_binary();
+    info!(
+        uuid = app_uuid,
+        app_name,
+        helper = %binary.display(),
+        "launching app configuration helper"
+    );
+    let request = serde_json::to_vec(&ConfigWebviewRequest {
+        uuid: app_uuid,
+        title: app_name,
+        url,
+    })?;
+    if request.len() > MAX_CONFIG_WEBVIEW_MESSAGE_BYTES {
+        anyhow::bail!("configuration URL exceeds the size limit");
+    }
+
+    let mut child = tokio::process::Command::new(&binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("start configuration webview: {error}"))?;
+    info!(
+        uuid = app_uuid,
+        pid = ?child.id(),
+        helper = %binary.display(),
+        "app configuration helper started"
+    );
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("configuration webview stdin was not piped"))?;
+    tokio::select! {
+        result = stdin.write_all(&request) => result?,
+        _ = &mut cancelled => return cancel_config_webview(&mut child, app_uuid).await,
+    }
+    // The helper reads one JSON request through EOF. Tokio's Unix pipe
+    // implementation treats AsyncWrite::shutdown as a no-op, so retaining
+    // ChildStdin here leaves the helper blocked in read_to_end forever.
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("configuration webview stdout was not piped"))?;
+    let mut capped_stdout = stdout.take(MAX_CONFIG_WEBVIEW_MESSAGE_BYTES as u64 + 1);
+    let mut response = Vec::new();
+    tokio::select! {
+        result = capped_stdout.read_to_end(&mut response) => result?,
+        _ = &mut cancelled => return cancel_config_webview(&mut child, app_uuid).await,
+    };
+    if response.len() > MAX_CONFIG_WEBVIEW_MESSAGE_BYTES {
+        let _ = child.kill().await;
+        anyhow::bail!("configuration webview response exceeds the size limit");
+    }
+    let status = tokio::select! {
+        result = child.wait() => result?,
+        _ = &mut cancelled => return cancel_config_webview(&mut child, app_uuid).await,
+    };
+    debug!(
+        uuid = app_uuid,
+        %status,
+        response_bytes = response.len(),
+        "app configuration helper exited"
+    );
+    if response.is_empty() {
+        if status.code() == Some(127) {
+            anyhow::bail!("configuration helper could not load its WebKitGTK runtime libraries");
+        }
+        anyhow::bail!("configuration webview exited with {status}");
+    }
+
+    match serde_json::from_slice(&response).context("decode configuration webview response")? {
+        ConfigWebviewResponse::Submitted { response } => {
+            Ok(ConfigWebviewResult::Submitted(response))
+        }
+        ConfigWebviewResponse::Cancelled => Ok(ConfigWebviewResult::Cancelled),
+        ConfigWebviewResponse::Fatal { message } => anyhow::bail!(message),
+    }
+}
+
+async fn cancel_config_webview(
+    child: &mut tokio::process::Child,
+    app_uuid: &str,
+) -> anyhow::Result<ConfigWebviewResult> {
+    if let Err(error) = child.kill().await {
+        debug!(uuid = app_uuid, %error, "configuration helper already exited during cancellation");
+    }
+    let _ = child.wait().await;
+    info!(uuid = app_uuid, "app configuration helper cancelled");
+    Ok(ConfigWebviewResult::Cancelled)
+}
+
+fn config_webview_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("COBBLE_CONFIG_WEBVIEW_BIN") {
+        return path.into();
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        let sibling = parent.join("cobble-config-webview");
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from("cobble-config-webview")
 }
 
 /// Run one device action at a time and report only completed outcomes.
@@ -1185,6 +1429,25 @@ fn action_error_message(error: &str) -> String {
     }
 }
 
+fn configuration_error_message(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("not configurable") {
+        "This app does not provide a configuration page.".into()
+    } else if lower.contains("did not provide a configuration url") {
+        "The app did not open a configuration page.".into()
+    } else if lower.contains("start configuration webview") {
+        "The configuration helper is unavailable. Build or install cobble-config-webview.".into()
+    } else if lower.contains("webkitgtk runtime") {
+        "The configuration helper needs the WebKitGTK 4.1 runtime.".into()
+    } else if lower.contains("unsupported configuration url")
+        || lower.contains("invalid configuration url")
+    {
+        "The app returned an invalid configuration page URL.".into()
+    } else {
+        action_error_message(error)
+    }
+}
+
 fn refresh_wellness_status(weak: slint::Weak<AppWindow>, rt: &tokio::runtime::Handle) {
     let rt = rt.clone();
     rt.spawn(async move {
@@ -1245,6 +1508,7 @@ fn apply_installed_apps(window: &AppWindow, apps: Vec<cobble_client::InstalledAp
             platform: app.platform.into(),
             state: app.state.into(),
             watchface: app.watchface,
+            configurable: app.configurable,
         })
         .collect();
     window.set_installed_apps(ModelRc::new(VecModel::from(apps)));
@@ -2427,4 +2691,24 @@ fn to_slint_sessions(sessions: Vec<cobble_db::HealthSessionData>) -> Vec<HealthS
             metrics_label: s.metrics_label.into(),
         })
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_configuration_terminates_the_helper() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+
+        assert!(matches!(
+            cancel_config_webview(&mut child, "test-app").await.unwrap(),
+            ConfigWebviewResult::Cancelled
+        ));
+        assert!(child.try_wait().unwrap().is_some());
+    }
 }
