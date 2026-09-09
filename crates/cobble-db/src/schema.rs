@@ -11,9 +11,26 @@ pub fn initialize_schema(conn: &Connection) -> anyhow::Result<()> {
     )?;
 
     conn.execute_batch(SCHEMA_DDL)?;
+    if !column_exists(conn, "pbw_apps", "configurable")? {
+        conn.execute(
+            "ALTER TABLE pbw_apps ADD COLUMN configurable INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     conn.execute_batch(VIEWS_DDL)?;
 
     Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// PRAGMA statements applied unconditionally on every open.
@@ -180,6 +197,7 @@ CREATE TABLE IF NOT EXISTS pbw_apps (
     name         TEXT    NOT NULL,
     version      TEXT    NOT NULL,
     watchface    INTEGER NOT NULL,
+    configurable INTEGER NOT NULL DEFAULT 0,
     platform     TEXT    NOT NULL,
     state        TEXT    NOT NULL CHECK(state IN ('installing', 'installed', 'failed')),
     pbw          BLOB    NOT NULL,
@@ -203,3 +221,43 @@ FROM health_activity_sessions s
 JOIN session_types t ON s.session_type = t.id
 WHERE s.session_type >= 5;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_configurable_to_existing_pbw_registry() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE pbw_apps (
+                    uuid TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    watchface INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    pbw BLOB NOT NULL,
+                    installed_at INTEGER,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO pbw_apps VALUES
+                    ('01234567-89ab-cdef-0123-456789abcdef', 'Existing', '1.0', 0,
+                     'basalt', 'installed', X'504257', 1, 1);",
+            )
+            .unwrap();
+
+        initialize_schema(&connection).unwrap();
+
+        assert!(column_exists(&connection, "pbw_apps", "configurable").unwrap());
+        let configurable: bool = connection
+            .query_row(
+                "SELECT configurable FROM pbw_apps WHERE name = 'Existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!configurable);
+    }
+}

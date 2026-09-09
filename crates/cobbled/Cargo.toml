@@ -13,6 +13,7 @@ libpebble-ble = { path = "../libpebble-ble" }
 cobble-contracts = { path = "../cobble-contracts" }
 cobble-config = { path = "../cobble-config" }
 cobble-db = { path = "../cobble-db" }
+cobble-pkjs-protocol = { path = "../cobble-pkjs-protocol" }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 zvariant = "5"
 tokio = { version = "1", features = ["full"] }
@@ -33,3 +34,4 @@ fastrand = "2"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ashpd = { version = "0.13", default-features = false, features = ["location", "tokio"] }
+tempfile = "3"

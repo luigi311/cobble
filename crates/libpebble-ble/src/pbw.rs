@@ -19,6 +19,7 @@ pub struct PbwInfo {
     pub name: String,
     pub version: String,
     pub watchface: bool,
+    pub configurable: bool,
     pub platform: WatchType,
 }
 
@@ -41,6 +42,8 @@ struct AppInfo {
     version_label: String,
     #[serde(default)]
     watchapp: WatchApp,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,20 +77,13 @@ struct BinaryHeader {
 
 impl PbwBundle {
     pub fn parse(bytes: &[u8], watch_type: WatchType) -> Result<Self, PebbleError> {
-        if bytes.len() > MAX_PBW_SIZE {
-            return Err(PebbleError::Other(format!(
-                "PBW is too large ({} bytes; maximum is {MAX_PBW_SIZE})",
-                bytes.len()
-            )));
-        }
         if watch_type == WatchType::Unknown {
             return Err(PebbleError::Other(
                 "watch reported an unknown hardware platform".into(),
             ));
         }
 
-        let app_info: AppInfo = serde_json::from_slice(&required_entry(bytes, "appinfo.json")?)
-            .map_err(|error| PebbleError::Other(format!("invalid PBW appinfo.json: {error}")))?;
+        let app_info = parse_app_info(bytes)?;
         let uuid = Uuid::parse_str(&app_info.uuid)
             .map_err(|error| PebbleError::Other(format!("invalid PBW app UUID: {error}")))?;
 
@@ -115,6 +111,10 @@ impl PbwBundle {
                 },
                 version: app_info.version_label,
                 watchface: app_info.watchapp.watchface,
+                configurable: app_info
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "configurable"),
                 platform,
             },
             executable,
@@ -122,6 +122,15 @@ impl PbwBundle {
             worker,
             header,
         })
+    }
+
+    /// Read the app-level configurable capability without selecting a watch
+    /// binary. This is used to backfill metadata for already-retained PBWs.
+    pub fn is_configurable(bytes: &[u8]) -> Result<bool, PebbleError> {
+        Ok(parse_app_info(bytes)?
+            .capabilities
+            .iter()
+            .any(|capability| capability == "configurable"))
     }
 
     /// BlobDB App metadata value matching libpebble3's `AppMetadata` layout.
@@ -144,6 +153,17 @@ impl PbwBundle {
         out[30..30 + name_len].copy_from_slice(&name[..name_len]);
         out
     }
+}
+
+fn parse_app_info(bytes: &[u8]) -> Result<AppInfo, PebbleError> {
+    if bytes.len() > MAX_PBW_SIZE {
+        return Err(PebbleError::Other(format!(
+            "PBW is too large ({} bytes; maximum is {MAX_PBW_SIZE})",
+            bytes.len()
+        )));
+    }
+    serde_json::from_slice(&required_entry(bytes, "appinfo.json")?)
+        .map_err(|error| PebbleError::Other(format!("invalid PBW appinfo.json: {error}")))
 }
 
 fn select_manifest(
@@ -290,7 +310,7 @@ mod tests {
         add_file(
             &mut zip,
             "appinfo.json",
-            br#"{"uuid":"5bfacb04-9449-461e-b3e6-7637d490ed53","shortName":"Variants","versionLabel":"1.0","watchapp":{"watchface":false}}"#,
+            br#"{"uuid":"5bfacb04-9449-461e-b3e6-7637d490ed53","shortName":"Variants","versionLabel":"1.0","watchapp":{"watchface":false},"capabilities":["configurable"]}"#,
         );
         for (prefix, icon) in [("", 11), ("chalk/", 22)] {
             let binary = binary(icon);
@@ -317,6 +337,7 @@ mod tests {
                 name: "Test App".into(),
                 version: "300.7-beta".into(),
                 watchface: false,
+                configurable: false,
                 platform: WatchType::Basalt,
             },
             executable: vec![],
@@ -346,6 +367,7 @@ mod tests {
                 name: "é".repeat(48),
                 version: "1.0".into(),
                 watchface: false,
+                configurable: false,
                 platform: WatchType::Basalt,
             },
             executable: vec![],
@@ -385,8 +407,10 @@ mod tests {
     #[test]
     fn selects_native_variant_before_compatible_fallback() {
         let pbw = variant_pbw();
+        assert!(PbwBundle::is_configurable(&pbw).unwrap());
         let chalk = PbwBundle::parse(&pbw, WatchType::Chalk).unwrap();
         assert_eq!(chalk.info.platform, WatchType::Chalk);
+        assert!(chalk.info.configurable);
         assert_eq!(chalk.header.icon, 22);
 
         let basalt = PbwBundle::parse(&pbw, WatchType::Basalt).unwrap();

@@ -42,10 +42,11 @@ fn pbw_app_record_from_row(row: &Row<'_>) -> rusqlite::Result<PbwAppRecord> {
         name: row.get(1)?,
         version: row.get(2)?,
         watchface: row.get(3)?,
-        platform: row.get(4)?,
-        state: row.get(5)?,
-        installed_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        configurable: row.get(4)?,
+        platform: row.get(5)?,
+        state: row.get(6)?,
+        installed_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -102,12 +103,13 @@ impl AppDb {
     pub fn stage_pbw_app(&self, app: &PbwAppRecord, pbw: &[u8]) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO pbw_apps
-                 (uuid, name, version, watchface, platform, state, pbw, installed_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'installing', ?6, NULL, ?7)
+                 (uuid, name, version, watchface, configurable, platform, state, pbw, installed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'installing', ?7, NULL, ?8)
              ON CONFLICT(uuid) DO UPDATE SET
                  name = excluded.name,
                  version = excluded.version,
                  watchface = excluded.watchface,
+                 configurable = excluded.configurable,
                  platform = excluded.platform,
                  state = 'installing',
                  pbw = excluded.pbw,
@@ -118,6 +120,7 @@ impl AppDb {
                 app.name,
                 app.version,
                 app.watchface,
+                app.configurable,
                 app.platform,
                 pbw,
                 app.updated_at,
@@ -148,7 +151,7 @@ impl AppDb {
 
     pub fn list_pbw_apps(&self) -> anyhow::Result<Vec<PbwAppRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT uuid, name, version, watchface, platform, state, installed_at, updated_at
+            "SELECT uuid, name, version, watchface, configurable, platform, state, installed_at, updated_at
              FROM pbw_apps ORDER BY updated_at DESC, name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], pbw_app_record_from_row)?;
@@ -158,19 +161,26 @@ impl AppDb {
     pub fn load_cached_pbw_app(&self, uuid: &str) -> anyhow::Result<Option<CachedPbwApp>> {
         self.conn
             .query_row(
-                "SELECT uuid, name, version, watchface, platform, state,
+                "SELECT uuid, name, version, watchface, configurable, platform, state,
                         installed_at, updated_at, pbw
                  FROM pbw_apps WHERE uuid = ?1",
                 [uuid],
                 |row| {
                     Ok(CachedPbwApp {
                         app: pbw_app_record_from_row(row)?,
-                        pbw: row.get(8)?,
+                        pbw: row.get(9)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn set_pbw_app_configurable(&self, uuid: &str, configurable: bool) -> anyhow::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE pbw_apps SET configurable = ?2 WHERE uuid = ?1",
+            params![uuid, configurable],
+        )? > 0)
     }
 
     pub fn delete_pbw_app(&self, uuid: &str) -> anyhow::Result<bool> {
@@ -739,6 +749,7 @@ mod tests {
             name: "Example App".into(),
             version: "1.2".into(),
             watchface: false,
+            configurable: true,
             platform: "basalt".into(),
             state: "installing".into(),
             installed_at: None,
@@ -755,6 +766,7 @@ mod tests {
         let cached = db.load_cached_pbw_app(uuid).unwrap().unwrap();
         assert_eq!(cached.pbw, b"first-pbw");
         assert_eq!(cached.app.state, "installing");
+        assert!(cached.app.configurable);
         assert_eq!(cached.app.installed_at, None);
 
         assert_eq!(db.recover_interrupted_pbw_installs().unwrap(), 1);

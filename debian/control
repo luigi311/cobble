@@ -10,6 +10,7 @@ Build-Depends: debhelper-compat (= 13),
                libexpat-dev,
                libfontconfig-dev,
                libfreetype-dev,
+               libwebkit2gtk-4.1-dev,
                libwayland-dev,
                libxkbcommon-dev
 Standards-Version: 4.6.2
@@ -29,7 +30,7 @@ Description: Cobble — Pebble smartwatch BLE daemon
 Package: cobble
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, cobbled,
-         libwayland-client0, libxkbcommon0
+         libwayland-client0, libxkbcommon0, libwebkit2gtk-4.1-0
 Description: Cobble — Pebble smartwatch GUI
  A Slint GUI front-end for the Cobble Pebble daemon. Displays synced health
  data (steps, sleep, workouts), watch info and battery level, and edits the

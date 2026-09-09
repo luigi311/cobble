@@ -198,6 +198,7 @@ export component AppWindow inherits Window {
     callback reset-into-recovery();
     callback create-core-dump();
     callback install-pbw();
+    callback configure-app(string, string);
     callback uninstall-app(string);
     callback forget-watch();
     callback factory-reset();
@@ -1078,6 +1079,18 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            if app.configurable && app.state == "installed": Rectangle {
+                                width: 82px; height: 34px; border-radius: 7px; background: Palette.bg;
+                                opacity: root.watch-connected && !root.action-busy ? 1.0 : 0.4;
+                                Text {
+                                    text: "Configure"; color: Palette.accent; font-size: 12px; font-weight: 600;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    enabled: root.watch-connected && !root.action-busy;
+                                    clicked => { root.configure-app(app.uuid, app.name); }
+                                }
+                            }
                             Rectangle {
                                 width: 74px; height: 34px; border-radius: 7px; background: Palette.bg;
                                 opacity: root.watch-connected && !root.action-busy ? 1.0 : 0.4;

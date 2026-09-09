@@ -78,6 +78,7 @@ pub struct Pebble {
     inner: Arc<Mutex<PebbleInner>>,
     connected_tx: Arc<watch::Sender<bool>>,
     connected_rx: watch::Receiver<bool>,
+    app_message_operation: Arc<AsyncMutex<()>>,
     preference_operation: Arc<AsyncMutex<()>>,
     install_operation: Arc<AsyncMutex<()>>,
 }
@@ -236,6 +237,34 @@ mod connection_state_tests {
         });
         assert!(!inner.lock().unwrap().blobdb_pending.contains_key(&token));
     }
+
+    #[tokio::test]
+    async fn app_message_sends_wait_for_the_active_delivery() {
+        let pebble = Arc::new(Pebble::new("00:00:00:00:00:00", "hci0"));
+        pebble.connected_tx.send(true).unwrap();
+        let sending_pebble = Arc::clone(&pebble);
+        let active_delivery = pebble.app_message_operation.lock().await;
+        let mut send = tokio::spawn(async move {
+            sending_pebble
+                .send_app_message(
+                    "01234567-89ab-cdef-0123-456789abcdef",
+                    HashMap::new(),
+                    false,
+                    0.1,
+                )
+                .await
+        });
+
+        assert!(timeout(Duration::from_millis(10), &mut send).await.is_err());
+        drop(active_delivery);
+        assert!(
+            timeout(Duration::from_secs(1), send)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +295,7 @@ impl Pebble {
             inner: Arc::new(Mutex::new(PebbleInner::new())),
             connected_tx: Arc::new(tx),
             connected_rx: rx,
+            app_message_operation: Arc::new(AsyncMutex::new(())),
             preference_operation: Arc::new(AsyncMutex::new(())),
             install_operation: Arc::new(AsyncMutex::new(())),
         }
@@ -1005,6 +1035,7 @@ impl Pebble {
         wait_ack: bool,
         ack_timeout_secs: f64,
     ) -> Result<u8, PebbleError> {
+        let _operation = self.app_message_operation.lock().await;
         if !self.is_connected() {
             return Err(PebbleError::NotConnected);
         }

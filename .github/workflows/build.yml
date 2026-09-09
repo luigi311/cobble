@@ -46,7 +46,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             debhelper devscripts \
             pkg-config libexpat-dev build-essential \
-            libfontconfig-dev libfreetype-dev
+            libfontconfig-dev libfreetype-dev \
+            libwebkit2gtk-4.1-dev
 
       - name: Verify tag matches changelog version
         if: github.event_name == 'release'

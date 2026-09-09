@@ -28,13 +28,16 @@ mod location;
 mod mpris_monitor;
 mod notification;
 mod notify_monitor;
+mod pkjs;
 mod service;
 mod supervisor;
 mod weather;
 
 use cobble_db::AppDb;
 use integrations::worker;
+use libpebble_ble::PbwBundle;
 use notify_monitor::NotificationMonitor;
+use pkjs::PkjsManager;
 use service::{BUS_NAME, CobbleDaemon, OBJECT_PATH, run_signal_emitter};
 use supervisor::run_supervisor;
 
@@ -93,6 +96,37 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = db.recover_interrupted_pbw_installs() {
                 warn!("could not recover interrupted PBW installs: {error}");
             }
+            match db.list_pbw_apps() {
+                Ok(apps) => {
+                    for app in apps {
+                        let configurable = db
+                            .load_cached_pbw_app(&app.uuid)
+                            .and_then(|cached| {
+                                cached.ok_or_else(|| anyhow::anyhow!("retained PBW disappeared"))
+                            })
+                            .and_then(|cached| {
+                                PbwBundle::is_configurable(&cached.pbw).map_err(Into::into)
+                            });
+                        match configurable {
+                            Ok(configurable) if configurable != app.configurable => {
+                                if let Err(error) =
+                                    db.set_pbw_app_configurable(&app.uuid, configurable)
+                                {
+                                    warn!(
+                                        "could not update PBW metadata for {}: {error}",
+                                        app.uuid
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                warn!("could not refresh PBW metadata for {}: {error}", app.uuid);
+                            }
+                        }
+                    }
+                }
+                Err(error) => warn!("could not list retained PBWs for metadata refresh: {error}"),
+            }
             info!("app DB opened at {}", db_path.display());
             Some(Arc::new(Mutex::new(db)))
         }
@@ -103,6 +137,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let pkjs = PkjsManager::start(
+        app_db.clone(),
+        db_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("pkjs"),
+    );
     let (wellness_revision_tx, wellness_revision_rx) = watch::channel(0_u64);
     let (wellness_sync_tx, wellness_sync_rx) = watch::channel(0_u64);
     let (wellness_shutdown_tx, wellness_shutdown_rx) = watch::channel(false);
@@ -127,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         app_db.clone(),
         music_action_tx,
         phone_action_tx,
+        pkjs.clone(),
     );
 
     // Build the session D-Bus connection.
@@ -177,8 +219,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the reconnect supervisor in the background.
     let daemon_for_super = daemon.clone();
+    let pkjs_for_super = pkjs.clone();
     tokio::spawn(async move {
-        run_supervisor(daemon_for_super).await;
+        run_supervisor(daemon_for_super, pkjs_for_super).await;
     });
 
     // Watch the config file for external changes (manual edits, GUI saves)
@@ -243,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     daemon.set_stopping();
+    pkjs.shutdown().await;
     notify_monitor.stop().await;
 
     Ok(())
