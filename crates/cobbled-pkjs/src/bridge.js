@@ -7,6 +7,7 @@
   const listeners = new Map();
   const appMessageCallbacks = new Map();
   const locationCallbacks = new Map();
+  const httpCallbacks = new Map();
   const timerCallbacks = new Map();
   let nextTimerId = 1;
 
@@ -126,17 +127,45 @@
       this._method = method;
       this._url = url;
       this._async = async !== false;
+      this._headers = {};
+      this.status = 0;
+      this.statusText = "";
+      this.response = "";
+      this.responseText = "";
       this.readyState = 1;
     }
     setRequestHeader(name, value) { this._headers[String(name)] = String(value); }
     send(body) {
-      let complete;
-      try {
-        const result = JSON.parse(__cobbleHttpRequest(
-          String(this._method || "GET"), String(this._url),
-          JSON.stringify(this._headers), body == null ? "" : String(body)
-        ));
-        complete = () => {
+      const method = String(this._method || "GET");
+      const url = String(this._url);
+      const headers = JSON.stringify(this._headers);
+      const requestBody = body == null ? "" : String(body);
+      const completed = (encoded) => {
+        let complete;
+        try {
+          const result = JSON.parse(encoded);
+          complete = () => {
+            this.status = result.status || 0;
+            this.statusText = result.status_text || "";
+            this.response = this.responseText = result.body || "";
+            this.readyState = 4;
+            if (this.onreadystatechange) this.onreadystatechange();
+            if (result.status) { if (this.onload) this.onload(); }
+            else if (this.onerror) this.onerror(new Error(result.error || "HTTP request failed"));
+          };
+        } catch (error) {
+          complete = () => {
+            this.readyState = 4;
+            if (this.onreadystatechange) this.onreadystatechange();
+            if (this.onerror) this.onerror(error);
+          };
+        }
+        setTimeout(complete, 0);
+      };
+
+      if (this._async === false) {
+        try {
+          const result = JSON.parse(__cobbleHttpRequest(method, url, headers, requestBody));
           this.status = result.status || 0;
           this.statusText = result.status_text || "";
           this.response = this.responseText = result.body || "";
@@ -144,16 +173,24 @@
           if (this.onreadystatechange) this.onreadystatechange();
           if (result.status) { if (this.onload) this.onload(); }
           else if (this.onerror) this.onerror(new Error(result.error || "HTTP request failed"));
-        };
-      } catch (error) {
-        complete = () => {
+        } catch (error) {
           this.readyState = 4;
           if (this.onreadystatechange) this.onreadystatechange();
           if (this.onerror) this.onerror(error);
-        };
+        }
+        return;
       }
-      if (this._async === false) complete();
-      else setTimeout(complete, 0);
+
+      const requestId = __cobbleStartHttpRequest(method, url, headers, requestBody);
+      if (requestId < 0) {
+        setTimeout(() => {
+          this.readyState = 4;
+          if (this.onreadystatechange) this.onreadystatechange();
+          if (this.onerror) this.onerror(new Error("HTTP request queue is unavailable"));
+        }, 0);
+        return;
+      }
+      httpCallbacks.set(requestId, completed);
     }
     addEventListener(type, callback) { this[`on${type}`] = callback; }
     getResponseHeader() { return null; }
@@ -161,6 +198,12 @@
   }
   XMLHttpRequest.DONE = 4;
   globalThis.XMLHttpRequest = XMLHttpRequest;
+  globalThis.__cobbleHttpResponse = (requestId, response) => {
+    const callback = httpCallbacks.get(requestId);
+    if (!callback) return;
+    httpCallbacks.delete(requestId);
+    callback(response);
+  };
 
   globalThis.fetch = (url, options) => {
     options = options || {};

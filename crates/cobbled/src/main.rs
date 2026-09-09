@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
 use clap::Parser;
 use tokio::{
     signal,
@@ -273,12 +272,18 @@ fn refresh_pbw_metadata(db: &AppDb) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let mut parse_failures = Vec::new();
     for app in db.list_pbw_apps()? {
         let cached = db
             .load_cached_pbw_app(&app.uuid)?
             .ok_or_else(|| anyhow::anyhow!("retained PBW {} disappeared", app.uuid))?;
-        let configurable = PbwBundle::is_configurable(&cached.pbw)
-            .with_context(|| format!("parse retained PBW {}", app.uuid))?;
+        let configurable = match PbwBundle::is_configurable(&cached.pbw) {
+            Ok(configurable) => configurable,
+            Err(error) => {
+                parse_failures.push(format!("{}: {error}", app.uuid));
+                continue;
+            }
+        };
         if configurable != app.configurable
             && !db.set_pbw_app_configurable(&app.uuid, configurable)?
         {
@@ -287,6 +292,13 @@ fn refresh_pbw_metadata(db: &AppDb) -> anyhow::Result<()> {
                 app.uuid
             );
         }
+    }
+
+    if !parse_failures.is_empty() {
+        anyhow::bail!(
+            "could not parse retained PBW metadata: {}",
+            parse_failures.join("; ")
+        );
     }
 
     db.set_maintenance_version(PBW_METADATA_BACKFILL, PBW_METADATA_BACKFILL_VERSION)
@@ -301,23 +313,26 @@ mod tests {
     fn pbw_metadata_backfill_stays_incomplete_after_parse_failure() {
         let directory = tempfile::tempdir().unwrap();
         let db = AppDb::open(&directory.path().join("app.db")).unwrap();
-        db.stage_pbw_app(
-            &PbwAppRecord {
-                uuid: "01234567-89ab-cdef-0123-456789abcdef".into(),
-                name: "Invalid".into(),
-                version: "1.0".into(),
-                watchface: false,
-                configurable: false,
-                platform: "basalt".into(),
-                state: "installed".into(),
-                installed_at: Some(1),
-                updated_at: 1,
-            },
-            b"not a PBW",
-        )
-        .unwrap();
+        let app = |uuid: &str, updated_at| PbwAppRecord {
+            uuid: uuid.into(),
+            name: "Invalid".into(),
+            version: "1.0".into(),
+            watchface: false,
+            configurable: false,
+            platform: "basalt".into(),
+            state: "installed".into(),
+            installed_at: Some(1),
+            updated_at,
+        };
+        let first_uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let second_uuid = "fedcba98-7654-3210-fedc-ba9876543210";
+        db.stage_pbw_app(&app(first_uuid, 1), b"not a PBW").unwrap();
+        db.stage_pbw_app(&app(second_uuid, 2), b"also not a PBW")
+            .unwrap();
 
-        assert!(refresh_pbw_metadata(&db).is_err());
+        let error = refresh_pbw_metadata(&db).unwrap_err().to_string();
+        assert!(error.contains(first_uuid), "{error}");
+        assert!(error.contains(second_uuid), "{error}");
         assert_eq!(db.maintenance_version(PBW_METADATA_BACKFILL).unwrap(), 0);
     }
 

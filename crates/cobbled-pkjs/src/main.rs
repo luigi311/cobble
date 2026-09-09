@@ -54,6 +54,18 @@ enum Input {
         repeat: bool,
     },
     Cancel(u64),
+    HttpResponse {
+        request_id: u64,
+        response: String,
+    },
+}
+
+struct HostHttpRequest {
+    request_id: u64,
+    method: String,
+    url: String,
+    headers: String,
+    body: String,
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +115,7 @@ fn run(cli: Cli, output: Arc<Mutex<BufWriter<io::Stdout>>>) -> anyhow::Result<()
 
     let (input_tx, input_rx) = mpsc::channel();
     spawn_input_reader(input_tx.clone());
+    let http_requests = spawn_http_worker(input_tx.clone())?;
 
     let runtime = Runtime::new().context("create QuickJS runtime")?;
     runtime.set_memory_limit(64 * 1024 * 1024);
@@ -239,6 +252,33 @@ fn run(cli: Cli, output: Arc<Mutex<BufWriter<io::Stdout>>>) -> anyhow::Result<()
                 },
             ),
         )?;
+        let next_http_request = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        globals.set(
+            "__cobbleStartHttpRequest",
+            Func::from(
+                move |method: String, url: String, headers: String, body: String| -> i64 {
+                    let request_id =
+                        next_http_request.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if request_id > i64::MAX as u64 {
+                        return -1;
+                    }
+                    if http_requests
+                        .try_send(HostHttpRequest {
+                            request_id,
+                            method,
+                            url,
+                            headers,
+                            body,
+                        })
+                        .is_ok()
+                    {
+                        request_id as i64
+                    } else {
+                        -1
+                    }
+                },
+            ),
+        )?;
 
         catch_js(&ctx, ctx.eval::<(), _>(include_str!("bridge.js")))
             .context("evaluate PKJS bridge")?;
@@ -295,6 +335,14 @@ fn run(cli: Cli, output: Arc<Mutex<BufWriter<io::Stdout>>>) -> anyhow::Result<()
                 Input::Cancel(id) => {
                     timers.remove(&id);
                 }
+                Input::HttpResponse {
+                    request_id,
+                    response,
+                } => context.with(|ctx| -> anyhow::Result<()> {
+                    let callback: Function =
+                        catch_js(&ctx, ctx.globals().get("__cobbleHttpResponse"))?;
+                    catch_js(&ctx, callback.call::<_, ()>((request_id, response)))
+                })?,
             }
         }
 
@@ -318,6 +366,36 @@ fn run(cli: Cli, output: Arc<Mutex<BufWriter<io::Stdout>>>) -> anyhow::Result<()
         }
     }
     Ok(())
+}
+
+fn spawn_http_worker(
+    input: mpsc::Sender<Input>,
+) -> anyhow::Result<mpsc::SyncSender<HostHttpRequest>> {
+    let (requests, receiver) = mpsc::sync_channel::<HostHttpRequest>(32);
+    std::thread::Builder::new()
+        .name("pkjs-http".into())
+        .spawn(move || {
+            while let Ok(request) = receiver.recv() {
+                let response = http_request(
+                    &request.method,
+                    &request.url,
+                    &request.headers,
+                    &request.body,
+                )
+                .to_string();
+                if input
+                    .send(Input::HttpResponse {
+                        request_id: request.request_id,
+                        response,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .context("start PKJS HTTP worker")?;
+    Ok(requests)
 }
 
 fn read_pbw(path: &Path) -> anyhow::Result<Option<(String, AppInfo)>> {
@@ -686,6 +764,7 @@ mod tests {
         let runtime = Runtime::new().unwrap();
         let context = Context::full(&runtime).unwrap();
         let scheduled = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(Mutex::new(Vec::new()));
         context.with(|ctx| {
             let globals = ctx.globals();
             globals.set("__cobbleInitialStorage", "{}").unwrap();
@@ -715,17 +794,40 @@ mod tests {
                     }),
                 )
                 .unwrap();
+            let started_requests = Arc::clone(&started);
+            globals
+                .set(
+                    "__cobbleStartHttpRequest",
+                    Func::from(
+                        move |method: String, url: String, headers: String, body: String| -> i64 {
+                            started_requests
+                                .lock()
+                                .unwrap()
+                                .push((method, url, headers, body));
+                            7
+                        },
+                    ),
+                )
+                .unwrap();
             ctx.eval::<(), _>(include_str!("bridge.js")).unwrap();
             ctx.eval::<(), _>(
                 "globalThis.loaded = false;\n\
                  const request = new XMLHttpRequest();\n\
-                 request.open('GET', 'https://example.com');\n\
+                 request.open('GET', 'https://old.example.com');\n\
+                 request.setRequestHeader('Old', 'value');\n\
+                 request.status = 204; request.statusText = 'Old';\n\
+                 request.response = request.responseText = 'old';\n\
+                 request.open('POST', 'https://example.com');\n\
                  request.send();\n\
                  globalThis.stateAfterSend = request.readyState;\n\
+                 globalThis.resetBeforeSend = request.status === 0 &&\n\
+                   request.statusText === '' && request.response === '' &&\n\
+                   request.responseText === '';\n\
                  request.onload = () => { globalThis.loaded = true; };",
             )
             .unwrap();
             assert_eq!(globals.get::<_, i32>("stateAfterSend").unwrap(), 1);
+            assert!(globals.get::<_, bool>("resetBeforeSend").unwrap());
             assert!(!globals.get::<_, bool>("loaded").unwrap());
             ctx.eval::<(), _>(
                 "globalThis.syncLoaded = false;\n\
@@ -738,6 +840,26 @@ mod tests {
             assert!(globals.get::<_, bool>("syncLoaded").unwrap());
         });
 
+        assert_eq!(
+            *started.lock().unwrap(),
+            vec![(
+                "POST".into(),
+                "https://example.com".into(),
+                "{}".into(),
+                "".into()
+            )]
+        );
+        assert!(scheduled.lock().unwrap().is_empty());
+        context.with(|ctx| {
+            ctx.globals()
+                .get::<_, Function>("__cobbleHttpResponse")
+                .unwrap()
+                .call::<_, ()>((
+                    7_u64,
+                    r#"{"ok":true,"status":200,"status_text":"OK","body":"done"}"#,
+                ))
+                .unwrap();
+        });
         let timer_id = scheduled.lock().unwrap()[0];
         context.with(|ctx| {
             ctx.globals()
