@@ -199,12 +199,14 @@ export component AppWindow inherits Window {
     callback create-core-dump();
     callback install-pbw();
     callback configure-app(string, string);
+    callback cancel-app-configuration();
     callback uninstall-app(string);
     callback forget-watch();
     callback factory-reset();
     in-out property <string> action-status: "";
     in-out property <bool> action-error: false;
     in-out property <int> action-progress: -1;
+    in-out property <bool> action-cancellable: false;
     callback workout-period-changed(int);
     callback workout-go-back();
     callback workout-go-forward();
@@ -1049,6 +1051,13 @@ export component AppWindow inherits Window {
                                 animate width { duration: 120ms; easing: ease-in-out; }
                             }
                         }
+                    }
+
+                    if root.action-cancellable: ActionButton {
+                        label: "Cancel Configuration";
+                        danger: true;
+                        enabled: root.action-busy;
+                        clicked => { root.cancel-app-configuration(); }
                     }
 
                     Text {

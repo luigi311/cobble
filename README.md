@@ -204,9 +204,10 @@ uv run pytest
 # Build the release binary
 cargo build --release
 
-# Copy both daemon binaries somewhere on your PATH
+# Copy the daemon and helper binaries somewhere on your PATH
 sudo install -m755 target/release/cobbled /usr/local/bin/
 sudo install -m755 target/release/cobbled-pkjs /usr/local/bin/
+sudo install -m755 target/release/cobble-config-webview /usr/local/bin/
 
 # Or build the .deb (requires cargo-deb or debhelper setup)
 dpkg-buildpackage -us -uc -b

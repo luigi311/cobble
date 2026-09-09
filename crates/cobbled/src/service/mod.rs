@@ -1477,19 +1477,19 @@ impl CobbleDaemon {
     }
 
     async fn request_app_configuration(&self, app_uuid: String) -> Result<String, DaemonError> {
-        let cached = self
+        let app = self
             .app_db()?
             .lock()
             .unwrap()
-            .load_cached_pbw_app(&app_uuid)
+            .load_pbw_app_record(&app_uuid)
             .map_err(|error| DaemonError::Failed(format!("load retained PBW: {error}")))?
             .ok_or_else(|| DaemonError::Failed(format!("app {app_uuid} is not retained")))?;
-        if cached.app.state != "installed" {
+        if app.state != "installed" {
             return Err(DaemonError::Failed(format!(
                 "app {app_uuid} is not fully installed"
             )));
         }
-        if !cached.app.configurable {
+        if !app.configurable {
             return Err(DaemonError::Failed(format!(
                 "app {app_uuid} is not configurable"
             )));

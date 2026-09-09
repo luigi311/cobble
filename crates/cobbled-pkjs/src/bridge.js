@@ -122,25 +122,38 @@
       this.onerror = null;
       this._headers = {};
     }
-    open(method, url) { this._method = method; this._url = url; this.readyState = 1; }
+    open(method, url, async = true) {
+      this._method = method;
+      this._url = url;
+      this._async = async !== false;
+      this.readyState = 1;
+    }
     setRequestHeader(name, value) { this._headers[String(name)] = String(value); }
     send(body) {
+      let complete;
       try {
         const result = JSON.parse(__cobbleHttpRequest(
           String(this._method || "GET"), String(this._url),
           JSON.stringify(this._headers), body == null ? "" : String(body)
         ));
-        this.status = result.status || 0;
-        this.statusText = result.status_text || "";
-        this.response = this.responseText = result.body || "";
-        this.readyState = 4;
-        if (this.onreadystatechange) this.onreadystatechange();
-        if (result.status) { if (this.onload) this.onload(); }
-        else if (this.onerror) this.onerror(new Error(result.error || "HTTP request failed"));
+        complete = () => {
+          this.status = result.status || 0;
+          this.statusText = result.status_text || "";
+          this.response = this.responseText = result.body || "";
+          this.readyState = 4;
+          if (this.onreadystatechange) this.onreadystatechange();
+          if (result.status) { if (this.onload) this.onload(); }
+          else if (this.onerror) this.onerror(new Error(result.error || "HTTP request failed"));
+        };
       } catch (error) {
-        this.readyState = 4;
-        if (this.onerror) this.onerror(error);
+        complete = () => {
+          this.readyState = 4;
+          if (this.onreadystatechange) this.onreadystatechange();
+          if (this.onerror) this.onerror(error);
+        };
       }
+      if (this._async === false) complete();
+      else setTimeout(complete, 0);
     }
     addEventListener(type, callback) { this[`on${type}`] = callback; }
     getResponseHeader() { return null; }

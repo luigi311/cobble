@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::Parser;
 use tokio::{
     signal,
@@ -17,6 +18,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+const PBW_METADATA_BACKFILL: &str = "pbw_metadata";
+const PBW_METADATA_BACKFILL_VERSION: i64 = 1;
 
 mod call_monitor;
 mod codec;
@@ -96,36 +100,8 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = db.recover_interrupted_pbw_installs() {
                 warn!("could not recover interrupted PBW installs: {error}");
             }
-            match db.list_pbw_apps() {
-                Ok(apps) => {
-                    for app in apps {
-                        let configurable = db
-                            .load_cached_pbw_app(&app.uuid)
-                            .and_then(|cached| {
-                                cached.ok_or_else(|| anyhow::anyhow!("retained PBW disappeared"))
-                            })
-                            .and_then(|cached| {
-                                PbwBundle::is_configurable(&cached.pbw).map_err(Into::into)
-                            });
-                        match configurable {
-                            Ok(configurable) if configurable != app.configurable => {
-                                if let Err(error) =
-                                    db.set_pbw_app_configurable(&app.uuid, configurable)
-                                {
-                                    warn!(
-                                        "could not update PBW metadata for {}: {error}",
-                                        app.uuid
-                                    );
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                warn!("could not refresh PBW metadata for {}: {error}", app.uuid);
-                            }
-                        }
-                    }
-                }
-                Err(error) => warn!("could not list retained PBWs for metadata refresh: {error}"),
+            if let Err(error) = refresh_pbw_metadata(&db) {
+                warn!("could not refresh retained PBW metadata: {error:#}");
             }
             info!("app DB opened at {}", db_path.display());
             Some(Arc::new(Mutex::new(db)))
@@ -290,4 +266,86 @@ async fn main() -> anyhow::Result<()> {
     notify_monitor.stop().await;
 
     Ok(())
+}
+
+fn refresh_pbw_metadata(db: &AppDb) -> anyhow::Result<()> {
+    if db.maintenance_version(PBW_METADATA_BACKFILL)? >= PBW_METADATA_BACKFILL_VERSION {
+        return Ok(());
+    }
+
+    for app in db.list_pbw_apps()? {
+        let cached = db
+            .load_cached_pbw_app(&app.uuid)?
+            .ok_or_else(|| anyhow::anyhow!("retained PBW {} disappeared", app.uuid))?;
+        let configurable = PbwBundle::is_configurable(&cached.pbw)
+            .with_context(|| format!("parse retained PBW {}", app.uuid))?;
+        if configurable != app.configurable
+            && !db.set_pbw_app_configurable(&app.uuid, configurable)?
+        {
+            anyhow::bail!(
+                "retained PBW {} disappeared during metadata update",
+                app.uuid
+            );
+        }
+    }
+
+    db.set_maintenance_version(PBW_METADATA_BACKFILL, PBW_METADATA_BACKFILL_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cobble_db::PbwAppRecord;
+
+    #[test]
+    fn pbw_metadata_backfill_stays_incomplete_after_parse_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = AppDb::open(&directory.path().join("app.db")).unwrap();
+        db.stage_pbw_app(
+            &PbwAppRecord {
+                uuid: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                name: "Invalid".into(),
+                version: "1.0".into(),
+                watchface: false,
+                configurable: false,
+                platform: "basalt".into(),
+                state: "installed".into(),
+                installed_at: Some(1),
+                updated_at: 1,
+            },
+            b"not a PBW",
+        )
+        .unwrap();
+
+        assert!(refresh_pbw_metadata(&db).is_err());
+        assert_eq!(db.maintenance_version(PBW_METADATA_BACKFILL).unwrap(), 0);
+    }
+
+    #[test]
+    fn completed_pbw_metadata_backfill_skips_future_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = AppDb::open(&directory.path().join("app.db")).unwrap();
+        refresh_pbw_metadata(&db).unwrap();
+        assert_eq!(
+            db.maintenance_version(PBW_METADATA_BACKFILL).unwrap(),
+            PBW_METADATA_BACKFILL_VERSION
+        );
+        db.stage_pbw_app(
+            &PbwAppRecord {
+                uuid: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                name: "Invalid".into(),
+                version: "1.0".into(),
+                watchface: false,
+                configurable: false,
+                platform: "basalt".into(),
+                state: "installed".into(),
+                installed_at: Some(1),
+                updated_at: 1,
+            },
+            b"not a PBW",
+        )
+        .unwrap();
+
+        refresh_pbw_metadata(&db).unwrap();
+    }
 }

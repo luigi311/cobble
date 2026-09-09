@@ -25,7 +25,12 @@ use wry::{
 };
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_CONFIG_WEBVIEW_MESSAGE_BYTES: usize = 1024 * 1024;
+// A JSON string byte can expand to six bytes (for example, `\u0000`). Keep
+// enough room for the submitted-result wrapper and its trailing newline.
+const SUBMITTED_RESPONSE_OVERHEAD_BYTES: usize = 35;
+const MAX_RESPONSE_BYTES: usize =
+    (MAX_CONFIG_WEBVIEW_MESSAGE_BYTES - SUBMITTED_RESPONSE_OVERHEAD_BYTES) / 6;
 
 #[derive(Deserialize)]
 struct ConfigRequest {
@@ -353,5 +358,22 @@ mod tests {
             "https://example.com/config?<redacted>#<redacted>"
         );
         assert_eq!(describe_url("not a URL"), "<invalid URL>");
+    }
+
+    #[test]
+    fn maximum_response_fits_parent_message_limit_after_json_escaping() {
+        let result = ConfigResult::Submitted {
+            response: "\0".repeat(MAX_RESPONSE_BYTES),
+        };
+        let mut encoded = serde_json::to_vec(&result).unwrap();
+        encoded.push(b'\n');
+        assert!(encoded.len() <= MAX_CONFIG_WEBVIEW_MESSAGE_BYTES);
+
+        let oversized = ConfigResult::Submitted {
+            response: "\0".repeat(MAX_RESPONSE_BYTES + 1),
+        };
+        let mut encoded = serde_json::to_vec(&oversized).unwrap();
+        encoded.push(b'\n');
+        assert!(encoded.len() > MAX_CONFIG_WEBVIEW_MESSAGE_BYTES);
     }
 }

@@ -18,7 +18,7 @@ use libpebble_ble::{AppMessageValue, Pebble};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -79,8 +79,22 @@ struct ActiveSession {
     uuid: String,
     generation: u64,
     pebble: Weak<Pebble>,
-    commands: mpsc::Sender<RuntimeCommand>,
+    commands: mpsc::Sender<SessionCommand>,
     task: JoinHandle<()>,
+}
+
+struct SessionCommand {
+    command: RuntimeCommand,
+    written: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+impl From<RuntimeCommand> for SessionCommand {
+    fn from(command: RuntimeCommand) -> Self {
+        Self {
+            command,
+            written: None,
+        }
+    }
 }
 
 struct PendingConfiguration {
@@ -222,7 +236,7 @@ async fn run_manager(
                     ManagerCommand::AppMessage { uuid, data } => {
                         if let Some(session) = active.as_ref().filter(|session| session.uuid == uuid) {
                             let data = data.into_iter().map(|(key, value)| (key.to_string(), app_value_to_json(value))).collect();
-                            if session.commands.try_send(RuntimeCommand::AppMessage { data }).is_err() {
+                            if session.commands.try_send(RuntimeCommand::AppMessage { data }.into()).is_err() {
                                 warn!("PKJS helper command queue is unavailable for {uuid}");
                             }
                         }
@@ -257,7 +271,7 @@ async fn run_manager(
                             generation: session_generation,
                             done,
                         });
-                        if session.commands.try_send(RuntimeCommand::ShowConfiguration).is_err() {
+                        if session.commands.try_send(RuntimeCommand::ShowConfiguration.into()).is_err() {
                             fail_pending_configuration(
                                 &mut pending_configuration,
                                 "PKJS helper command queue is unavailable",
@@ -275,13 +289,23 @@ async fn run_manager(
                         }
                     }
                     ManagerCommand::SubmitConfiguration { uuid, response, done } => {
-                        let result = match active.as_ref().filter(|session| session.uuid == uuid) {
-                            Some(session) => session.commands.try_send(
-                                RuntimeCommand::WebviewClosed { response },
-                            ).map_err(|_| "PKJS helper command queue is unavailable".to_string()),
-                            None => Err("the configured PKJS session is no longer active".into()),
-                        };
-                        let _ = done.send(result);
+                        if let Some(session) = active.as_ref().filter(|session| session.uuid == uuid) {
+                            let command = SessionCommand {
+                                command: RuntimeCommand::WebviewClosed { response },
+                                written: Some(done),
+                            };
+                            if let Err(error) = session.commands.try_send(command)
+                                && let Some(done) = error.into_inner().written
+                            {
+                                let _ = done.send(Err(
+                                    "PKJS helper command queue is unavailable".into(),
+                                ));
+                            }
+                        } else {
+                            let _ = done.send(Err(
+                                "the configured PKJS session is no longer active".into(),
+                            ));
+                        }
                     }
                     ManagerCommand::Disconnected => {
                         fail_pending_configuration(
@@ -385,7 +409,7 @@ fn fail_pending_configuration(pending: &mut Option<PendingConfiguration>, messag
 
 async fn stop_active(active: &mut Option<ActiveSession>) {
     if let Some(session) = active.take() {
-        let _ = session.commands.send(RuntimeCommand::Shutdown).await;
+        let _ = session.commands.send(RuntimeCommand::Shutdown.into()).await;
         if let Err(error) = session.task.await {
             warn!("PKJS session task failed during shutdown: {error}");
         }
@@ -417,10 +441,13 @@ fn handle_runtime_event(
                     }
                 };
                 let _ = commands
-                    .send(RuntimeCommand::AppMessageResult {
-                        request_id,
-                        success,
-                    })
+                    .send(
+                        RuntimeCommand::AppMessageResult {
+                            request_id,
+                            success,
+                        }
+                        .into(),
+                    )
                     .await;
             });
         }
@@ -441,7 +468,7 @@ fn handle_runtime_event(
                         error: Some(error.to_string()),
                     },
                 };
-                let _ = commands.send(command).await;
+                let _ = commands.send(command.into()).await;
             });
         }
         RuntimeEvent::OpenUrl { url } => {
@@ -480,7 +507,7 @@ async fn spawn_session(
     pbw: &[u8],
     storage_dir: &Path,
     events: mpsc::Sender<SessionEvent>,
-) -> anyhow::Result<(mpsc::Sender<RuntimeCommand>, JoinHandle<()>)> {
+) -> anyhow::Result<(mpsc::Sender<SessionCommand>, JoinHandle<()>)> {
     let temporary = tempfile::Builder::new().prefix("cobbled-pkjs-").tempdir()?;
     let pbw_path = temporary.path().join("app.pbw");
     tokio::fs::write(&pbw_path, pbw).await?;
@@ -527,16 +554,16 @@ async fn run_session(
     mut child: Child,
     mut stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
-    mut commands: mpsc::Receiver<RuntimeCommand>,
+    mut commands: mpsc::Receiver<SessionCommand>,
     events: mpsc::Sender<SessionEvent>,
     _temporary: TempDir,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut stdout = BufReader::new(stdout);
     let mut report_exit = true;
     let result = loop {
         tokio::select! {
-            line = lines.next_line() => match line {
-                Ok(Some(line)) if line.len() <= MAX_IPC_LINE_BYTES => {
+            line = read_capped_line(&mut stdout) => match line {
+                Ok(CappedLine::Line(line)) => {
                     match serde_json::from_str(&line) {
                         Ok(event) => {
                             if events.try_send(SessionEvent::Protocol { generation, event }).is_err() {
@@ -547,23 +574,32 @@ async fn run_session(
                         Err(error) => warn!("invalid PKJS event for {uuid}: {error}"),
                     }
                 }
-                Ok(Some(_)) => {
+                Ok(CappedLine::Oversized) => {
                     warn!("PKJS event for {uuid} exceeded the IPC limit");
                     break terminate_child(&mut child).await;
                 }
-                Ok(None) => break child.wait().await.map_err(Into::into),
+                Ok(CappedLine::Eof) => break child.wait().await.map_err(Into::into),
                 Err(error) => break Err(error.into()),
             },
             command = commands.recv() => {
-                let shutdown = matches!(command, Some(RuntimeCommand::Shutdown) | None);
+                let shutdown = command.as_ref().is_none_or(|command| {
+                    matches!(command.command, RuntimeCommand::Shutdown)
+                });
                 if shutdown {
                     // The manager already removed and will join this session.
                     report_exit = false;
                 }
                 if let Some(command) = command {
-                    match write_command(&mut stdin, &command).await {
-                        Ok(()) => {}
-                        Err(error) => break Err(error),
+                    let result = write_command(&mut stdin, &command.command).await;
+                    if let Some(done) = command.written {
+                        let acknowledgement = result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = done.send(acknowledgement);
+                    }
+                    if let Err(error) = result {
+                        break Err(error);
                     }
                 }
                 if shutdown {
@@ -583,6 +619,40 @@ async fn run_session(
     }
 }
 
+enum CappedLine {
+    Line(String),
+    Eof,
+    Oversized,
+}
+
+async fn read_capped_line<R>(reader: &mut R) -> std::io::Result<CappedLine>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(MAX_IPC_LINE_BYTES.min(8192));
+    let mut capped = (&mut *reader).take((MAX_IPC_LINE_BYTES + 1) as u64);
+    let read = capped.read_until(b'\n', &mut bytes).await?;
+    if read == 0 {
+        return Ok(CappedLine::Eof);
+    }
+
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    } else if bytes.len() > MAX_IPC_LINE_BYTES {
+        return Ok(CappedLine::Oversized);
+    }
+    if bytes.len() > MAX_IPC_LINE_BYTES {
+        return Ok(CappedLine::Oversized);
+    }
+
+    String::from_utf8(bytes)
+        .map(CappedLine::Line)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 async fn terminate_child(child: &mut Child) -> anyhow::Result<std::process::ExitStatus> {
     child.kill().await?;
     Ok(child.wait().await?)
@@ -592,14 +662,19 @@ async fn write_command(
     stdin: &mut tokio::process::ChildStdin,
     command: &RuntimeCommand,
 ) -> anyhow::Result<()> {
-    let encoded = serde_json::to_vec(command)?;
-    if encoded.len() > MAX_IPC_LINE_BYTES {
-        anyhow::bail!("PKJS command exceeds the IPC limit");
-    }
+    let encoded = encode_command(command)?;
     stdin.write_all(&encoded).await?;
     stdin.write_all(b"\n").await?;
     stdin.flush().await?;
     Ok(())
+}
+
+fn encode_command(command: &RuntimeCommand) -> anyhow::Result<Vec<u8>> {
+    let encoded = serde_json::to_vec(command)?;
+    if encoded.len() > MAX_IPC_LINE_BYTES {
+        anyhow::bail!("PKJS command exceeds the IPC limit");
+    }
+    Ok(encoded)
 }
 
 fn helper_binary() -> PathBuf {
@@ -698,5 +773,38 @@ mod tests {
     fn app_message_conversion_rejects_fractional_numbers() {
         let values = BTreeMap::from([("1".into(), Value::from(1.5))]);
         assert!(json_to_app_message(values).is_err());
+    }
+
+    #[tokio::test]
+    async fn capped_line_reader_keeps_limits_per_line() {
+        let input = b"first\nsecond\r\n";
+        let mut reader = BufReader::new(&input[..]);
+        assert!(matches!(
+            read_capped_line(&mut reader).await.unwrap(),
+            CappedLine::Line(line) if line == "first"
+        ));
+        assert!(matches!(
+            read_capped_line(&mut reader).await.unwrap(),
+            CappedLine::Line(line) if line == "second"
+        ));
+        assert!(matches!(
+            read_capped_line(&mut reader).await.unwrap(),
+            CappedLine::Eof
+        ));
+
+        let oversized = vec![b'x'; MAX_IPC_LINE_BYTES + 1];
+        let mut reader = BufReader::new(&oversized[..]);
+        assert!(matches!(
+            read_capped_line(&mut reader).await.unwrap(),
+            CappedLine::Oversized
+        ));
+    }
+
+    #[test]
+    fn serialized_configuration_command_must_fit_ipc_limit() {
+        let command = RuntimeCommand::WebviewClosed {
+            response: "\0".repeat(MAX_IPC_LINE_BYTES),
+        };
+        assert!(encode_command(&command).is_err());
     }
 }

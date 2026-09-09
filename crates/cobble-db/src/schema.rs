@@ -205,6 +205,12 @@ CREATE TABLE IF NOT EXISTS pbw_apps (
     updated_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pbw_apps_updated ON pbw_apps(updated_at DESC);
+
+-- Durable completion markers for idempotent compatibility backfills.
+CREATE TABLE IF NOT EXISTS maintenance_versions (
+    name    TEXT PRIMARY KEY,
+    version INTEGER NOT NULL
+);
 "#;
 
 pub const VIEWS_DDL: &str = r#"

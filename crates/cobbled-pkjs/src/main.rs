@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
@@ -230,15 +231,11 @@ fn run(cli: Cli, output: Arc<Mutex<BufWriter<io::Stdout>>>) -> anyhow::Result<()
             }),
         )?;
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("create HTTP client")?;
         globals.set(
             "__cobbleHttpRequest",
             Func::from(
                 move |method: String, url: String, headers: String, body: String| -> String {
-                    http_request(&client, &method, &url, &headers, &body).to_string()
+                    http_request(&method, &url, &headers, &body).to_string()
                 },
             ),
         )?;
@@ -475,36 +472,59 @@ fn drain_jobs(runtime: &Runtime) -> anyhow::Result<()> {
             let message = error.0.with(|ctx| {
                 rquickjs::CaughtError::from_error(&ctx, rquickjs::Error::Exception).to_string()
             });
-            bail!("JavaScript promise job failed: {message}");
+            warn!("JavaScript promise job failed: {message}");
         }
     }
     Ok(())
 }
 
-fn http_request(
-    client: &reqwest::blocking::Client,
-    method: &str,
-    url: &str,
-    headers: &str,
-    body: &str,
-) -> Value {
+fn http_request(method: &str, url: &str, headers: &str, body: &str) -> Value {
     let result = (|| -> anyhow::Result<Value> {
-        let method =
+        let mut method =
             reqwest::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
-        let parsed = reqwest::Url::parse(url).context("invalid URL")?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            bail!("only HTTP and HTTPS URLs are allowed");
-        }
-        let mut request = client.request(method, parsed);
+        let mut current_url = reqwest::Url::parse(url).context("invalid URL")?;
         let headers: HashMap<String, String> =
             serde_json::from_str(headers).context("invalid request headers")?;
-        for (name, value) in headers {
-            request = request.header(name, value);
+        let mut request_body = body.to_owned();
+        let mut response = None;
+
+        for redirect_count in 0..=10 {
+            let client = client_for_url(&current_url)?;
+            let mut request = client.request(method.clone(), current_url.clone());
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+            if !request_body.is_empty() {
+                request = request.body(request_body.clone());
+            }
+            let next_response = request.send().context("HTTP request failed")?;
+            if !next_response.status().is_redirection() {
+                response = Some(next_response);
+                break;
+            }
+            if redirect_count == 10 {
+                bail!("HTTP redirect limit exceeded");
+            }
+            let location = next_response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("HTTP redirect did not include a location")?
+                .to_str()
+                .context("HTTP redirect location is not valid text")?;
+            current_url = current_url
+                .join(location)
+                .context("invalid HTTP redirect location")?;
+            if next_response.status() == reqwest::StatusCode::SEE_OTHER
+                || ((next_response.status() == reqwest::StatusCode::MOVED_PERMANENTLY
+                    || next_response.status() == reqwest::StatusCode::FOUND)
+                    && method == reqwest::Method::POST)
+            {
+                method = reqwest::Method::GET;
+                request_body.clear();
+            }
         }
-        if !body.is_empty() {
-            request = request.body(body.to_owned());
-        }
-        let mut response = request.send().context("HTTP request failed")?;
+
+        let mut response = response.context("HTTP request did not produce a response")?;
         let status = response.status();
         let mut bytes = Vec::new();
         response
@@ -523,6 +543,72 @@ fn http_request(
     })();
     result
         .unwrap_or_else(|error| json!({ "ok": false, "status": 0, "error": format!("{error:#}") }))
+}
+
+fn client_for_url(url: &reqwest::Url) -> anyhow::Result<reqwest::blocking::Client> {
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("only HTTP and HTTPS URLs are allowed");
+    }
+    let host = url.host_str().context("URL is missing a hostname")?;
+    let resolution_host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = url
+        .port_or_known_default()
+        .context("URL is missing a port")?;
+    let addresses: Vec<SocketAddr> = (resolution_host, port)
+        .to_socket_addrs()
+        .context("resolve URL hostname")?
+        .collect();
+    if addresses.is_empty() {
+        bail!("URL hostname did not resolve");
+    }
+    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        bail!("URL hostname resolves to a non-public address");
+    }
+
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(resolution_host, &addresses)
+        .build()
+        .context("create HTTP client")
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return is_public_ipv4(ip);
+            }
+            is_public_ipv6(ip)
+        }
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // Globally routable IPv6 unicast space is currently 2000::/3. Keep the
+    // allow-list conservative and exclude the documentation range.
+    (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
 #[cfg(test)]
@@ -548,5 +634,118 @@ mod tests {
     fn app_message_rejects_nested_values() {
         let keys = HashMap::new();
         assert!(decode_app_message(r#"{"1":{"nested":true}}"#, &keys).is_err());
+    }
+
+    #[test]
+    fn rejects_non_public_http_targets() {
+        for address in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(!is_public_ip(address.parse().unwrap()), "{address}");
+        }
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(is_public_ip(address.parse().unwrap()), "{address}");
+        }
+        assert!(client_for_url(&reqwest::Url::parse("http://127.0.0.1/").unwrap()).is_err());
+        assert!(client_for_url(&reqwest::Url::parse("file:///etc/passwd").unwrap()).is_err());
+    }
+
+    #[test]
+    fn promise_job_failure_does_not_stop_later_jobs() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.completed = false;\n\
+                 Promise.resolve().then(() => { throw new Error('expected'); });\n\
+                 Promise.resolve().then(() => { globalThis.completed = true; });",
+            )
+            .unwrap();
+        });
+
+        drain_jobs(&runtime).unwrap();
+        context.with(|ctx| {
+            assert!(ctx.globals().get::<_, bool>("completed").unwrap());
+        });
+    }
+
+    #[test]
+    fn asynchronous_xhr_defers_completion_and_uses_late_handler() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let scheduled = Arc::new(Mutex::new(Vec::new()));
+        context.with(|ctx| {
+            let globals = ctx.globals();
+            globals.set("__cobbleInitialStorage", "{}").unwrap();
+            globals
+                .set("__cobbleLog", Func::from(|_: String, _: String| {}))
+                .unwrap();
+            globals
+                .set("__cobbleSaveStorage", Func::from(|_: String| {}))
+                .unwrap();
+            let scheduled_ids = Arc::clone(&scheduled);
+            globals
+                .set(
+                    "__cobbleScheduleTimer",
+                    Func::from(move |id: u64, _: f64, _: bool| {
+                        scheduled_ids.lock().unwrap().push(id);
+                    }),
+                )
+                .unwrap();
+            globals
+                .set("__cobbleCancelTimer", Func::from(|_: u64| {}))
+                .unwrap();
+            globals
+                .set(
+                    "__cobbleHttpRequest",
+                    Func::from(|_: String, _: String, _: String, _: String| {
+                        r#"{"ok":true,"status":200,"status_text":"OK","body":"done"}"#.to_string()
+                    }),
+                )
+                .unwrap();
+            ctx.eval::<(), _>(include_str!("bridge.js")).unwrap();
+            ctx.eval::<(), _>(
+                "globalThis.loaded = false;\n\
+                 const request = new XMLHttpRequest();\n\
+                 request.open('GET', 'https://example.com');\n\
+                 request.send();\n\
+                 globalThis.stateAfterSend = request.readyState;\n\
+                 request.onload = () => { globalThis.loaded = true; };",
+            )
+            .unwrap();
+            assert_eq!(globals.get::<_, i32>("stateAfterSend").unwrap(), 1);
+            assert!(!globals.get::<_, bool>("loaded").unwrap());
+            ctx.eval::<(), _>(
+                "globalThis.syncLoaded = false;\n\
+                 const syncRequest = new XMLHttpRequest();\n\
+                 syncRequest.open('GET', 'https://example.com', false);\n\
+                 syncRequest.onload = () => { globalThis.syncLoaded = true; };\n\
+                 syncRequest.send();",
+            )
+            .unwrap();
+            assert!(globals.get::<_, bool>("syncLoaded").unwrap());
+        });
+
+        let timer_id = scheduled.lock().unwrap()[0];
+        context.with(|ctx| {
+            ctx.globals()
+                .get::<_, Function>("__cobbleFireTimer")
+                .unwrap()
+                .call::<_, ()>((timer_id,))
+                .unwrap();
+            assert!(ctx.globals().get::<_, bool>("loaded").unwrap());
+        });
     }
 }

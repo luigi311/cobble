@@ -158,6 +158,19 @@ impl AppDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn load_pbw_app_record(&self, uuid: &str) -> anyhow::Result<Option<PbwAppRecord>> {
+        self.conn
+            .query_row(
+                "SELECT uuid, name, version, watchface, configurable, platform, state,
+                        installed_at, updated_at
+                 FROM pbw_apps WHERE uuid = ?1",
+                [uuid],
+                pbw_app_record_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn load_cached_pbw_app(&self, uuid: &str) -> anyhow::Result<Option<CachedPbwApp>> {
         self.conn
             .query_row(
@@ -181,6 +194,27 @@ impl AppDb {
             "UPDATE pbw_apps SET configurable = ?2 WHERE uuid = ?1",
             params![uuid, configurable],
         )? > 0)
+    }
+
+    pub fn maintenance_version(&self, name: &str) -> anyhow::Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT version FROM maintenance_versions WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    pub fn set_maintenance_version(&self, name: &str, version: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO maintenance_versions (name, version) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET version = excluded.version",
+            params![name, version],
+        )?;
+        Ok(())
     }
 
     pub fn delete_pbw_app(&self, uuid: &str) -> anyhow::Result<bool> {
@@ -765,6 +799,10 @@ mod tests {
 
         let cached = db.load_cached_pbw_app(uuid).unwrap().unwrap();
         assert_eq!(cached.pbw, b"first-pbw");
+        assert_eq!(
+            db.load_pbw_app_record(uuid).unwrap(),
+            Some(cached.app.clone())
+        );
         assert_eq!(cached.app.state, "installing");
         assert!(cached.app.configurable);
         assert_eq!(cached.app.installed_at, None);
@@ -793,6 +831,14 @@ mod tests {
         assert!(db.delete_pbw_app(uuid).unwrap());
         assert!(db.load_cached_pbw_app(uuid).unwrap().is_none());
         assert!(!db.delete_pbw_app(uuid).unwrap());
+    }
+
+    #[test]
+    fn maintenance_versions_default_to_zero_and_persist() {
+        let db = memory_db();
+        assert_eq!(db.maintenance_version("pbw_metadata").unwrap(), 0);
+        db.set_maintenance_version("pbw_metadata", 1).unwrap();
+        assert_eq!(db.maintenance_version("pbw_metadata").unwrap(), 1);
     }
 
     #[test]
