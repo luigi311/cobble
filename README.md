@@ -336,6 +336,16 @@ Health data is stored automatically in SQLite at
 The `HealthDataReceived` signal fires for each batch so external tools can
 consume raw records without reading the database directly.
 
+Only byte-array records from the system app UUID
+(`00000000-0000-0000-0000-000000000000`) with supported health tags and record
+layouts populate the health tables. Unsupported records and third-party app
+records are kept in the raw store. Compatible newer layouts can append fields
+without shifting the known samples. On the first daemon start after this
+parser update, Cobble rebuilds the derived health tables from the retained raw
+records to remove any earlier misclassified rows. This rebuild is atomic and
+runs once; `ReprocessHealthData` can also rebuild them manually without a watch
+resync.
+
 ### Intervals.icu wellness export
 
 The exporter owns only the fields it sends: `steps`, `sleepSecs`,
