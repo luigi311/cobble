@@ -14,6 +14,12 @@ Applications should depend on `cobble-client`, not on `libpebble-ble` or daemon 
 
 No on-disk database migration is required for these APIs. Existing health data remains in the configured SQLite database. Existing `config.toml` keys remain compatible.
 
+Device Config also reports optional `capability.hrm.five_minute_sampling` and `capability.language.multiple_packs` flags. HRM interval code `4` means five minutes and requires firmware 4.39.0 or newer; codes 0–3 retain their existing meanings. Clients must preserve an unknown interval when applying unrelated settings.
+
+Current firmware uses `systemTextSize` and `notifTextSize`; older firmware can still report `textStyle`. Text sizes remain normalized across watch models. Notification size `4` means “same as system” and is never offset. When `systemTextSize` is observed, it takes precedence over a retained `textStyle` record.
+
+The optional `preference.language.options` field is an array of `(unsigned value, label)` pairs, exposed as typed options by both clients. On watches supporting multiple language packs, the daemon queries installed translations and selects them with their slot, version, and locale. Language values must not be interpreted as a fixed list of language names. Single-pack watches retain English/installed-pack selection; `langEnglish` remains available when it is the watch's only reported language control. Unknown existing selections remain untouched. Pack installation and removal are separate operations.
+
 ## Configuration paths and application state
 
 The daemon is authoritative for its effective config file. Use `GetDaemonConfig.config_path` instead of assuming the default location. By default it is `${XDG_CONFIG_HOME:-~/.config}/cobbled/config.toml`; `cobbled --config PATH` selects another file.
@@ -54,7 +60,7 @@ Reconnect the watch and refresh before retrying. Modern watches are read back af
 
 ### Reset to Defaults
 
-Reset affects only observed, editable general preferences and uses daemon/library registry defaults. It does not reset health/profile data, unknown records, Quiet Time schedules, state markers, or unsupported firmware variants. Factory Reset is a separate destructive Device Action.
+Reset affects only observed, editable general preferences and uses daemon/library registry defaults. It does not reset health/profile data, language selection, unknown records, Quiet Time schedules, state markers, or unsupported firmware variants. Factory Reset is a separate destructive Device Action.
 
 ## Physical-watch verification matrix
 
@@ -66,7 +72,9 @@ The automated suite verifies codecs, registry validation, revision/error handlin
 | Basalt or Chalk | Color display, legacy vibration, arbitrary existing backlight color preservation | Not run; hardware required |
 | Diorite | Health fields at firmware cutoffs and unsupported HRM fields | Not run; hardware required |
 | Emery | HRM availability and text-size offset read/write symmetry | Not run; hardware required |
-| Gabbro/current hardware | Current backlight variants, built-in language, text-size offset | Not run; hardware required |
+| Gabbro/current hardware | Current backlight variants, installed language selection, system/notification text-size offsets and “same as system” | Not run; hardware required |
+| Firmware 4.39.0+ with HRM | Five-minute sampling survives applying another device setting | Not run; hardware required |
+| Multiple-language-pack firmware | English and installed translations, rejection after a pack is replaced, disconnect during query/selection | Not run; hardware required |
 | Any supported watch | Disconnect during refresh, write, and readback | Not run; hardware required |
 | Any supported watch | Rejected preference, stale revision, daemon restart, malformed config recovery | Stale revision/config paths automated in focused tests; watch rejection and restart UX require manual verification |
 

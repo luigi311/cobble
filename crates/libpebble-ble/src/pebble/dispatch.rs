@@ -80,6 +80,24 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
             }
         }
         Some(Endpoint::SystemMessage) => {
+            if let Some((kind, token, response)) =
+                crate::endpoints::language::parse_response(payload)
+            {
+                let slot = match &response {
+                    crate::endpoints::language::LanguageResponse::Selected { slot, .. } => {
+                        Some(*slot)
+                    }
+                    _ => None,
+                };
+                if let Some(waiter) = inner
+                    .lock()
+                    .unwrap()
+                    .language_pending
+                    .remove(&(kind, token, slot))
+                {
+                    let _ = waiter.send(response);
+                }
+            }
             debug!("system message type={:?}", system_message_type(payload));
         }
         Some(Endpoint::FactoryRegistry) => {
@@ -446,7 +464,11 @@ fn on_screenshot_message(payload: &[u8], inner: &Arc<Mutex<PebbleInner>>) {
 }
 
 /// Store a new battery level and fire `on_battery` handlers if it changed.
-pub(crate) fn update_battery(inner: &Arc<Mutex<PebbleInner>>, level: u8) {
+pub(crate) fn update_battery(inner: &Arc<Mutex<PebbleInner>>, data: &[u8]) {
+    let &[level @ 0..=100] = data else {
+        debug!("ignoring malformed battery reading: {data:?}");
+        return;
+    };
     let handlers = {
         let mut guard = inner.lock().unwrap();
         if guard.battery_level == Some(level) {
@@ -563,6 +585,63 @@ mod helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_battery_updates_preserve_the_last_good_level_and_do_not_emit() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let events = received.clone();
+        inner
+            .lock()
+            .unwrap()
+            .battery_handlers
+            .push(Arc::new(move |level| events.lock().unwrap().push(level)));
+        for data in [&[][..], &[101], &[255], &[50, 0]] {
+            update_battery(&inner, data);
+        }
+        assert_eq!(inner.lock().unwrap().battery_level, None);
+        update_battery(&inner, &[0]);
+        update_battery(&inner, &[100]);
+        for data in [&[][..], &[101], &[255], &[50, 0], &[100]] {
+            update_battery(&inner, data);
+        }
+        assert_eq!(inner.lock().unwrap().battery_level, Some(100));
+        assert_eq!(*received.lock().unwrap(), [0, 100]);
+    }
+
+    #[test]
+    fn language_selection_replies_match_token_and_slot() {
+        use crate::endpoints::language::{LanguageResponse, SELECT_RESPONSE};
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        inner
+            .lock()
+            .unwrap()
+            .language_pending
+            .insert((SELECT_RESPONSE, 7, Some(2)), sender);
+        for payload in [[0, SELECT_RESPONSE, 8, 2, 1], [0, SELECT_RESPONSE, 7, 1, 1]] {
+            on_pebble_message(
+                pebble_pack(Endpoint::SystemMessage, &payload).unwrap(),
+                &inner,
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        on_pebble_message(
+            pebble_pack(Endpoint::SystemMessage, &[0, SELECT_RESPONSE, 7, 2, 0]).unwrap(),
+            &inner,
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(LanguageResponse::Selected {
+                slot: 2,
+                success: false
+            })
+        );
+        assert!(inner.lock().unwrap().language_pending.is_empty());
+    }
     use tokio::sync::oneshot;
     use uuid::Uuid;
 

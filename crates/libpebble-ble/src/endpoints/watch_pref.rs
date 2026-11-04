@@ -108,6 +108,15 @@ const TEXT_SIZE: &[WatchPrefOption] = &[
         label: "Larger",
     },
 ];
+const NOTIFICATION_TEXT_SIZE: &[WatchPrefOption] = &[
+    TEXT_SIZE[0],
+    TEXT_SIZE[1],
+    TEXT_SIZE[2],
+    WatchPrefOption {
+        code: 4,
+        label: "Same as System",
+    },
+];
 const ALERT_MASK: &[WatchPrefOption] = &[
     WatchPrefOption {
         code: 0,
@@ -337,48 +346,8 @@ const LIGHT_PRESET: &[WatchPrefOption] = &[
         label: "Advanced",
     },
 ];
-const LANGUAGE: &[WatchPrefOption] = &[
-    WatchPrefOption {
-        code: 0,
-        label: "Custom (Language Pack)",
-    },
-    WatchPrefOption {
-        code: 1,
-        label: "English",
-    },
-    WatchPrefOption {
-        code: 2,
-        label: "Català",
-    },
-    WatchPrefOption {
-        code: 3,
-        label: "Deutsch",
-    },
-    WatchPrefOption {
-        code: 4,
-        label: "Español",
-    },
-    WatchPrefOption {
-        code: 5,
-        label: "Français",
-    },
-    WatchPrefOption {
-        code: 6,
-        label: "Italiano",
-    },
-    WatchPrefOption {
-        code: 7,
-        label: "Nederlands",
-    },
-    WatchPrefOption {
-        code: 8,
-        label: "Português",
-    },
-    WatchPrefOption {
-        code: 9,
-        label: "Polski",
-    },
-];
+// Language codes depend on the installed packs and firmware. Their labels
+// come from a SystemMessage pack query, not a fixed language enumeration.
 
 macro_rules! bool_pref {
     ($key:literal, $default:literal, $variant:ident) => {
@@ -447,6 +416,16 @@ const WATCH_PREF_METADATA: &[WatchPrefMetadata] = &[
     bool_pref!("lightDynamicIntensity", true, Legacy),
     bool_pref!("langEnglish", false, Legacy),
     number_pref!("textStyle", U8, 1, None, TEXT_SIZE, false, Common),
+    number_pref!("systemTextSize", U8, 1, None, TEXT_SIZE, false, Current),
+    number_pref!(
+        "notifTextSize",
+        U8,
+        1,
+        None,
+        NOTIFICATION_TEXT_SIZE,
+        false,
+        Current
+    ),
     number_pref!("mask", U8, 15, None, ALERT_MASK, false, Common),
     number_pref!(
         "dndInterruptionsMask",
@@ -524,7 +503,15 @@ const WATCH_PREF_METADATA: &[WatchPrefMetadata] = &[
         Current
     ),
     number_pref!("lightTouch", U8, 0, None, LIGHT_TOUCH, false, Common),
-    number_pref!("language", U8, 0, None, LANGUAGE, false, Current),
+    number_pref!(
+        "language",
+        U8,
+        0,
+        Some((0, 9)),
+        EMPTY_OPTIONS,
+        false,
+        Current
+    ),
     number_pref!(
         "lightTimeoutMs",
         U32,
@@ -619,8 +606,8 @@ pub fn watch_pref_type(key: &str) -> Option<WatchPrefType> {
 /// blobs too short for their type.
 ///
 /// Without model context this uses the standard-model representation. Call
-/// [`decode_watch_pref_for_model`] when the watch model is known so `textStyle`
-/// receives the Emery/Gabbro offset adjustment.
+/// [`decode_watch_pref_for_model`] when the watch model is known so text sizes
+/// receive the Emery/Gabbro offset adjustment.
 pub fn decode_watch_pref(key: &str, raw: &[u8]) -> Option<WatchPrefValue> {
     decode_watch_pref_for_model(key, raw, WatchPrefModel::Standard)
 }
@@ -678,7 +665,9 @@ fn text_size_offset(model: WatchPrefModel) -> u32 {
 }
 
 fn receive_model_transform(key: &str, value: u32, model: WatchPrefModel) -> u32 {
-    if key == "textStyle" {
+    if key == "notifTextSize" && value == 4 {
+        value
+    } else if matches!(key, "textStyle" | "systemTextSize" | "notifTextSize") {
         value.saturating_sub(text_size_offset(model)).min(2)
     } else {
         value
@@ -686,7 +675,9 @@ fn receive_model_transform(key: &str, value: u32, model: WatchPrefModel) -> u32 
 }
 
 fn send_model_transform(key: &str, value: u32, model: WatchPrefModel) -> u32 {
-    if key == "textStyle" {
+    if key == "notifTextSize" && value == 4 {
+        value
+    } else if matches!(key, "textStyle" | "systemTextSize" | "notifTextSize") {
         value + text_size_offset(model)
     } else {
         value

@@ -11,6 +11,7 @@ pub mod app_run_state;
 pub mod blob_db;
 pub mod datalog;
 pub mod health;
+pub mod language;
 pub mod music;
 pub mod phone_control;
 pub mod phone_version;

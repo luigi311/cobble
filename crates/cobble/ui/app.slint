@@ -108,6 +108,7 @@ export component AppWindow inherits Window {
     in-out property <int> dc-units-index;
     in-out property <bool> dc-hrm-enabled-value;
     in-out property <int> dc-hrm-interval-index;
+    in property <[string]> dc-hrm-interval-options;
     in-out property <bool> dc-hrm-during-activity-value;
     in property <bool> dc-health-available: false;
     in property <bool> dc-units-available: false;
@@ -128,6 +129,10 @@ export component AppWindow inherits Window {
     in-out property <bool> dc-left-handed-value;
     in property <bool> dc-text-size-available: false;
     in-out property <int> dc-text-size-index: 1;
+    in property <[string]> dc-text-size-options;
+    in property <bool> dc-notification-text-size-available;
+    in-out property <int> dc-notification-text-size-index;
+    in property <[string]> dc-notification-text-size-options;
     in property <bool> dc-light-enabled-available; in-out property <bool> dc-light-enabled-value;
     in property <bool> dc-light-ambient-available; in-out property <bool> dc-light-ambient-value;
     in property <bool> dc-light-motion-available; in-out property <bool> dc-light-motion-value;
@@ -167,6 +172,7 @@ export component AppWindow inherits Window {
     in property <bool> dc-ql-tap-up-available; in-out property <int> dc-ql-tap-up-index;
     in property <bool> dc-ql-tap-down-available; in-out property <int> dc-ql-tap-down-index;
     in property <bool> dc-language-available; in-out property <int> dc-language-index;
+    in property <[string]> dc-language-options;
     in property <bool> dc-language-english-available; in-out property <bool> dc-language-english-value;
     in property <bool> dc-light-color-available; in-out property <int> dc-light-color-index;
     in property <bool> dc-motion-sensitivity-available; in-out property <int> dc-motion-sensitivity-index: 3;
@@ -755,7 +761,7 @@ export component AppWindow inherits Window {
                                 Toggle { checked <=> root.dc-hrm-enabled-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
                             }
                             if root.dc-hrm-interval-available: EnumSetting {
-                                label: "Background sampling"; options: ["10 minutes", "30 minutes", "1 hour", "Off"];
+                                label: "Background sampling"; options: root.dc-hrm-interval-options;
                                 selected-index <=> root.dc-hrm-interval-index; enabled: !root.dc-applying;
                                 changed => { root.dc-dirty = true; }
                             }
@@ -802,7 +808,7 @@ export component AppWindow inherits Window {
                                 Toggle { checked <=> root.dc-left-handed-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
                             }
                             if root.dc-text-size-available: EnumSetting {
-                                label: "Text size"; options: ["Smaller", "Default", "Larger"];
+                                label: "Text size"; options: root.dc-text-size-options;
                                 selected-index <=> root.dc-text-size-index; enabled: !root.dc-applying;
                                 changed => { root.dc-dirty = true; }
                             }
@@ -852,16 +858,17 @@ export component AppWindow inherits Window {
                     }
 
                     if root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
-                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-notif-backlight-available || root.dc-notification-text-size-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
                         || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available: Text {
                         text: "Notifications & Vibration"; color: Palette.muted; font-size: 12px;
                     }
                     if root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
-                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-notif-backlight-available || root.dc-notification-text-size-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
                         || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available: Rectangle {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout { padding: 14px; spacing: 8px;
                             if root.dc-notif-filter-available: EnumSetting { label: "Notification filter"; options: ["All Off", "Phone Calls", "All On"]; selected-index <=> root.dc-notif-filter-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-notification-text-size-available: EnumSetting { label: "Notification text size"; options: root.dc-notification-text-size-options; selected-index <=> root.dc-notification-text-size-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
                             if root.dc-notif-design-available: HorizontalLayout { height: 36px; Text { text: "Alternative B/W design"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-design-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
                             if root.dc-notif-delay-available: HorizontalLayout { height: 36px; Text { text: "Delay vibration"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-delay-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
                             if root.dc-notif-backlight-available: HorizontalLayout { height: 36px; Text { text: "Notification backlight"; color: Palette.text; font-size: 13px; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } Toggle { checked <=> root.dc-notif-backlight-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } } }
@@ -924,7 +931,7 @@ export component AppWindow inherits Window {
                     if root.dc-language-available || root.dc-language-english-available: Rectangle {
                         background: Palette.surface; border-radius: 10px;
                         VerticalLayout { padding: 14px; spacing: 8px;
-                            if root.dc-language-available: EnumSetting { label: "Built-in language"; options: ["English", "Català", "Deutsch", "Español", "Français", "Italiano", "Nederlands", "Português", "Polski", "Custom language pack"]; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
+                            if root.dc-language-available: EnumSetting { label: "Language"; options: root.dc-language-options; selected-index <=> root.dc-language-index; enabled: !root.dc-applying; changed => { root.dc-dirty = true; } }
                             if root.dc-language-english-available: HorizontalLayout {
                                 height: 36px;
                                 Text { text: "Use English"; color: Palette.text; font-size: 13px; vertical-alignment: center; }
@@ -958,7 +965,7 @@ export component AppWindow inherits Window {
                         || root.dc-light-color-available || root.dc-motion-sensitivity-available
                         || root.dc-light-ambient-threshold-available || root.dc-dynamic-backlight-threshold-available
                         || root.dc-notif-filter-available || root.dc-notif-design-available || root.dc-notif-delay-available
-                        || root.dc-notif-backlight-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
+                        || root.dc-notif-backlight-available || root.dc-notification-text-size-available || root.dc-notif-timeout-available || root.dc-vibe-intensity-available
                         || root.dc-vibe-notifications-available || root.dc-vibe-calls-available || root.dc-vibe-alarms-available
                         || root.dc-dnd-manual-available || root.dc-dnd-smart-available || root.dc-dnd-interruptions-available
                         || root.dc-dnd-show-notifications-available || root.dc-dnd-motion-backlight-available || root.dc-dnd-auto-dismiss-available

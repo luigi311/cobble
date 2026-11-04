@@ -78,6 +78,10 @@ pub(crate) struct ScreenshotAccumulator {
 // ── Core state ─────────────────────────────────────────────────────────
 
 pub(crate) struct PebbleInner {
+    pub(crate) language_pending: HashMap<
+        (u8, u8, Option<u8>),
+        oneshot::Sender<crate::endpoints::language::LanguageResponse>,
+    >,
     pub(crate) app_message_handlers: Vec<AppMessageHandler>,
     pub(crate) ack_handlers: Vec<AckHandler>,
     pub(crate) nack_handlers: Vec<NackHandler>,
@@ -130,6 +134,7 @@ impl PebbleInner {
     pub(crate) fn new() -> Self {
         let (sync_done_tx, _) = tokio::sync::watch::channel((0, 0));
         Self {
+            language_pending: HashMap::new(),
             app_message_handlers: Vec::new(),
             ack_handlers: Vec::new(),
             nack_handlers: Vec::new(),

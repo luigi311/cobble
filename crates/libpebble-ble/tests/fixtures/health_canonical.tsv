@@ -10,3 +10,5 @@ hrmPreferences pre-4.9.146 01
 hrmPreferences 4.9.146..4.9.149 0101
 hrmPreferences 4.9.150+ 010101
 heartRatePreferences defaults 4664be829aac
+# HRM interval addition: mobileapp 5a0a187357221948a355c430f378e2a88de85334, HealthSettings.kt
+hrmPreferences 4.39.0+ 010401

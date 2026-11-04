@@ -10,7 +10,7 @@ use anyhow::Context;
 use cobble_client::{
     ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigPatch,
     DeviceConfigSnapshot, DeviceConfigState, DistanceUnits, FieldAvailability, HealthConfigPatch,
-    HrmMeasurementInterval, IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
+    IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
 };
 use serde::{Deserialize, Serialize};
 use slint::{ModelRc, VecModel};
@@ -18,6 +18,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 slint::include_modules!();
+mod device_settings;
+use device_settings::{
+    LANGUAGES, NOTIFICATION_TEXT_SIZES, TEXT_SIZES, hrm_choices, hrm_interval_patch,
+    preference_choices, preference_patch, text_size_key,
+};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -268,12 +273,11 @@ fn main() -> anyhow::Result<()> {
             if !window.get_watch_connected() || window.get_dc_applying() { return; }
             let Some(current) = baseline.lock().unwrap().clone() else { return };
             let staged_units = if window.get_dc_units_index() == 0 { DistanceUnits::Metric } else { DistanceUnits::Imperial };
-            let staged_interval = match window.get_dc_hrm_interval_index() {
-                    0 => HrmMeasurementInterval::TenMinutes,
-                    1 => HrmMeasurementInterval::ThirtyMinutes,
-                    2 => HrmMeasurementInterval::OneHour,
-                    _ => HrmMeasurementInterval::Off,
-                };
+            let staged_interval = hrm_interval_patch(
+                current.health.value.as_ref().and_then(|health| health.hrm.value.as_ref()).and_then(|hrm| hrm.measurement_interval),
+                current.capabilities.supported.contains("hrm.five_minute_sampling"),
+                window.get_dc_hrm_interval_index(),
+            );
             let mut preferences = std::collections::BTreeMap::new();
             let original_preferences = current.preferences;
             let mut stage_bool = |key: &str, available: bool, value: bool| {
@@ -366,24 +370,14 @@ fn main() -> anyhow::Result<()> {
             stage_quick_launch("qlComboUpDown", window.get_dc_ql_combo_up_down_available(), window.get_dc_ql_combo_up_down_index());
             stage_quick_launch("qlSingleClickUp", window.get_dc_ql_tap_up_available(), window.get_dc_ql_tap_up_index());
             stage_quick_launch("qlSingleClickDown", window.get_dc_ql_tap_down_available(), window.get_dc_ql_tap_down_index());
-            if window.get_dc_language_available() {
-                let original = original_preferences.get("language").and_then(|field| match field.value.as_ref() {
-                    Some(PreferenceValue::Unsigned(value)) => Some(*value), _ => None,
-                });
-                let selected = match window.get_dc_language_index() {
-                    index @ 0..=8 => Some(index as u32 + 1),
-                    9 => Some(0),
-                    _ => original,
-                };
-                if let (Some(selected), Some(original)) = (selected, original) {
-                    if selected != original { preferences.insert("language".into(), PreferenceValue::Unsigned(selected)); }
+            for (key, choices, index) in [
+                ("language", LANGUAGES, window.get_dc_language_index()),
+                (text_size_key(&original_preferences), TEXT_SIZES, window.get_dc_text_size_index()),
+                ("notifTextSize", NOTIFICATION_TEXT_SIZES, window.get_dc_notification_text_size_index()),
+            ] {
+                if let Some(value) = preference_patch(original_preferences.get(key), choices, index) {
+                    preferences.insert(key.into(), value);
                 }
-            }
-            if window.get_dc_text_size_available() {
-                let code = window.get_dc_text_size_index() as u32;
-                let unchanged = original_preferences.get("textStyle").and_then(|field| field.value.as_ref())
-                    .is_some_and(|value| matches!(value, PreferenceValue::Unsigned(old) if *old == code));
-                if !unchanged { preferences.insert("textStyle".into(), PreferenceValue::Unsigned(code)); }
             }
             let patch = current.health.value.as_ref().map(|original| {
                 let original_hrm = original.hrm.value.as_ref();
@@ -397,7 +391,7 @@ fn main() -> anyhow::Result<()> {
                 gender: (original.gender != window.get_dc_gender_index() as u8).then_some(window.get_dc_gender_index() as u8),
                 distance_units: (window.get_dc_units_available() && original.distance_units.value != Some(staged_units)).then_some(staged_units),
                 hrm_enabled: original_hrm.filter(|value| value.enabled != window.get_dc_hrm_enabled_value()).map(|_| window.get_dc_hrm_enabled_value()),
-                hrm_measurement_interval: original_hrm.filter(|value| window.get_dc_hrm_interval_available() && value.measurement_interval != Some(staged_interval)).map(|_| staged_interval),
+                hrm_measurement_interval: staged_interval.filter(|_| window.get_dc_hrm_interval_available()),
                 hrm_during_activity: original_hrm.filter(|value| window.get_dc_hrm_during_activity_available() && value.during_activity != Some(window.get_dc_hrm_during_activity_value())).map(|_| window.get_dc_hrm_during_activity_value()),
                 heart_rate_thresholds: None,
                 }
@@ -1641,6 +1635,35 @@ fn apply_daemon_config(w: &AppWindow, snapshot: &DaemonConfigSnapshot) {
     }
 }
 
+fn choice_labels(choices: &device_settings::NumericChoices) -> ModelRc<slint::SharedString> {
+    ModelRc::new(VecModel::from(
+        choices
+            .options
+            .iter()
+            .map(|(_, label)| label.as_str().into())
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn set_preference_choices(
+    w: &AppWindow,
+    field: Option<&cobble_client::PreferenceField>,
+    defaults: &[(u32, &str)],
+    available: fn(&AppWindow, bool),
+    index: fn(&AppWindow, i32),
+    options: fn(&AppWindow, ModelRc<slint::SharedString>),
+) {
+    let choices = preference_choices(field, defaults);
+    available(w, choices.is_some());
+    if let Some(choices) = choices {
+        options(w, choice_labels(&choices));
+        index(w, choices.selected);
+    } else {
+        options(w, ModelRc::default());
+        index(w, 0);
+    }
+}
+
 fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_confirm_device_defaults(false);
     let state = match snapshot.state {
@@ -1714,16 +1737,15 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_hrm_available(hrm.is_some());
         w.set_dc_hrm_enabled_value(hrm.is_some_and(|value| value.enabled));
         w.set_dc_hrm_interval_available(hrm.and_then(|value| value.measurement_interval).is_some());
-        w.set_dc_hrm_interval_index(hrm.and_then(|value| value.measurement_interval).map_or(
-            0,
-            |value| match value {
-                HrmMeasurementInterval::TenMinutes => 0,
-                HrmMeasurementInterval::ThirtyMinutes => 1,
-                HrmMeasurementInterval::OneHour => 2,
-                HrmMeasurementInterval::Off => 3,
-                HrmMeasurementInterval::Unknown(_) => 0,
-            },
-        ));
+        let choices = hrm_choices(
+            hrm.and_then(|value| value.measurement_interval),
+            snapshot
+                .capabilities
+                .supported
+                .contains("hrm.five_minute_sampling"),
+        );
+        w.set_dc_hrm_interval_options(choice_labels(&choices));
+        w.set_dc_hrm_interval_index(choices.selected);
         w.set_dc_hrm_during_activity_available(
             hrm.and_then(|value| value.during_activity).is_some(),
         );
@@ -1818,15 +1840,24 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     let left = pref_bool("displayOrientationLeftHanded");
     w.set_dc_left_handed_available(left.is_some());
     w.set_dc_left_handed_value(left.unwrap_or(false));
-    let text_size = snapshot
-        .preferences
-        .get("textStyle")
-        .and_then(|field| match field.value {
-            Some(PreferenceValue::Unsigned(value @ 0..=2)) => Some(value as i32),
-            _ => None,
-        });
-    w.set_dc_text_size_available(text_size.is_some());
-    w.set_dc_text_size_index(text_size.unwrap_or(1));
+    set_preference_choices(
+        w,
+        snapshot
+            .preferences
+            .get(text_size_key(&snapshot.preferences)),
+        TEXT_SIZES,
+        AppWindow::set_dc_text_size_available,
+        AppWindow::set_dc_text_size_index,
+        AppWindow::set_dc_text_size_options,
+    );
+    set_preference_choices(
+        w,
+        snapshot.preferences.get("notifTextSize"),
+        NOTIFICATION_TEXT_SIZES,
+        AppWindow::set_dc_notification_text_size_available,
+        AppWindow::set_dc_notification_text_size_index,
+        AppWindow::set_dc_notification_text_size_options,
+    );
     let set_bool = |key: &str, available: fn(&AppWindow, bool), value: fn(&AppWindow, bool)| {
         let current = pref_bool(key);
         available(w, current.is_some());
@@ -2060,12 +2091,13 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         AppWindow::set_dc_ql_tap_down_available,
         AppWindow::set_dc_ql_tap_down_index,
     );
-    let language = pref_number("language");
-    w.set_dc_language_available(language.is_some());
-    w.set_dc_language_index(
-        language
-            .filter(|value| (1..=9).contains(value))
-            .map_or(9, |value| value as i32 - 1),
+    set_preference_choices(
+        w,
+        snapshot.preferences.get("language"),
+        LANGUAGES,
+        AppWindow::set_dc_language_available,
+        AppWindow::set_dc_language_index,
+        AppWindow::set_dc_language_options,
     );
     let language_english = pref_bool("langEnglish");
     w.set_dc_language_english_available(language_english.is_some());
@@ -2127,6 +2159,8 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
             "clock24h"
                 | "displayOrientationLeftHanded"
                 | "textStyle"
+                | "systemTextSize"
+                | "notifTextSize"
                 | "lightEnabled"
                 | "lightAmbientSensorEnabled"
                 | "lightMotion"
@@ -2249,6 +2283,7 @@ fn clear_device_config(w: &AppWindow) {
     w.set_dc_stationary_mode_available(false);
     w.set_dc_left_handed_available(false);
     w.set_dc_text_size_available(false);
+    w.set_dc_notification_text_size_available(false);
     w.set_dc_light_enabled_available(false);
     w.set_dc_light_ambient_available(false);
     w.set_dc_light_motion_available(false);

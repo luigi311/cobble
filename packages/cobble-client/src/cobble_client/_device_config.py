@@ -118,6 +118,7 @@ class PreferenceField:
     value: bool | int | str | None
     raw: bytes
     error: str | None = None
+    options: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,10 @@ def decode_device_config(raw: dict[str, object]) -> DeviceConfigSnapshot:
             availability=_availability(raw, f"preference.{name}.availability"),
             value=raw.get(f"preference.{name}.value"),
             raw=bytes(raw.get(f"preference.{name}.raw", b"")),
+            options=tuple(
+                (int(value), str(label))
+                for value, label in raw.get(f"preference.{name}.options", ())
+            ),
         )
         for name in preference_names
     }
