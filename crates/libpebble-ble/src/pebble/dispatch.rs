@@ -297,8 +297,11 @@ fn on_datalog_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
                 return;
             };
             debug!(
-                "DataLog OPENSESSION handle={handle} tag={} item_size={}",
-                session.tag, session.item_size
+                "DataLog OPENSESSION handle={handle} uuid={} tag={} item_type={} item_size={}",
+                uuid::Uuid::from_bytes(session.app_uuid),
+                session.tag,
+                session.item_type,
+                session.item_size
             );
             inner
                 .lock()

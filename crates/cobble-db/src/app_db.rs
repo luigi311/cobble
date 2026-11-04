@@ -19,12 +19,28 @@ use crate::types::{
     WellnessExportStatus,
 };
 
-// Pebble firmware version constants (from RecordVersion enum in dataloggingendpoint.cpp).
+// Record versions mirror upstream mobileapp's HealthDataParser.kt.
 const VERSION_FW_3_10_AND_BELOW: u16 = 5;
 const VERSION_FW_3_11: u16 = 6;
 const VERSION_FW_4_0: u16 = 7;
-const VERSION_FW_4_1: u16 = 8;
+const VERSION_FW_4_1: u16 = 12;
 const VERSION_FW_4_3: u16 = 13;
+const SYSTEM_APP_UUID: [u8; 16] = [0; 16];
+const HEALTH_PARSER_MAINTENANCE: &str = "health_parser";
+// Increment when existing derived rows need to be rebuilt with new parser rules.
+const HEALTH_PARSER_VERSION: i64 = 1;
+
+/// Known step layouts, plus append-only extensions of the v13 sample.
+fn minimum_activity_sample_size(version: u16) -> Option<usize> {
+    match version {
+        VERSION_FW_3_10_AND_BELOW => Some(6),
+        VERSION_FW_3_11 => Some(12),
+        VERSION_FW_4_0 => Some(13),
+        VERSION_FW_4_1 => Some(15),
+        VERSION_FW_4_3.. => Some(16),
+        _ => None,
+    }
+}
 
 pub struct AppDb {
     conn: Connection,
@@ -52,9 +68,9 @@ fn pbw_app_record_from_row(row: &Row<'_>) -> rusqlite::Result<PbwAppRecord> {
 
 impl AppDb {
     /// Open the database with full write capability. Creates the directory,
-    /// sets file permissions, applies PRAGMAs, and initializes the schema
-    /// (tables + views). Safe to call alongside a read-only consumer because
-    /// `CREATE TABLE IF NOT EXISTS` is idempotent.
+    /// sets file permissions, applies PRAGMAs, initializes the schema, and
+    /// rebuilds derived health rows once when the parser maintenance version
+    /// changes. Safe to call alongside a read-only consumer.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -75,7 +91,12 @@ impl AppDb {
         schema::apply_pragmas(&conn)?;
         schema::initialize_schema(&conn)?;
 
-        Ok(Self { conn })
+        let db = Self { conn };
+        if db.maintenance_version(HEALTH_PARSER_MAINTENANCE)? < HEALTH_PARSER_VERSION {
+            db.reprocess()
+                .context("rebuild health data for parser update")?;
+        }
+        Ok(db)
     }
 
     /// Aggregate supported wellness observations for a watch-local date range.
@@ -412,8 +433,9 @@ impl AppDb {
         Ok(())
     }
 
-    /// Insert a raw batch into health_records and parse individual records into the
-    /// per-tag tables. Returns whether the batch was new and supported.
+    /// Retain every raw DataLog batch, then derive health rows only from the
+    /// system application's byte-array records. Returns whether health rows
+    /// were added; unrelated or unsupported data remains available in raw form.
     pub fn insert_batch(&self, batch: &DatalogData) -> anyhow::Result<bool> {
         let received_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -437,14 +459,18 @@ impl AppDb {
         )?;
 
         if rows_changed == 0 {
-            // Duplicate batch; child records already stored on the first receipt.
+            // This raw batch was already handled on its first receipt.
+            return Ok(false);
+        }
+
+        if batch.app_uuid != SYSTEM_APP_UUID || batch.item_type != 0 {
             return Ok(false);
         }
 
         let record_id = self.conn.last_insert_rowid();
         let item_size = batch.item_size as usize;
 
-        match batch.tag {
+        let inserted = match batch.tag {
             datalog_tag::ACTIVITY_STEPS => {
                 self.insert_activity_minutes(record_id, &batch.data, item_size)
             }
@@ -458,7 +484,7 @@ impl AppDb {
             _ => return Ok(false),
         }?;
 
-        Ok(true)
+        Ok(inserted > 0)
     }
 
     /// Parse tag 81 per-minute activity chunks.
@@ -467,15 +493,15 @@ impl AppDb {
         record_id: i64,
         data: &[u8],
         item_size: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         const CHUNK_HEADER: usize = 9; // u16 ver + u32 ts + i8 utc_off + u8 rec_len + u8 rec_num
 
         if item_size < CHUNK_HEADER {
             warn!("activity item_size={item_size} too small; skipping");
-            return Ok(());
+            return Ok(0);
         }
         if data.is_empty() || !data.len().is_multiple_of(item_size) {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut stmt = self.conn.prepare_cached(
@@ -486,6 +512,7 @@ impl AppDb {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?;
 
+        let mut inserted = 0;
         for item in data.chunks_exact(item_size) {
             let record_version = u16::from_le_bytes([item[0], item[1]]);
             let mut ts = u32::from_le_bytes([item[2], item[3], item[4], item[5]]) as i64;
@@ -493,12 +520,25 @@ impl AppDb {
             let record_length = item[7] as usize;
             let record_num = item[8] as usize;
 
-            if record_length == 0 {
+            let Some(minimum_size) = minimum_activity_sample_size(record_version) else {
+                warn!("unsupported activity record version={record_version}; retaining raw bytes");
+                continue;
+            };
+            if record_length < minimum_size {
+                warn!(
+                    "activity version={record_version} sample_size={record_length} (expected >={minimum_size}); retaining raw bytes"
+                );
                 continue;
             }
 
             let sub_data = &item[CHUNK_HEADER..];
             let count = (sub_data.len() / record_length).min(record_num);
+            if count < record_num {
+                warn!(
+                    "truncated activity item: declares {record_num} samples, contains {count}; retaining raw bytes"
+                );
+                continue;
+            }
 
             for i in 0..count {
                 let rec = &sub_data[i * record_length..(i + 1) * record_length];
@@ -563,7 +603,7 @@ impl AppDb {
                         None
                     };
 
-                stmt.execute(params![
+                inserted += stmt.execute(params![
                     record_id,
                     record_version as i64,
                     start_ts,
@@ -583,7 +623,7 @@ impl AppDb {
                 ])?;
             }
         }
-        Ok(())
+        Ok(inserted)
     }
 
     fn insert_activity_sessions(
@@ -591,7 +631,7 @@ impl AppDb {
         record_id: i64,
         data: &[u8],
         item_size: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         Self::do_insert_activity_sessions(&self.conn, record_id, data, item_size)
     }
 
@@ -609,7 +649,7 @@ impl AppDb {
         record_id: i64,
         data: &[u8],
         item_size: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         const MIN_ITEM: usize = 18;
         const WALK_RUN_EXT: usize = 26; // 18 base + 8 walk/run fields
 
@@ -618,10 +658,10 @@ impl AppDb {
                 "session item_size={item_size} (expected >={MIN_ITEM}); \
                  raw bytes stored in health_records for reprocessing"
             );
-            return Ok(());
+            return Ok(0);
         }
         if data.is_empty() || !data.len().is_multiple_of(item_size) {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut stmt = conn.prepare_cached(
@@ -631,15 +671,30 @@ impl AppDb {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
 
+        let mut inserted = 0;
         for item in data.chunks_exact(item_size) {
             let version = u16::from_le_bytes([item[0], item[1]]);
             // item[2..4]: skip (u16)
             let session_type = u16::from_le_bytes([item[4], item[5]]);
+            // Bit zero is cleared for non-append-only layout changes. Type 7
+            // is the upstream OpenWorkout overlay; other unknown types stay raw.
+            if version & 1 == 0 || !(1..=7).contains(&session_type) {
+                warn!(
+                    "unsupported overlay type={session_type} version={version}; retaining raw bytes"
+                );
+                continue;
+            }
             let utc_offset = u32::from_le_bytes([item[6], item[7], item[8], item[9]]) as i32 as i64;
             let start_ts = u32::from_le_bytes([item[10], item[11], item[12], item[13]]) as i64;
             let duration = u32::from_le_bytes([item[14], item[15], item[16], item[17]]) as i64;
 
             let is_walk_run = session_type == 5 || session_type == 6;
+            if (version == 3 || (version >= 3 && is_walk_run)) && item_size < WALK_RUN_EXT {
+                warn!(
+                    "truncated overlay type={session_type} version={version}; retaining raw bytes"
+                );
+                continue;
+            }
             let (steps, active_kcal, resting_kcal, distance_m) =
                 if version >= 3 && is_walk_run && item_size >= WALK_RUN_EXT {
                     // Wire order: steps, active_kcal, resting_kcal, distance_m
@@ -652,7 +707,7 @@ impl AppDb {
                     (None, None, None, None)
                 };
 
-            stmt.execute(params![
+            inserted += stmt.execute(params![
                 record_id,
                 version as i64,
                 session_type as i64,
@@ -666,7 +721,7 @@ impl AppDb {
                 &item[..item_size],
             ])?;
         }
-        Ok(())
+        Ok(inserted)
     }
 
     // ── IP geolocation cache ────────────────────────────────────────────
@@ -702,7 +757,8 @@ impl AppDb {
         Ok(())
     }
 
-    /// Rebuild both derived tables from the raw blobs in `health_records`.
+    /// Rebuild both derived tables from system-app byte-array records in
+    /// `health_records`, leaving all original batches untouched.
     /// Use this to populate `utc_offset` for rows inserted before the column existed,
     /// or to pick up any parser fix without re-syncing from the watch.
     pub fn reprocess(&self) -> anyhow::Result<()> {
@@ -725,6 +781,7 @@ impl AppDb {
         for rec in sleep_records.iter().chain(&session_records) {
             Self::do_insert_activity_sessions(&self.conn, rec.id, &rec.data, rec.item_size)?;
         }
+        self.set_maintenance_version(HEALTH_PARSER_MAINTENANCE, HEALTH_PARSER_VERSION)?;
         txn.commit()?;
         debug!(
             "db reprocess: {} steps records, {} sleep + {} session records",
@@ -737,18 +794,18 @@ impl AppDb {
 
     fn load_raw_records(conn: &Connection, tag: i64) -> anyhow::Result<Vec<RawRecord>> {
         let mut stmt = conn.prepare(
-            "SELECT id, data, item_size FROM health_records WHERE tag = ?1 ORDER BY id ASC",
+            "SELECT id, data, item_size FROM health_records
+             WHERE tag = ?1 AND app_uuid = ?2 AND item_type = 0 ORDER BY id ASC",
         )?;
         let rows: Vec<RawRecord> = stmt
-            .query_map(params![tag], |r| {
+            .query_map(params![tag, SYSTEM_APP_UUID.as_slice()], |r| {
                 Ok(RawRecord {
                     id: r.get(0)?,
                     data: r.get(1)?,
-                    item_size: r.get::<_, i64>(2)? as usize,
+                    item_size: usize::from(r.get::<_, u16>(2)?),
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
 }
@@ -766,6 +823,9 @@ fn sanitize_export_error(error: &str) -> String {
         sanitized
     }
 }
+
+#[cfg(test)]
+mod health_tests;
 
 #[cfg(test)]
 mod tests {

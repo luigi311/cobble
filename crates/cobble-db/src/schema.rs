@@ -89,7 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_health_session_ts ON health_records(session_ts);
 --     u16 active_gram_cal   (version >= 6)
 --     u16 distance_cm       (version >= 6)
 --     u8  heart_rate_bpm    (version >= 7)
---     u16 heart_rate_weight (version >= 8)
+--     u16 heart_rate_weight (version >= 12)
 --     u8  heart_rate_zone   (version >= 13)
 CREATE TABLE IF NOT EXISTS health_activity_minutes (
     id                    INTEGER PRIMARY KEY,
@@ -122,9 +122,9 @@ CREATE INDEX IF NOT EXISTS idx_activity_min_ts ON health_activity_minutes(start_
 -- Wire format (per item, base 18 bytes):
 --   u16 version
 --   u16 (unused)
---   u16 session_type   1=sleep 2=deep_sleep 3=nap 4=deep_nap 5=walk 6=run
---   u32 start_ts       unix timestamp
+--   u16 session_type   1=sleep 2=deep_sleep 3=nap 4=deep_nap 5=walk 6=run 7=open_workout
 --   u32 utc_offset     seconds west of UTC (negative for east zones, signed i32 on wire)
+--   u32 start_ts       unix timestamp
 --   u32 duration_secs
 --   [walk/run extension, version >= 3, session_type 5 or 6, 8 extra bytes]
 --   u16 steps
@@ -160,7 +160,8 @@ INSERT OR IGNORE INTO session_types VALUES
     (3, 'nap'),
     (4, 'deep_nap'),
     (5, 'walk'),
-    (6, 'run');
+    (6, 'run'),
+    (7, 'open_workout');
 
 -- Cached IP geolocation
 CREATE TABLE IF NOT EXISTS ip_locations (
