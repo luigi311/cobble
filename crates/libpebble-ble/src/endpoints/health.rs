@@ -148,6 +148,7 @@ pub fn encode_units_distance(imperial: bool) -> Vec<u8> {
 /// Heart-rate monitoring interval (libpebble3 `HRMonitoringInterval`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HrMonitoringInterval {
+    FiveMin,
     TenMin,
     ThirtyMin,
     OneHour,
@@ -163,6 +164,7 @@ impl HrMonitoringInterval {
             1 => Self::ThirtyMin,
             2 => Self::OneHour,
             3 => Self::Disabled,
+            4 => Self::FiveMin,
             other => Self::Unknown(other),
         }
     }
@@ -170,11 +172,22 @@ impl HrMonitoringInterval {
     /// The on-wire byte value (round-trips `from_u8`).
     pub fn code(self) -> u8 {
         match self {
+            Self::FiveMin => 4,
             Self::TenMin => 0,
             Self::ThirtyMin => 1,
             Self::OneHour => 2,
             Self::Disabled => 3,
             Self::Unknown(v) => v,
+        }
+    }
+
+    /// Whether this interval can be selected on the reported firmware.
+    /// Unknown values are retained when reading, but are never offered as edits.
+    pub fn is_supported_by(self, firmware: (u8, u8, u16)) -> bool {
+        match self {
+            Self::FiveMin => firmware >= (4, 39, 0),
+            Self::Unknown(_) => false,
+            _ => firmware >= (4, 9, 146),
         }
     }
 }
@@ -424,6 +437,28 @@ mod tests {
         assert_eq!(
             encode_hrm_preferences(true, HrMonitoringInterval::ThirtyMin, true, (4, 9, 150)),
             canonical_fixture("hrmPreferences", "4.9.150+")
+        );
+    }
+
+    #[test]
+    fn five_minute_hrm_sampling_round_trips_and_has_a_firmware_cutoff() {
+        let raw = canonical_fixture("hrmPreferences", "4.39.0+");
+        assert_eq!(
+            parse_hrm_preferences(&raw).unwrap().measurement_interval,
+            Some(HrMonitoringInterval::FiveMin)
+        );
+        assert_eq!(
+            encode_hrm_preferences(true, HrMonitoringInterval::FiveMin, true, (4, 39, 0)),
+            raw
+        );
+        assert!(!HrMonitoringInterval::FiveMin.is_supported_by((4, 38, 99)));
+        assert!(HrMonitoringInterval::FiveMin.is_supported_by((4, 39, 0)));
+        assert!(!HrMonitoringInterval::Unknown(17).is_supported_by((4, 44, 0)));
+        assert_eq!(
+            parse_hrm_preferences(&[1, 17, 1])
+                .unwrap()
+                .measurement_interval,
+            Some(HrMonitoringInterval::Unknown(17))
         );
     }
 

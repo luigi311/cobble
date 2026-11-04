@@ -14,6 +14,8 @@ Applications should depend on `cobble-client`, not on `libpebble-ble` or daemon 
 
 No on-disk database migration is required for these APIs. Existing health data remains in the configured SQLite database. Existing `config.toml` keys remain compatible.
 
+Device Config also reports the optional `capability.hrm.five_minute_sampling` flag. HRM interval code `4` means five minutes and requires firmware 4.39.0 or newer; codes 0–3 retain their existing meanings. Clients must preserve an unknown interval when applying unrelated settings.
+
 ## Configuration paths and application state
 
 The daemon is authoritative for its effective config file. Use `GetDaemonConfig.config_path` instead of assuming the default location. By default it is `${XDG_CONFIG_HOME:-~/.config}/cobbled/config.toml`; `cobbled --config PATH` selects another file.
@@ -67,6 +69,7 @@ The automated suite verifies codecs, registry validation, revision/error handlin
 | Diorite | Health fields at firmware cutoffs and unsupported HRM fields | Not run; hardware required |
 | Emery | HRM availability and text-size offset read/write symmetry | Not run; hardware required |
 | Gabbro/current hardware | Current backlight variants, built-in language, text-size offset | Not run; hardware required |
+| Firmware 4.39.0+ with HRM | Five-minute sampling survives applying another device setting | Not run; hardware required |
 | Any supported watch | Disconnect during refresh, write, and readback | Not run; hardware required |
 | Any supported watch | Rejected preference, stale revision, daemon restart, malformed config recovery | Stale revision/config paths automated in focused tests; watch rejection and restart UX require manual verification |
 

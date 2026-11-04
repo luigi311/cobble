@@ -167,6 +167,7 @@ pub struct HrmConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HrmMeasurementInterval {
+    FiveMinutes,
     TenMinutes,
     ThirtyMinutes,
     OneHour,

@@ -108,6 +108,7 @@ export component AppWindow inherits Window {
     in-out property <int> dc-units-index;
     in-out property <bool> dc-hrm-enabled-value;
     in-out property <int> dc-hrm-interval-index;
+    in property <[string]> dc-hrm-interval-options;
     in-out property <bool> dc-hrm-during-activity-value;
     in property <bool> dc-health-available: false;
     in property <bool> dc-units-available: false;
@@ -755,7 +756,7 @@ export component AppWindow inherits Window {
                                 Toggle { checked <=> root.dc-hrm-enabled-value; enabled: !root.dc-applying; toggled => { root.dc-dirty = true; } }
                             }
                             if root.dc-hrm-interval-available: EnumSetting {
-                                label: "Background sampling"; options: ["10 minutes", "30 minutes", "1 hour", "Off"];
+                                label: "Background sampling"; options: root.dc-hrm-interval-options;
                                 selected-index <=> root.dc-hrm-interval-index; enabled: !root.dc-applying;
                                 changed => { root.dc-dirty = true; }
                             }

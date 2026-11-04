@@ -94,6 +94,28 @@ def test_device_config_preserves_availability_and_native_units():
     assert snapshot.preferences["clock24h"].raw == b"\x01"
 
 
+def test_device_config_preserves_new_hrm_values():
+    raw = {
+        "api_version": 1,
+        "revision": 7,
+        "state": "ready",
+        "health.activity.availability": "available",
+        "health.height_mm": 1700,
+        "health.weight_dag": 7000,
+        "health.age": 30,
+        "health.gender": 0,
+        "health.tracking_enabled": True,
+        "health.activity_insights_enabled": False,
+        "health.sleep_insights_enabled": False,
+        "health.hrm.availability": "available",
+        "health.hrm.enabled": True,
+    }
+    for interval in (4, 17):
+        raw["health.hrm.measurement_interval"] = interval
+        snapshot = decode_device_config(raw)
+        assert snapshot.health.value.hrm.value.measurement_interval == interval
+
+
 def test_daemon_config_changed_handler_receives_revision():
     client = CobbleClient()
     revisions = []

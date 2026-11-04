@@ -232,6 +232,7 @@ fn decode_device_config(map: &VarDict) -> Result<DeviceConfigSnapshot> {
                         1 => HrmMeasurementInterval::ThirtyMinutes,
                         2 => HrmMeasurementInterval::OneHour,
                         3 => HrmMeasurementInterval::Off,
+                        4 => HrmMeasurementInterval::FiveMinutes,
                         other => HrmMeasurementInterval::Unknown(other),
                     }),
                 during_activity: map
@@ -449,6 +450,7 @@ fn encode_device_config_patch(patch: DeviceConfigPatch) -> Result<VarDict> {
     insert!("health.hrm.enabled", health.hrm_enabled);
     if let Some(interval) = health.hrm_measurement_interval {
         let code = match interval {
+            HrmMeasurementInterval::FiveMinutes => 4,
             HrmMeasurementInterval::TenMinutes => 0,
             HrmMeasurementInterval::ThirtyMinutes => 1,
             HrmMeasurementInterval::OneHour => 2,
@@ -1362,6 +1364,73 @@ mod tests {
         assert_eq!(snapshot.health.availability, FieldAvailability::NotReceived);
         assert!(snapshot.health.value.is_none());
         assert!(snapshot.capabilities.supported.contains("complete_refresh"));
+    }
+
+    #[test]
+    fn device_config_codec_preserves_five_minute_and_unknown_hrm() {
+        let mut map = HashMap::from([
+            (
+                "api_version".into(),
+                wire_value(DEVICE_CONFIG_API_VERSION).unwrap(),
+            ),
+            ("revision".into(), wire_value(7_u64).unwrap()),
+            ("state".into(), wire_value("ready").unwrap()),
+            (
+                "health.activity.availability".into(),
+                wire_value("available").unwrap(),
+            ),
+            ("health.height_mm".into(), wire_value(1700_u16).unwrap()),
+            ("health.weight_dag".into(), wire_value(7000_u16).unwrap()),
+            ("health.age".into(), wire_value(30_u8).unwrap()),
+            ("health.gender".into(), wire_value(0_u8).unwrap()),
+            ("health.tracking_enabled".into(), wire_value(true).unwrap()),
+            (
+                "health.activity_insights_enabled".into(),
+                wire_value(false).unwrap(),
+            ),
+            (
+                "health.sleep_insights_enabled".into(),
+                wire_value(false).unwrap(),
+            ),
+            (
+                "health.hrm.availability".into(),
+                wire_value("available").unwrap(),
+            ),
+            ("health.hrm.enabled".into(), wire_value(true).unwrap()),
+        ]);
+        for (code, interval) in [
+            (4_u8, HrmMeasurementInterval::FiveMinutes),
+            (17, HrmMeasurementInterval::Unknown(17)),
+        ] {
+            map.insert(
+                "health.hrm.measurement_interval".into(),
+                wire_value(code).unwrap(),
+            );
+            let snapshot = decode_device_config(&map).unwrap();
+            assert_eq!(
+                snapshot
+                    .health
+                    .value
+                    .unwrap()
+                    .hrm
+                    .value
+                    .unwrap()
+                    .measurement_interval,
+                Some(interval)
+            );
+            let encoded = encode_device_config_patch(DeviceConfigPatch {
+                health: Some(HealthConfigPatch {
+                    hrm_measurement_interval: Some(interval),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(
+                u8::try_from(encoded.get("health.hrm.measurement_interval").unwrap()).unwrap(),
+                code
+            );
+        }
     }
 
     #[test]

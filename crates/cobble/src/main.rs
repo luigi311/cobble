@@ -10,7 +10,7 @@ use anyhow::Context;
 use cobble_client::{
     ApplyDisposition, CobbleClient, DaemonConfigPatch, DaemonConfigSnapshot, DeviceConfigPatch,
     DeviceConfigSnapshot, DeviceConfigState, DistanceUnits, FieldAvailability, HealthConfigPatch,
-    HrmMeasurementInterval, IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
+    IntervalsIcuPatch, PreferenceValue, SecretPatch, StatusEvent, VarDict,
 };
 use serde::{Deserialize, Serialize};
 use slint::{ModelRc, VecModel};
@@ -18,6 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 slint::include_modules!();
+mod device_settings;
+use device_settings::{hrm_choices, hrm_interval_patch};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -268,12 +270,11 @@ fn main() -> anyhow::Result<()> {
             if !window.get_watch_connected() || window.get_dc_applying() { return; }
             let Some(current) = baseline.lock().unwrap().clone() else { return };
             let staged_units = if window.get_dc_units_index() == 0 { DistanceUnits::Metric } else { DistanceUnits::Imperial };
-            let staged_interval = match window.get_dc_hrm_interval_index() {
-                    0 => HrmMeasurementInterval::TenMinutes,
-                    1 => HrmMeasurementInterval::ThirtyMinutes,
-                    2 => HrmMeasurementInterval::OneHour,
-                    _ => HrmMeasurementInterval::Off,
-                };
+            let staged_interval = hrm_interval_patch(
+                current.health.value.as_ref().and_then(|health| health.hrm.value.as_ref()).and_then(|hrm| hrm.measurement_interval),
+                current.capabilities.supported.contains("hrm.five_minute_sampling"),
+                window.get_dc_hrm_interval_index(),
+            );
             let mut preferences = std::collections::BTreeMap::new();
             let original_preferences = current.preferences;
             let mut stage_bool = |key: &str, available: bool, value: bool| {
@@ -397,7 +398,7 @@ fn main() -> anyhow::Result<()> {
                 gender: (original.gender != window.get_dc_gender_index() as u8).then_some(window.get_dc_gender_index() as u8),
                 distance_units: (window.get_dc_units_available() && original.distance_units.value != Some(staged_units)).then_some(staged_units),
                 hrm_enabled: original_hrm.filter(|value| value.enabled != window.get_dc_hrm_enabled_value()).map(|_| window.get_dc_hrm_enabled_value()),
-                hrm_measurement_interval: original_hrm.filter(|value| window.get_dc_hrm_interval_available() && value.measurement_interval != Some(staged_interval)).map(|_| staged_interval),
+                hrm_measurement_interval: staged_interval.filter(|_| window.get_dc_hrm_interval_available()),
                 hrm_during_activity: original_hrm.filter(|value| window.get_dc_hrm_during_activity_available() && value.during_activity != Some(window.get_dc_hrm_during_activity_value())).map(|_| window.get_dc_hrm_during_activity_value()),
                 heart_rate_thresholds: None,
                 }
@@ -1641,6 +1642,16 @@ fn apply_daemon_config(w: &AppWindow, snapshot: &DaemonConfigSnapshot) {
     }
 }
 
+fn choice_labels(choices: &device_settings::NumericChoices) -> ModelRc<slint::SharedString> {
+    ModelRc::new(VecModel::from(
+        choices
+            .options
+            .iter()
+            .map(|(_, label)| label.as_str().into())
+            .collect::<Vec<_>>(),
+    ))
+}
+
 fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
     w.set_confirm_device_defaults(false);
     let state = match snapshot.state {
@@ -1714,16 +1725,15 @@ fn apply_device_config(w: &AppWindow, snapshot: &DeviceConfigSnapshot) {
         w.set_dc_hrm_available(hrm.is_some());
         w.set_dc_hrm_enabled_value(hrm.is_some_and(|value| value.enabled));
         w.set_dc_hrm_interval_available(hrm.and_then(|value| value.measurement_interval).is_some());
-        w.set_dc_hrm_interval_index(hrm.and_then(|value| value.measurement_interval).map_or(
-            0,
-            |value| match value {
-                HrmMeasurementInterval::TenMinutes => 0,
-                HrmMeasurementInterval::ThirtyMinutes => 1,
-                HrmMeasurementInterval::OneHour => 2,
-                HrmMeasurementInterval::Off => 3,
-                HrmMeasurementInterval::Unknown(_) => 0,
-            },
-        ));
+        let choices = hrm_choices(
+            hrm.and_then(|value| value.measurement_interval),
+            snapshot
+                .capabilities
+                .supported
+                .contains("hrm.five_minute_sampling"),
+        );
+        w.set_dc_hrm_interval_options(choice_labels(&choices));
+        w.set_dc_hrm_interval_index(choices.selected);
         w.set_dc_hrm_during_activity_available(
             hrm.and_then(|value| value.during_activity).is_some(),
         );

@@ -397,6 +397,10 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
     }
     if let Some(info) = &state.device_config_watch {
         result.insert(
+            "capability.hrm.five_minute_sampling".into(),
+            dbus_val((info.running.major, info.running.minor, info.running.patch) >= (4, 39, 0)),
+        );
+        result.insert(
             "watch_id".into(),
             dbus_val(if info.serial.is_empty() {
                 info.bt_address.clone()
@@ -531,7 +535,9 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
     result
 }
 
+mod device_preferences;
 mod state;
+use device_preferences::validate_hrm_interval;
 pub(crate) use state::{
     BUS_NAME, DaemonError, DaemonEvent, DaemonState, HealthProfile, MUSIC_APP_UUID, OBJECT_PATH,
     dbus_val, watch_pref_owned_value,
@@ -2155,7 +2161,7 @@ impl CobbleDaemon {
                         "watch returned a short hrmPreferences record".into(),
                     ));
                 }
-                value.measurement_interval = Some(HrMonitoringInterval::from_u8(v));
+                value.measurement_interval = Some(validate_hrm_interval(v, version)?);
                 raw[1] = v;
             }
             if let Some(v) = patch_bool(&patch, "health.hrm.during_activity")? {
