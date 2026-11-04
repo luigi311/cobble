@@ -314,6 +314,14 @@ fn decode_device_config(map: &VarDict) -> Result<DeviceConfigSnapshot> {
                 value,
                 raw,
                 error: None,
+                options: map
+                    .get(&format!("preference.{key}.options"))
+                    .and_then(|value| value.try_clone().ok())
+                    .and_then(|value| Vec::<(u32, String)>::try_from(value).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(value, label)| PreferenceOption { value, label })
+                    .collect(),
             },
         );
     }
@@ -1367,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn device_config_codec_preserves_five_minute_and_unknown_hrm() {
+    fn device_config_codec_preserves_five_minute_hrm_and_pack_choices() {
         let mut map = HashMap::from([
             (
                 "api_version".into(),
@@ -1397,6 +1405,22 @@ mod tests {
                 wire_value("available").unwrap(),
             ),
             ("health.hrm.enabled".into(), wire_value(true).unwrap()),
+            (
+                "preference.language.availability".into(),
+                wire_value("available").unwrap(),
+            ),
+            (
+                "preference.language.value".into(),
+                wire_value(3_u32).unwrap(),
+            ),
+            (
+                "preference.language.options".into(),
+                wire_value(vec![
+                    (1_u32, "English".to_owned()),
+                    (3, "Deutsch".to_owned()),
+                ])
+                .unwrap(),
+            ),
         ]);
         for (code, interval) in [
             (4_u8, HrmMeasurementInterval::FiveMinutes),
@@ -1417,6 +1441,13 @@ mod tests {
                     .unwrap()
                     .measurement_interval,
                 Some(interval)
+            );
+            assert_eq!(
+                snapshot.preferences["language"].options[1],
+                PreferenceOption {
+                    value: 3,
+                    label: "Deutsch".into()
+                }
             );
             let encoded = encode_device_config_patch(DeviceConfigPatch {
                 health: Some(HealthConfigPatch {

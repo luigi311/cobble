@@ -63,6 +63,7 @@ use crate::{
 mod connection;
 mod dispatch;
 mod inner;
+mod language;
 
 use dispatch::rand_u16;
 pub use inner::{
@@ -81,6 +82,7 @@ pub struct Pebble {
     app_message_operation: Arc<AsyncMutex<()>>,
     preference_operation: Arc<AsyncMutex<()>>,
     install_operation: Arc<AsyncMutex<()>>,
+    language_operation: Arc<AsyncMutex<()>>,
 }
 
 /// Confirmed byte-level progress for a PBW installation.
@@ -298,6 +300,7 @@ impl Pebble {
             app_message_operation: Arc::new(AsyncMutex::new(())),
             preference_operation: Arc::new(AsyncMutex::new(())),
             install_operation: Arc::new(AsyncMutex::new(())),
+            language_operation: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -395,6 +398,7 @@ impl Pebble {
         // their callers pending until the per-request timeout fires.
         inner.watch_version_pending.clear();
         inner.watch_color_pending.clear();
+        inner.language_pending.clear();
         inner.app_fetch_pending.clear();
         inner.put_bytes_pending.take();
         if let Some(acc) = inner.screenshot.take() {

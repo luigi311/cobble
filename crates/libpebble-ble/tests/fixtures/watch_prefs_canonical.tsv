@@ -15,3 +15,13 @@ language standard number:9 09
 textStyle standard number:2 02
 textStyle emery number:2 03
 textStyle gabbro number:0 01
+# Current text keys: mobileapp 5a0a187357221948a355c430f378e2a88de85334, WatchPrefEntity.kt
+systemTextSize standard number:0 00
+systemTextSize emery number:1 02
+systemTextSize gabbro number:2 03
+notifTextSize standard number:2 02
+notifTextSize emery number:0 01
+notifTextSize gabbro number:1 02
+notifTextSize standard number:4 04
+notifTextSize emery number:4 04
+notifTextSize gabbro number:4 04

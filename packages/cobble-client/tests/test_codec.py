@@ -94,7 +94,7 @@ def test_device_config_preserves_availability_and_native_units():
     assert snapshot.preferences["clock24h"].raw == b"\x01"
 
 
-def test_device_config_preserves_new_hrm_values():
+def test_device_config_preserves_new_hrm_values_and_installed_language_choices():
     raw = {
         "api_version": 1,
         "revision": 7,
@@ -109,11 +109,15 @@ def test_device_config_preserves_new_hrm_values():
         "health.sleep_insights_enabled": False,
         "health.hrm.availability": "available",
         "health.hrm.enabled": True,
+        "preference.language.availability": "available",
+        "preference.language.value": 3,
+        "preference.language.options": [(1, "English"), (3, "Deutsch")],
     }
     for interval in (4, 17):
         raw["health.hrm.measurement_interval"] = interval
         snapshot = decode_device_config(raw)
         assert snapshot.health.value.hrm.value.measurement_interval == interval
+        assert snapshot.preferences["language"].options == ((1, "English"), (3, "Deutsch"))
 
 
 def test_daemon_config_changed_handler_receives_revision():

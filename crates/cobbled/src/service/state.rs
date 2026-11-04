@@ -165,6 +165,7 @@ pub(crate) struct DaemonState {
     pub(crate) imperial_units_raw: Option<Vec<u8>>,
     pub(crate) watch_settings: HashMap<String, WatchPrefValue>,
     pub(crate) watch_setting_raw: HashMap<String, Vec<u8>>,
+    pub(crate) language_packs: Option<libpebble_ble::LanguagePacks>,
     pub(crate) device_config_revision: u64,
     pub(crate) device_config_state: DeviceConfigState,
     pub(crate) device_config_last_read_at_ms: Option<i64>,

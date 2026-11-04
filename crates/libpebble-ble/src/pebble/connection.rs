@@ -112,6 +112,7 @@ impl Pebble {
                     let nack_handlers = inner.nack_handlers.clone();
                     inner.datalog_sessions.clear();
                     inner.blobdb2_pending.clear();
+                    inner.language_pending.clear();
                     if let Some(acc) = inner.screenshot.take() {
                         let _ = acc.done.send(Err("watch disconnected".into()));
                     }

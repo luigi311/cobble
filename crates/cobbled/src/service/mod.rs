@@ -106,6 +106,8 @@ fn editable_general_preference(key: &str) -> Option<&'static str> {
         "stationaryMode" => "stationaryMode",
         "displayOrientationLeftHanded" => "displayOrientationLeftHanded",
         "textStyle" => "textStyle",
+        "systemTextSize" => "systemTextSize",
+        "notifTextSize" => "notifTextSize",
         "lightEnabled" => "lightEnabled",
         "lightAmbientSensorEnabled" => "lightAmbientSensorEnabled",
         "lightMotion" => "lightMotion",
@@ -340,6 +342,11 @@ fn default_preferences_patch(
 ) -> HashMap<String, OwnedValue> {
     let mut patch = HashMap::new();
     for (key, cached) in observed {
+        if matches!(key.as_str(), "language" | "langEnglish")
+            || (key == "textStyle" && observed.contains_key("systemTextSize"))
+        {
+            continue;
+        }
         if editable_general_preference(key).is_none() {
             continue;
         }
@@ -399,6 +406,10 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         result.insert(
             "capability.hrm.five_minute_sampling".into(),
             dbus_val((info.running.major, info.running.minor, info.running.patch) >= (4, 39, 0)),
+        );
+        result.insert(
+            "capability.language.multiple_packs".into(),
+            dbus_val(supports_language_packs(Some(info))),
         );
         result.insert(
             "watch_id".into(),
@@ -514,7 +525,14 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         result.insert("health.units.availability".into(), dbus_val("not_received"));
     }
     let model = preference_model(state.device_config_watch.as_ref());
+    let multiple_packs = supports_language_packs(state.device_config_watch.as_ref());
     for (key, cached_value) in &state.watch_settings {
+        if (multiple_packs && matches!(key.as_str(), "language" | "langEnglish"))
+            || (key == "langEnglish" && state.watch_settings.contains_key("language"))
+            || (key == "textStyle" && state.watch_settings.contains_key("systemTextSize"))
+        {
+            continue;
+        }
         let decoded = state
             .watch_setting_raw
             .get(key)
@@ -531,13 +549,46 @@ fn device_config_map(state: &DaemonState) -> HashMap<String, OwnedValue> {
         if let Some(raw) = state.watch_setting_raw.get(key) {
             result.insert(format!("preference.{key}.raw"), dbus_val(raw.clone()));
         }
+        if key == "language"
+            && let WatchPrefValue::Number(current) = value
+        {
+            result.insert(
+                "preference.language.options".into(),
+                dbus_val(legacy_language_options(*current)),
+            );
+        }
+    }
+    if multiple_packs {
+        result.insert(
+            "preference.language.availability".into(),
+            dbus_val(if state.language_packs.is_some() {
+                "available"
+            } else {
+                "not_received"
+            }),
+        );
+        if let Some(packs) = &state.language_packs {
+            result.insert(
+                "preference.language.value".into(),
+                dbus_val(libpebble_ble::endpoints::language::slot_preference_value(
+                    packs.active_slot,
+                )),
+            );
+            result.insert(
+                "preference.language.options".into(),
+                dbus_val(language_options(packs)),
+            );
+        }
     }
     result
 }
 
 mod device_preferences;
 mod state;
-use device_preferences::validate_hrm_interval;
+use device_preferences::{
+    language_options, language_readback_matches, language_selection, legacy_language_options,
+    reported_language_slot, supports_language_packs, validate_hrm_interval,
+};
 pub(crate) use state::{
     BUS_NAME, DaemonError, DaemonEvent, DaemonState, HealthProfile, MUSIC_APP_UUID, OBJECT_PATH,
     dbus_val, watch_pref_owned_value,
@@ -775,6 +826,7 @@ impl CobbleDaemon {
                 imperial_units_raw: None,
                 watch_settings: HashMap::new(),
                 watch_setting_raw: HashMap::new(),
+                language_packs: None,
                 device_config_revision: 0,
                 device_config_state: DeviceConfigState::Disconnected,
                 device_config_last_read_at_ms: None,
@@ -925,6 +977,7 @@ impl CobbleDaemon {
             state.imperial_units_raw = None;
             state.watch_settings.clear();
             state.watch_setting_raw.clear();
+            state.language_packs = None;
             state.device_config_watch = None;
             state.device_config_blob_db_version = 0;
             state.device_config_last_read_at_ms = None;
@@ -1048,8 +1101,18 @@ impl CobbleDaemon {
         let mut state = self.state.lock().unwrap();
         let model = preference_model(state.device_config_watch.as_ref());
         let value = decode_watch_pref_for_model(&key, &raw, model).unwrap_or(value);
+        let language_changed = matches!(key.as_str(), "language" | "langEnglish");
         state.watch_setting_raw.insert(key.clone(), raw);
         state.watch_settings.insert(key, value.clone());
+        // During refresh the subsequent SystemMessage reply is authoritative.
+        // Outside refresh, follow on-watch changes reported through WatchPrefs.
+        if language_changed
+            && state.device_config_state != DeviceConfigState::Loading
+            && let Some(slot) = reported_language_slot(&state.watch_settings)
+            && let Some(packs) = &mut state.language_packs
+        {
+            packs.active_slot = slot;
+        }
         value
     }
 
@@ -1918,7 +1981,18 @@ impl CobbleDaemon {
                 .err()
                 .map(|error| error.to_string())
         };
-        let error = refresh_error.or(identity_error);
+        let language_error = if supports_language_packs(info.as_ref()) {
+            match pebble.list_language_packs().await {
+                Ok(packs) => {
+                    self.state.lock().unwrap().language_packs = Some(packs);
+                    None
+                }
+                Err(error) => Some(format!("installed language packs unavailable: {error}")),
+            }
+        } else {
+            None
+        };
+        let error = refresh_error.or(language_error).or(identity_error);
         let (done_tx, done_rx) = oneshot::channel();
         self.event_tx()
             .send(DaemonEvent::DeviceConfigRefreshComplete {
@@ -2216,7 +2290,7 @@ impl CobbleDaemon {
             }
         }
 
-        let (watch_type, observed_settings) = {
+        let (watch_type, observed_settings, language_packs, multiple_packs) = {
             let state = self.state.lock().unwrap();
             (
                 state
@@ -2225,6 +2299,8 @@ impl CobbleDaemon {
                     .map(|info| info.watch_type())
                     .unwrap_or(WatchType::Unknown),
                 state.watch_settings.clone(),
+                state.language_packs.clone(),
+                supports_language_packs(state.device_config_watch.as_ref()),
             )
         };
         let model = match watch_type {
@@ -2247,6 +2323,7 @@ impl CobbleDaemon {
             writes.push(("heartRatePreferences", thresholds_raw.clone().unwrap()));
         }
         let mut general_updates = Vec::new();
+        let mut language_to_select = None;
         let mut preference_fields: Vec<_> = patch
             .iter()
             .filter(|(field, _)| field.starts_with("preference."))
@@ -2256,7 +2333,7 @@ impl CobbleDaemon {
             let Some(key) = field.strip_prefix("preference.") else {
                 continue;
             };
-            if !observed_settings.contains_key(key) {
+            if !observed_settings.contains_key(key) && !(key == "language" && multiple_packs) {
                 return Err(DaemonError::Failed(format!(
                     "preference {key} was not reported by this watch"
                 )));
@@ -2272,6 +2349,32 @@ impl CobbleDaemon {
                     "invalid preference value for {key}"
                 )));
             };
+            if key == "langEnglish"
+                && (multiple_packs || observed_settings.contains_key("language"))
+            {
+                return Err(DaemonError::Failed(
+                    "use the language selector on this watch".into(),
+                ));
+            }
+            if key == "textStyle" && observed_settings.contains_key("systemTextSize") {
+                return Err(DaemonError::Failed(
+                    "this watch uses systemTextSize instead of textStyle".into(),
+                ));
+            }
+            if key == "language" {
+                let WatchPrefValue::Number(code) = &value else {
+                    return Err(DaemonError::Failed(
+                        "language must be an unsigned selection value".into(),
+                    ));
+                };
+                if multiple_packs {
+                    language_to_select = Some(language_selection(language_packs.as_ref(), *code)?);
+                } else if *code > 1 {
+                    return Err(DaemonError::Failed(
+                        "this watch supports English or its installed language pack".into(),
+                    ));
+                }
+            }
             let encoded = encode_watch_pref(key, &value, model)
                 .map_err(|error| DaemonError::Failed(error.to_string()))?;
             let key = editable_general_preference(key).ok_or_else(|| {
@@ -2281,9 +2384,18 @@ impl CobbleDaemon {
             general_updates.push((key.to_owned(), value, encoded));
         }
 
-        let write_error = write_records_in_order(writes, |key, value| {
+        let mut write_error = write_records_in_order(writes, |key, value| {
             let pebble = pebble.clone();
+            let language = language_to_select.clone();
             async move {
+                if key == "language"
+                    && let Some(pack) = language
+                {
+                    return pebble
+                        .set_active_language(pack.as_ref())
+                        .await
+                        .map_err(|error| error.to_string());
+                }
                 pebble
                     .write_preference_confirmed(key, &value)
                     .await
@@ -2295,6 +2407,19 @@ impl CobbleDaemon {
         .err();
         if blob_db_version >= 1 {
             let mut snapshot = self.refresh_device_config_unlocked().await?;
+            if write_error.is_none()
+                && let Some(selected) = &language_to_select
+            {
+                let state = self.state.lock().unwrap();
+                if state.device_config_error.is_none()
+                    && !language_readback_matches(selected.as_ref(), state.language_packs.as_ref())
+                {
+                    write_error = Some(
+                        "language: readback mismatch after selecting the installed translation"
+                            .into(),
+                    );
+                }
+            }
             if let Some(message) = write_error {
                 let mut state = self.state.lock().unwrap();
                 state.device_config_error = Some(message);
@@ -2338,6 +2463,14 @@ impl CobbleDaemon {
             for (key, value, raw) in general_updates {
                 state.watch_settings.insert(key.clone(), value);
                 state.watch_setting_raw.insert(key, raw);
+            }
+            if let Some(pack) = language_to_select
+                && let Some(packs) = &mut state.language_packs
+            {
+                packs.active_slot = pack
+                    .map_or(libpebble_ble::endpoints::language::ENGLISH_SLOT, |pack| {
+                        pack.slot
+                    });
             }
             state.device_config_state = completed_write_state(blob_db_version, false);
             state.device_config_revision = state.device_config_revision.wrapping_add(1);
@@ -2876,6 +3009,31 @@ mod tests {
             1
         );
         assert!(default_preferences_patch(&observed, &raw, WatchPrefModel::Standard).is_empty());
+    }
+
+    #[test]
+    fn reset_defaults_uses_current_text_keys_and_leaves_language_selection_alone() {
+        let observed = HashMap::from([
+            ("textStyle".into(), WatchPrefValue::Number(0)),
+            ("systemTextSize".into(), WatchPrefValue::Number(0)),
+            ("notifTextSize".into(), WatchPrefValue::Number(4)),
+            ("language".into(), WatchPrefValue::Number(3)),
+            ("langEnglish".into(), WatchPrefValue::Bool(true)),
+        ]);
+        let raw = HashMap::from([
+            ("systemTextSize".into(), vec![1]),
+            ("notifTextSize".into(), vec![4]),
+        ]);
+        let patch = default_preferences_patch(&observed, &raw, WatchPrefModel::Emery);
+        assert_eq!(patch.len(), 2);
+        assert_eq!(
+            u32::try_from(patch.get("preference.systemTextSize").unwrap()).unwrap(),
+            1
+        );
+        assert_eq!(
+            u32::try_from(patch.get("preference.notifTextSize").unwrap()).unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

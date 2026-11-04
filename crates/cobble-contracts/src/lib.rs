@@ -192,6 +192,15 @@ pub struct PreferenceField {
     /// Exact record retained for unknown values and lossless reconciliation.
     pub raw: Vec<u8>,
     pub error: Option<ConfigError>,
+    /// Watch-reported choices, when the available values depend on installed content.
+    #[serde(default)]
+    pub options: Vec<PreferenceOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferenceOption {
+    pub value: u32,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
