@@ -409,9 +409,7 @@ impl Pebble {
         };
         match c.read().await {
             Ok(data) => {
-                if let Some(&level) = data.first() {
-                    super::dispatch::update_battery(&self.inner, level);
-                }
+                super::dispatch::update_battery(&self.inner, &data);
             }
             Err(e) => debug!("battery read failed: {e}"),
         }
@@ -423,9 +421,7 @@ impl Pebble {
                     debug!("subscribed to battery level");
                     tokio::pin!(stream);
                     while let Some(data) = stream.next().await {
-                        if let Some(&level) = data.first() {
-                            super::dispatch::update_battery(&inner, level);
-                        }
+                        super::dispatch::update_battery(&inner, &data);
                     }
                 }
                 Err(e) => warn!("subscribe to battery failed: {e}"),

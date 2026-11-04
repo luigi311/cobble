@@ -464,7 +464,11 @@ fn on_screenshot_message(payload: &[u8], inner: &Arc<Mutex<PebbleInner>>) {
 }
 
 /// Store a new battery level and fire `on_battery` handlers if it changed.
-pub(crate) fn update_battery(inner: &Arc<Mutex<PebbleInner>>, level: u8) {
+pub(crate) fn update_battery(inner: &Arc<Mutex<PebbleInner>>, data: &[u8]) {
+    let &[level @ 0..=100] = data else {
+        debug!("ignoring malformed battery reading: {data:?}");
+        return;
+    };
     let handlers = {
         let mut guard = inner.lock().unwrap();
         if guard.battery_level == Some(level) {
@@ -581,6 +585,29 @@ mod helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_battery_updates_preserve_the_last_good_level_and_do_not_emit() {
+        let inner = Arc::new(Mutex::new(PebbleInner::new()));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let events = received.clone();
+        inner
+            .lock()
+            .unwrap()
+            .battery_handlers
+            .push(Arc::new(move |level| events.lock().unwrap().push(level)));
+        for data in [&[][..], &[101], &[255], &[50, 0]] {
+            update_battery(&inner, data);
+        }
+        assert_eq!(inner.lock().unwrap().battery_level, None);
+        update_battery(&inner, &[0]);
+        update_battery(&inner, &[100]);
+        for data in [&[][..], &[101], &[255], &[50, 0], &[100]] {
+            update_battery(&inner, data);
+        }
+        assert_eq!(inner.lock().unwrap().battery_level, Some(100));
+        assert_eq!(*received.lock().unwrap(), [0, 100]);
+    }
 
     #[test]
     fn language_selection_replies_match_token_and_slot() {
