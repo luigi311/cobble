@@ -30,6 +30,13 @@ pub const PPOGATT_BADBAD_SERVICE: Uuid = uuid::uuid!("badbadba-dbad-badb-adba-ba
 pub const PPOGATT_WATCH_NOTIFY: Uuid = uuid::uuid!("30000004-328e-0fbb-c642-1aa6699bdada");
 pub const PPOGATT_WATCH_WRITE: Uuid = uuid::uuid!("30000006-328e-0fbb-c642-1aa6699bdada");
 
+// Reverse PPoGATT v2: watch-hosted service on newer NimBLE firmware.
+pub const PPOGATT_WATCH_SERVER_V2_SERVICE: Uuid =
+    uuid::uuid!("40000000-328e-0fbb-c642-1aa6699bdada");
+pub const PPOGATT_WATCH_SERVER_V2_NOTIFY: Uuid =
+    uuid::uuid!("40000001-328e-0fbb-c642-1aa6699bdada");
+pub const PPOGATT_WATCH_SERVER_V2_WRITE: Uuid = uuid::uuid!("40000003-328e-0fbb-c642-1aa6699bdada");
+
 // Pebble system app UUIDs (from libpebblecommon SystemAppIDs).
 // Used with send_app_message, launch_app, stop_app, etc.
 pub const SYSTEM_APP_UUID: &str = "00000000-0000-0000-0000-000000000000";

@@ -12,6 +12,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bluer::{
@@ -26,117 +27,37 @@ use bluer::{
     },
 };
 use futures::StreamExt;
-use tokio::sync::{Notify, mpsc};
-use tracing::{debug, trace, warn};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::timeout;
+use tracing::{debug, warn};
 
-use crate::{
-    transport::ppogatt::{
-        PPOGATT_WINDOW, PPoGATTSession, PPoGATTType, parse_ppogatt_header, ppogatt_header,
-    },
-    uuids::{
-        PPOGATT_BADBAD_SERVICE, PPOGATT_SERVER_READ_CHARACTERISTIC, PPOGATT_SERVER_SERVICE,
-        PPOGATT_SERVER_WRITE_CHARACTERISTIC,
-    },
+use super::lifecycle::stopped;
+use super::link::StatusGuard;
+use super::{LinkState, PpogTransport, TransportMode, TransportStatus};
+use crate::uuids::{
+    PPOGATT_BADBAD_SERVICE, PPOGATT_SERVER_READ_CHARACTERISTIC, PPOGATT_SERVER_SERVICE,
+    PPOGATT_SERVER_WRITE_CHARACTERISTIC,
 };
 
 // The exact 19-byte response Gadgetbridge returns for a read of 10000002.
 const READ_BLOB: [u8; 19] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 
-type SendTx = mpsc::UnboundedSender<Vec<u8>>;
+/// Handle to a forward PPoGATT link. Drop to unregister and stop its I/O.
+pub type PebbleGattServerHandle = PpogTransport;
 
-struct ServerState {
-    mtu: usize,
-    session: PPoGATTSession,
-    tx_queue: VecDeque<Vec<u8>>,
-}
-
-impl ServerState {
-    fn new() -> Self {
-        Self {
-            mtu: 23,
-            session: PPoGATTSession::new(),
-            tx_queue: VecDeque::new(),
-        }
-    }
-
-    fn max_body(&self) -> usize {
-        // ATT(3) + PPoGATT header(1) overhead; floor at 20 bytes.
-        (self.mtu.saturating_sub(4)).max(20)
-    }
-}
-
-/// Handle held by the caller. Drop to unregister the GATT application.
-pub struct PebbleGattServerHandle {
-    send_tx: SendTx,
-    mtu: Arc<Mutex<usize>>,
-    _app_handle: bluer::gatt::local::ApplicationHandle,
-}
-
-impl PebbleGattServerHandle {
-    /// Queue one whole Pebble Protocol message for transmission to the watch.
-    pub fn send(&self, pebble_message: Vec<u8>) {
-        if self.send_tx.send(pebble_message).is_err() {
-            debug!("GATT send channel closed; message dropped");
-        }
-    }
-
-    pub fn set_mtu(&self, mtu: usize) {
-        *self.mtu.lock().unwrap() = mtu;
-    }
-
-    pub fn mtu(&self) -> usize {
-        *self.mtu.lock().unwrap()
-    }
-}
-
-/// Owns the GATT notification socket and forwards packets from `packet_rx`.
-/// Updates `mtu_shared` from the negotiated ATT MTU. Calls `on_disconnect` on exit.
-async fn write_task(
-    writer: CharacteristicWriter,
-    mut packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    on_disconnect: Arc<dyn Fn() + Send + Sync>,
-    mtu_shared: Arc<Mutex<usize>>,
-) {
-    let ble_mtu = writer.mtu();
-    *mtu_shared.lock().unwrap() = ble_mtu;
-    debug!("BLE ATT MTU (from GATT server writer): {ble_mtu}");
-
-    loop {
-        tokio::select! {
-            packet = packet_rx.recv() => {
-                match packet {
-                    Some(data) => {
-                        if writer.send(&data).await.is_err() {
-                            debug!("GATT write failed; watch disconnected");
-                            break;
-                        }
-                    }
-                    None => {
-                        debug!("GATT packet channel closed; writer exiting");
-                        break;
-                    }
-                }
-            }
-            _ = writer.closed() => {
-                debug!("GATT writer closed by remote");
-                break;
-            }
-        }
-    }
-    on_disconnect();
-}
-
+/// Register the phone-hosted services and return an inactive forward transport.
 pub async fn start_gatt_server(
     adapter: &Adapter,
     on_data: Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>,
-    on_disconnect: Arc<dyn Fn() + Send + Sync + 'static>,
-    connected_notify: Arc<Notify>,
-    session_ready_notify: Arc<Notify>,
-) -> Result<PebbleGattServerHandle, bluer::Error> {
-    let (send_tx, send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+) -> Result<PpogTransport, bluer::Error> {
+    let (send_tx, mut send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (ctrl, ctrl_handle) = characteristic_control();
-    let mtu_shared = Arc::new(Mutex::new(23usize));
+    let packet_size = Arc::new(Mutex::new(20));
+    let (status_tx, status_rx) = watch::channel(TransportStatus::Starting);
+    let status = StatusGuard(status_tx);
+    let (start_tx, start_rx) = oneshot::channel();
+    let (stop_tx, mut stop_rx) = watch::channel(false);
 
     let write_tx_clone = write_tx.clone();
     let write_char = Characteristic {
@@ -205,148 +126,83 @@ pub async fn start_gatt_server(
     let app_handle = adapter.serve_gatt_application(app).await?;
     debug!("GATT server registered on adapter {}", adapter.name());
 
-    let mtu_for_task = mtu_shared.clone();
-
-    tokio::spawn(async move {
-        tokio::spawn(async move {
-            tokio::pin!(badbad_ctrl);
-            while badbad_ctrl.next().await.is_some() {}
-        });
-
-        let mut state = ServerState::new();
-        let mut notify_tx: Option<mpsc::UnboundedSender<Vec<u8>>> = None;
-        let mut send_rx = send_rx;
-        let mut write_rx = write_rx;
-
+    let packet_size_for_task = packet_size.clone();
+    let task = tokio::spawn(async move {
+        let status = status;
+        if start_rx.await.is_err() {
+            return Ok(());
+        }
+        let mut state = LinkState::new(TransportMode::Forward);
+        let mut writer: Option<CharacteristicWriter> = None;
+        let mut packets = VecDeque::new();
         tokio::pin!(ctrl);
-
+        tokio::pin!(badbad_ctrl);
         loop {
-            state.mtu = *mtu_for_task.lock().unwrap();
-
             tokio::select! {
-                Some(event) = ctrl.next() => {
-                    if let CharacteristicControlEvent::Notify(writer) = event {
+                _ = stopped(&mut stop_rx) => break,
+                event = ctrl.next() => {
+                    let Some(event) = event else { break; };
+                    if let CharacteristicControlEvent::Notify(next_writer) = event {
                         debug!("watch subscribed to PPoGATT server characteristic");
-                        let (tx, rx) = mpsc::unbounded_channel();
-                        notify_tx = Some(tx);
-                        let disc = on_disconnect.clone();
-                        let mtu_clone = mtu_for_task.clone();
-                        tokio::spawn(write_task(writer, rx, disc, mtu_clone));
-                        connected_notify.notify_waiters();
+                        let limit = next_writer.mtu();
+                        debug!("PPoGATT forward GATT value limit={limit}");
+                        *packet_size_for_task.lock().unwrap() = limit;
+                        writer = Some(next_writer);
                     }
                 }
-
-                Some(packet) = write_rx.recv() => {
-                    handle_ppogatt_in(
-                        &packet,
-                        &mut state,
-                        &mut notify_tx,
-                        &on_data,
-                        &session_ready_notify,
-                    );
-                }
-
-                Some(msg) = send_rx.recv() => {
-                    let max_body = state.max_body();
-                    for chunk in msg.chunks(max_body) {
-                        state.tx_queue.push_back(chunk.to_vec());
+                _ = async {
+                    match &writer {
+                        Some(writer) => { let _ = writer.closed().await; }
+                        None => std::future::pending().await,
                     }
-                    pump_tx(&mut state, &mut notify_tx);
+                } => { debug!("PPoGATT forward notification channel closed"); break; }
+                packet = write_rx.recv() => {
+                    let Some(packet) = packet else { break; };
+                    let was_ready = state.is_ready();
+                    let output = state.receive(&packet);
+                    if was_ready && !state.is_ready() {
+                        warn!("PPoGATT forward reset during active session; reconnecting");
+                        break;
+                    }
+                    packets.extend(output.packets);
+                    for message in output.messages { on_data(message); }
+                }
+                message = send_rx.recv() => {
+                    let Some(message) = message else { break; };
+                    state.enqueue(message);
+                }
+                Some(_) = badbad_ctrl.next() => {}
+            }
+            if let Some(writer) = &writer {
+                let limit = (*packet_size_for_task.lock().unwrap()).min(writer.mtu());
+                loop {
+                    let packet = packets.pop_front().or_else(|| state.next_packet(limit));
+                    let Some(packet) = packet else {
+                        break;
+                    };
+                    if !matches!(
+                        timeout(Duration::from_secs(5), writer.send(&packet)).await,
+                        Ok(Ok(()))
+                    ) {
+                        warn!("PPoGATT forward write failed or timed out");
+                        return Ok(());
+                    }
+                }
+                if state.is_ready() && *status.0.borrow() != TransportStatus::Ready {
+                    status.0.send_replace(TransportStatus::Ready);
                 }
             }
         }
+        Ok(())
     });
-
-    Ok(PebbleGattServerHandle {
+    Ok(PpogTransport::new(
+        TransportMode::Forward,
         send_tx,
-        mtu: mtu_shared,
-        _app_handle: app_handle,
-    })
-}
-
-fn handle_ppogatt_in(
-    packet: &[u8],
-    state: &mut ServerState,
-    notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>,
-    on_data: &Arc<dyn Fn(Vec<u8>) + Send + Sync>,
-    session_ready_notify: &Arc<Notify>,
-) {
-    if packet.is_empty() {
-        trace!("PPoGATT empty packet ignored");
-        return;
-    }
-    let (cmd_byte, serial) = parse_ppogatt_header(packet[0]);
-    let body = &packet[1..];
-    trace!(
-        "PPoGATT rx cmd={cmd_byte} serial={serial} len={}",
-        body.len()
-    );
-
-    match cmd_byte {
-        c if c == PPoGATTType::ResetRequest as u8 => {
-            state.session.reset();
-            state.tx_queue.clear();
-            let reply = if packet.len() > 1 {
-                vec![
-                    ppogatt_header(PPoGATTType::ResetComplete, 0),
-                    PPOGATT_WINDOW,
-                    PPOGATT_WINDOW,
-                ]
-            } else {
-                vec![ppogatt_header(PPoGATTType::ResetComplete, 0)]
-            };
-            send_raw(reply, notify_tx);
-            session_ready_notify.notify_waiters();
-        }
-        c if c == PPoGATTType::ResetComplete as u8 => {
-            debug!("PPoGATT reset complete");
-            session_ready_notify.notify_waiters();
-        }
-        c if c == PPoGATTType::Ack as u8 => {
-            trace!("PPoGATT ack serial={serial}");
-            state.session.on_ack(serial);
-            pump_tx(state, notify_tx);
-        }
-        c if c == PPoGATTType::Data as u8 => {
-            if let Some(messages) = state.session.on_data(serial, body) {
-                // ACK the highest consecutive serial received (rx_seq - 1).
-                // This may be higher than the incoming serial when buffered
-                // ahead-of-sequence packets were also consumed.
-                let ack_serial = state.session.rx_seq.wrapping_sub(1) & 0x1F;
-                let ack = vec![ppogatt_header(PPoGATTType::Ack, ack_serial)];
-                send_raw(ack, notify_tx);
-                for msg in messages {
-                    on_data(msg);
-                }
-            }
-            // Buffered (ahead-of-sequence) or duplicate: no ACK needed.
-        }
-        other => {
-            debug!("PPoGATT unknown command {other} ignored");
-        }
-    }
-}
-
-fn pump_tx(state: &mut ServerState, notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>) {
-    while !state.tx_queue.is_empty() && state.session.can_send() {
-        let chunk = state.tx_queue.pop_front().unwrap();
-        let seq = state.session.next_tx_seq();
-        let header = ppogatt_header(PPoGATTType::Data, seq);
-        trace!("PPoGATT tx DATA seq={seq} len={}", chunk.len());
-        let mut packet = vec![header];
-        packet.extend_from_slice(&chunk);
-        send_raw(packet, notify_tx);
-        if notify_tx.is_none() {
-            return;
-        }
-    }
-}
-
-fn send_raw(packet: Vec<u8>, notify_tx: &mut Option<mpsc::UnboundedSender<Vec<u8>>>) {
-    if let Some(tx) = notify_tx
-        && tx.send(packet).is_err()
-    {
-        warn!("PPoGATT notify channel closed (link down)");
-        *notify_tx = None;
-    }
+        packet_size,
+        status_rx,
+        start_tx,
+        stop_tx,
+        task,
+    )
+    .with_application(app_handle))
 }

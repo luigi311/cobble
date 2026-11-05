@@ -10,7 +10,7 @@ it. That process is the daemon (`cobbled`); everything else talks to the daemon 
 
 ```
 crates/libpebble-ble   Rust BLE/protocol library. Owns BlueZ (via bluer),
-                       the PPoGATT GATT server, pairing, AppMessage, and all
+                       both PPoGATT transports, pairing, AppMessage, and all
                        endpoint codecs. Knows nothing about D-Bus or the daemon.
           ↑
 crates/cobbled         Rust daemon. Wraps one libpebble-ble Pebble instance,
@@ -31,6 +31,22 @@ cobble-client          package; it wraps the D-Bus proxy behind the same API
 ```
 
 The library never learns the daemon exists. The client never opens a BLE link.
+
+Cobble automatically uses reverse PPoGATT v2 when the watch exposes the
+`40000000-328e-0fbb-c642-1aa6699bdada` service. The watch hosts the GATT service;
+Cobble subscribes, then initiates the reset handshake. Watches without this
+service use forward PPoGATT, where Cobble hosts the service. If reverse setup
+or its handshake fails, Cobble stops that attempt and falls back to forward
+mode over the same BLE connection. Watches that only expose legacy reverse v1
+continue to use forward mode. No configuration change is required.
+
+The daemon logs `PPoGATT transport selected: reverse-v2` or
+`PPoGATT transport selected: forward` after the handshake completes. A reverse
+failure also logs its reason and the fallback. Startup waits for a ready data
+channel, and disconnect or cancellation stops transport tasks and subscriptions.
+Detected link loss also fails pending requests and releases resources without
+requiring a separate disconnect call. Reconnect and fallback wait for owned
+BlueZ operations and unsubscribe replies to finish, including after cancellation.
 
 ## PebbleKit JS
 
@@ -65,6 +81,8 @@ crates/libpebble-ble/src/
                        first-time bonding; only accepts the configured address).
     gatt_server.rs     Phone-hosted PPoGATT GATT server (BlueZ peripheral).
                        The watch connects back to this as a GATT client.
+    gatt_client.rs     Reverse-v2 PPoGATT client for watch-hosted services.
+    link.rs            Shared handshake, segmentation, flow control, and task lifetime.
     ppogatt.rs         PPoGATT framing, windowed sequence numbers, reassembly.
 
   endpoints/           One file per Pebble Protocol endpoint.

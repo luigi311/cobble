@@ -7,6 +7,7 @@ description = "Talk to a Pebble smartwatch over Bluetooth Low Energy from Linux.
 [dependencies]
 bluer = { version = "0.17", features = ["full"] }
 dbus = { version = "0.9", features = ["vendored"] }
+dbus-tokio = "0.7"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"

@@ -3506,6 +3506,7 @@ dependencies = [
  "bluer",
  "chrono",
  "dbus",
+ "dbus-tokio",
  "futures",
  "iana-time-zone",
  "serde",
