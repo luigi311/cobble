@@ -52,10 +52,22 @@ pub struct SleepBarData {
 }
 
 pub struct NapSessionData {
+    /// Deep nap time is a subset of the session duration.
+    pub duration_secs: i64,
+    pub deep_secs: i64,
     pub date_label: String,
     pub time_label: String,
     pub duration_label: String,
     pub deep_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NapSummaryData {
+    pub count: usize,
+    pub scope_label: String,
+    pub total_label: String,
+    pub avg_label: String,
+    pub latest_label: String,
 }
 
 pub struct HealthSessionData {

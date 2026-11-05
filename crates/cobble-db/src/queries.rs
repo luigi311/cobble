@@ -649,6 +649,8 @@ pub fn load_nap_sessions_for_range(
             sessions.push((
                 nap.utc_start,
                 NapSessionData {
+                    duration_secs: duration,
+                    deep_secs: deep.min(duration),
                     date_label: start.format("%a, %b %-d").to_string(),
                     time_label: format!(
                         "{} – {}",
@@ -663,6 +665,51 @@ pub fn load_nap_sessions_for_range(
     }
     sessions.sort_by_key(|(start, _)| *start);
     Ok(sessions.into_iter().map(|(_, session)| session).collect())
+}
+
+/// Compact nap information for the exact visible or selected date range.
+/// Durations come from primary nap sessions; deep phases are already included.
+pub fn summarize_naps(sessions: &[NapSessionData], range: DateRange) -> NapSummaryData {
+    let count = sessions.len();
+    let total_secs: i64 = sessions.iter().map(|session| session.duration_secs).sum();
+    let scope_label = if range.start == range.end {
+        range.start.format("%a, %b %-d").to_string()
+    } else if range.start.year() != range.end.year() {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d, %Y"),
+            range.end.format("%b %-d, %Y")
+        )
+    } else if range.start.month() == range.end.month() {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d"),
+            range.end.format("%-d")
+        )
+    } else {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d"),
+            range.end.format("%b %-d")
+        )
+    };
+    let latest_label = sessions.last().map_or_else(String::new, |session| {
+        let prefix = if count > 1 { "Latest: " } else { "" };
+        // Keep the start date even for a one-day selection: naps are grouped
+        // by wake date, and their start may be on the previous calendar date.
+        format!("{prefix}{} · {}", session.date_label, session.time_label)
+    });
+    NapSummaryData {
+        count,
+        scope_label,
+        total_label: format_duration(total_secs),
+        avg_label: format_duration(if count == 0 {
+            0
+        } else {
+            total_secs / count as i64
+        }),
+        latest_label,
+    }
 }
 
 fn total_sleep(nights: &[Night]) -> i64 {
@@ -2018,8 +2065,12 @@ mod tests {
         assert_eq!(sessions[0].time_label, "2:00 PM – 3:00 PM");
         assert_eq!(sessions[0].duration_label, "1h 0m");
         assert_eq!(sessions[0].deep_label, "15m deep");
+        assert_eq!(sessions[0].duration_secs, 3600);
+        assert_eq!(sessions[0].deep_secs, 15 * 60);
         assert_eq!(sessions[1].time_label, "5:00 PM – 5:30 PM");
         assert!(sessions[1].deep_label.is_empty());
+        assert_eq!(sessions[1].duration_secs, 30 * 60);
+        assert_eq!(sessions[1].deep_secs, 0);
 
         let sessions = load_nap_sessions_for_range(&conn, DateRange::day(jul5)).unwrap();
         assert_eq!(sessions.len(), 1);
@@ -2027,6 +2078,98 @@ mod tests {
         assert_eq!(sessions[0].time_label, "11:30 PM – Jul 5, 12:30 AM");
         assert_eq!(sessions[0].duration_label, "1h 0m");
         assert_eq!(sessions[0].deep_label, "15m deep");
+        let summary = summarize_naps(&sessions, DateRange::day(jul5));
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.total_label, "1h 0m");
+        assert_eq!(
+            summary.latest_label,
+            "Sat, Jul 4 · 11:30 PM – Jul 5, 12:30 AM"
+        );
+    }
+
+    #[test]
+    fn nap_summary_uses_numeric_durations_and_keeps_deep_time_inside_totals() {
+        let conn = setup();
+        let day = d(2026, 7, 4);
+        insert_session(&conn, 3, local(day, 13, 0), 30 * 60);
+        insert_session(&conn, 4, local(day, 13, 5), 10 * 60);
+        insert_session(&conn, 3, local(day, 16, 0), 60 * 60);
+        insert_session(&conn, 4, local(day, 16, 10), 20 * 60);
+        let range = DateRange::day(day);
+        let sessions = load_nap_sessions_for_range(&conn, range).unwrap();
+        let summary = summarize_naps(&sessions, range);
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.scope_label, "Sat, Jul 4");
+        assert_eq!(summary.total_label, "1h 30m");
+        assert_eq!(summary.avg_label, "45m");
+        assert_eq!(
+            summary.latest_label,
+            "Latest: Sat, Jul 4 · 4:00 PM – 5:00 PM"
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.deep_secs)
+                .sum::<i64>(),
+            30 * 60
+        );
+        assert_eq!(
+            fetch_daily_wellness(&conn, range).unwrap()[0].sleep_secs,
+            Some(90 * 60)
+        );
+        let mut with_partial_minutes = sessions;
+        with_partial_minutes[0].duration_secs += 119;
+        let summary = summarize_naps(&with_partial_minutes, range);
+        assert_eq!(summary.total_label, "1h 31m");
+        assert_eq!(summary.avg_label, "45m");
+    }
+
+    #[test]
+    fn nap_summary_handles_empty_ranges_and_formats_the_exact_scope() {
+        let day = d(2026, 7, 4);
+        let summary = summarize_naps(&[], DateRange::day(day));
+        assert_eq!(summary.count, 0);
+        assert_eq!(summary.total_label, "0m");
+        assert_eq!(summary.avg_label, "0m");
+        assert!(summary.latest_label.is_empty());
+        for (start, end, label) in [
+            (day, day, "Sat, Jul 4"),
+            (day, d(2026, 7, 10), "Jul 4–10"),
+            (d(2026, 6, 29), d(2026, 7, 5), "Jun 29–Jul 5"),
+            (d(2026, 12, 31), d(2027, 1, 1), "Dec 31, 2026–Jan 1, 2027"),
+        ] {
+            assert_eq!(
+                summarize_naps(&[], DateRange { start, end }).scope_label,
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn nap_summary_selected_partial_week_is_a_total_not_a_bar_average() {
+        let conn = setup();
+        let first = d(2026, 7, 4);
+        let second = d(2026, 7, 5);
+        insert_session(&conn, 3, local(first, 14, 0), 30 * 60);
+        insert_session(&conn, 3, local(second, 15, 0), 60 * 60);
+        insert_session(&conn, 3, local(d(2026, 7, 6), 12, 0), 2 * 3600);
+        let selected = DateRange {
+            start: first,
+            end: second,
+        };
+        let summary = summarize_naps(
+            &load_nap_sessions_for_range(&conn, selected).unwrap(),
+            selected,
+        );
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.total_label, "1h 30m");
+        assert_eq!(summary.avg_label, "45m");
+        let single = DateRange::day(first);
+        let summary = summarize_naps(&load_nap_sessions_for_range(&conn, single).unwrap(), single);
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.total_label, "30m");
+        assert!(!summary.latest_label.starts_with("Latest:"));
+        assert_eq!(summarize_naps(&[], DateRange::day(d(2026, 7, 3))).count, 0);
     }
 
     #[test]

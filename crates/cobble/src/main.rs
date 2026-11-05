@@ -2575,23 +2575,42 @@ fn reload_nap_sessions_for_range(
     db_path: &PathBuf,
     range: cobble_db::DateRange,
 ) {
-    match cobble_db::connect_readonly(db_path) {
-        Err(e) => warn!("cannot open DB: {e}"),
-        Ok(conn) => match cobble_db::load_nap_sessions_for_range(&conn, range) {
-            Err(e) => warn!("load nap sessions failed: {e}"),
-            Ok(sessions) => {
-                let sessions: Vec<NapSession> = sessions
-                    .into_iter()
-                    .map(|session| NapSession {
-                        date_label: session.date_label.into(),
-                        time_label: session.time_label.into(),
-                        duration_label: session.duration_label.into(),
-                        deep_label: session.deep_label.into(),
-                    })
-                    .collect();
-                window.set_nap_sessions(ModelRc::new(VecModel::from(sessions)));
-            }
-        },
+    let result = cobble_db::connect_readonly(db_path)
+        .and_then(|conn| cobble_db::load_nap_sessions_for_range(&conn, range));
+    match result {
+        Err(e) => {
+            warn!("load nap sessions failed: {e}");
+            window.set_nap_summary(to_slint_nap_summary(None, range));
+            window.set_nap_sessions(ModelRc::new(VecModel::from(Vec::<NapSession>::new())));
+        }
+        Ok(sessions) => {
+            window.set_nap_summary(to_slint_nap_summary(Some(&sessions), range));
+            let sessions: Vec<NapSession> = sessions
+                .into_iter()
+                .map(|session| NapSession {
+                    date_label: session.date_label.into(),
+                    time_label: session.time_label.into(),
+                    duration_label: session.duration_label.into(),
+                    deep_label: session.deep_label.into(),
+                })
+                .collect();
+            window.set_nap_sessions(ModelRc::new(VecModel::from(sessions)));
+        }
+    }
+}
+
+fn to_slint_nap_summary(
+    sessions: Option<&[cobble_db::NapSessionData]>,
+    range: cobble_db::DateRange,
+) -> NapSummary {
+    let summary = cobble_db::summarize_naps(sessions.unwrap_or_default(), range);
+    NapSummary {
+        available: sessions.is_some(),
+        count: summary.count as i32,
+        scope_label: summary.scope_label.into(),
+        total_label: summary.total_label.into(),
+        avg_label: summary.avg_label.into(),
+        latest_label: summary.latest_label.into(),
     }
 }
 
@@ -2770,6 +2789,18 @@ fn to_slint_sessions(sessions: Vec<cobble_db::HealthSessionData>) -> Vec<HealthS
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nap_summary_distinguishes_unavailable_data_from_an_empty_selection() {
+        let range = cobble_db::DateRange::day("2026-07-04".parse().unwrap());
+        let unavailable = to_slint_nap_summary(None, range);
+        assert!(!unavailable.available);
+        assert_eq!(unavailable.scope_label, "Sat, Jul 4");
+        let empty = to_slint_nap_summary(Some(&[]), range);
+        assert!(empty.available);
+        assert_eq!(empty.count, 0);
+        assert!(empty.latest_label.is_empty());
+    }
 
     #[tokio::test]
     async fn cancelling_configuration_terminates_the_helper() {

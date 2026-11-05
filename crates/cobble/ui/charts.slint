@@ -1,7 +1,7 @@
 // Health-data chart and list components.
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, NapSession, HealthSession, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
+import { DaySteps, SleepBar, NapSummary, HealthSession, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
 
 // ─── Step bar chart ──────────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ export component SleepChart inherits VerticalLayout {
     in property <bool> weekly-averages;
     in-out property <int> selected-bar-start: -1;
     callback bar-tapped(int, int);
-    property <int> selected-index: -1;
+    in-out property <int> selected-index: -1;
     property <int> detail-index: root.model.length == 1 ? 0 : root.selected-index;
     changed selected-bar-start => {
         if root.selected-bar-start == -1 { root.selected-index = -1; }
@@ -101,8 +101,8 @@ export component SleepChart inherits VerticalLayout {
         }
     }
     if root.weekly-averages: Text {
-        text: "Bars show averages per night with data, including nap-only days.";
-        color: Palette.muted; font-size: 10px; wrap: word-wrap;
+        text: "Weekly bars average days with recorded sleep or naps.";
+        color: Palette.muted; font-size: 11px; wrap: word-wrap;
     }
 
     Rectangle {
@@ -196,38 +196,54 @@ export component SleepChart inherits VerticalLayout {
     }
     if root.detail-index >= 0 && root.detail-index < root.model.length: HorizontalLayout {
         Text {
-            text: "Sleep: " + root.model[root.detail-index].total-label;
+            text: (root.weekly-averages ? "Avg sleep: " : "Sleep: ") + root.model[root.detail-index].total-label;
             color: Palette.accent; font-size: 12px;
         }
         Rectangle { horizontal-stretch: 1; }
         Text {
-            text: "Naps: " + root.nap-model[root.detail-index].total-label;
+            text: (root.weekly-averages ? "Avg naps: " : "Naps: ") + root.nap-model[root.detail-index].total-label;
             color: Palette.light-nap; font-size: 12px;
         }
     }
 }
 
-export component NapSessions inherits VerticalLayout {
-    in property <[NapSession]> model;
-    padding-left: 16px; padding-right: 16px; padding-bottom: 12px;
-    spacing: 8px;
+component NapMetric inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    spacing: 4px;
+    Text { text: root.value; color: Palette.light-nap; font-size: 14px; font-weight: 700; overflow: elide; }
+    Text { text: root.label; color: Palette.text; font-size: 11px; overflow: elide; }
+}
 
-    Text { text: "Nap sessions"; color: Palette.text; font-size: 15px; font-weight: 700; }
-    if root.model.length == 0: Text {
-        text: "No naps in the selected dates.";
-        color: Palette.muted; font-size: 12px;
-    }
-    for nap in root.model: Rectangle {
-        background: Palette.surface; border-radius: 10px;
+export component NapSummaryCard inherits VerticalLayout {
+    in property <NapSummary> summary;
+    padding-left: 16px; padding-right: 16px; padding-bottom: 12px;
+    Rectangle {
+        background: Palette.surface; border-radius: 12px;
         VerticalLayout {
-            padding: 12px; spacing: 4px;
+            padding: 12px; spacing: 8px;
             HorizontalLayout {
-                Text { text: nap.date-label; color: Palette.text; font-size: 13px; font-weight: 600; }
+                spacing: 8px;
+                Text { text: "Naps"; color: Palette.text; font-size: 15px; font-weight: 600; }
                 Rectangle { horizontal-stretch: 1; }
-                Text { text: nap.duration-label; color: Palette.light-nap; font-size: 13px; font-weight: 600; }
+                Text { text: root.summary.scope-label; color: Palette.text; font-size: 11px; wrap: word-wrap; horizontal-alignment: right; }
             }
-            Text { text: nap.time-label; color: Palette.text; font-size: 12px; }
-            if nap.deep-label != "": Text { text: nap.deep-label; color: Palette.light-nap; font-size: 11px; }
+            if root.summary.available && root.summary.count > 0: HorizontalLayout {
+                spacing: 8px;
+                NapMetric { value: "" + root.summary.count; label: "Naps"; }
+                NapMetric { value: root.summary.total-label; label: "Total time"; }
+                NapMetric { value: root.summary.avg-label; label: "Avg nap"; }
+            }
+            if !root.summary.available || root.summary.count == 0: Text {
+                text: root.summary.available ? "No naps recorded in these dates." : "Nap summary unavailable.";
+                color: Palette.text; font-size: 13px; wrap: word-wrap;
+            }
+            if root.summary.available && root.summary.latest-label != "": Text {
+                text: root.summary.latest-label;
+                color: Palette.text; font-size: 12px; wrap: word-wrap;
+            }
         }
     }
 }
@@ -305,8 +321,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
                         Text { text: "Stage Mix"; color: Palette.muted; font-size: 11px; }
-                        HorizontalLayout {
-                            spacing: 8px;
+                        VerticalLayout {
+                            spacing: 4px;
                             HorizontalLayout {
                                 spacing: 3px;
                                 Text { text: "" + round(root.stats.light-pct) + "%"; color: Palette.accent; font-size: 14px; font-weight: 700; }
