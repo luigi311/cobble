@@ -1,7 +1,7 @@
 // Health-data chart and list components.
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
+import { DaySteps, SleepBar, NapSession, HealthSession, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
 
 // ─── Step bar chart ──────────────────────────────────────────────────────────
 
@@ -67,25 +67,32 @@ export component StepsChart inherits VerticalLayout {
     }
 }
 
-// ─── Sleep stacked bar chart ──────────────────────────────────────────────────
+// ─── Combined sleep and nap chart ────────────────────────────────────────────
 
 export component SleepChart inherits VerticalLayout {
     in property <[SleepBar]> model;
-    in property <string> sleep-label;
+    in property <[SleepBar]> nap-model;
+    in property <bool> has-sleep;
+    in property <bool> has-naps;
+    in property <string> max-label;
+    in property <string> mid-label;
     in property <string> avg-label;
     in property <string> delta-label;
     in property <bool> delta-positive: true;
+    in property <bool> weekly-averages;
     in-out property <int> selected-bar-start: -1;
     callback bar-tapped(int, int);
+    property <int> selected-index: -1;
+    property <int> detail-index: root.model.length == 1 ? 0 : root.selected-index;
+    changed selected-bar-start => {
+        if root.selected-bar-start == -1 { root.selected-index = -1; }
+    }
 
-    padding: 16px; spacing: 10px;
+    padding: 16px; spacing: 12px;
 
-    // Header: avg left, delta right (title is in the app header bar)
+    Text { text: "Sleep + naps"; color: Palette.muted; font-size: 11px; }
     HorizontalLayout {
-        if root.avg-label != "": Text {
-            text: root.avg-label;
-            color: Palette.muted; font-size: 13px; vertical-alignment: center;
-        }
+        Text { text: root.avg-label; color: Palette.text; font-size: 16px; font-weight: 600; }
         Rectangle { horizontal-stretch: 1; }
         if root.delta-label != "": Text {
             text: root.delta-label;
@@ -93,29 +100,48 @@ export component SleepChart inherits VerticalLayout {
             font-size: 13px; font-weight: 600; vertical-alignment: center;
         }
     }
+    if root.weekly-averages: Text {
+        text: "Bars show averages per night with data, including nap-only days.";
+        color: Palette.muted; font-size: 10px; wrap: word-wrap;
+    }
 
     Rectangle {
-        background: Palette.surface; border-radius: 12px; height: 200px; clip: true;
+        background: Palette.surface; border-radius: 12px; height: 220px; clip: true;
         HorizontalLayout {
-            spacing: 4px; padding: 14px;
-            for night in model: Rectangle {
+            padding: 12px; spacing: 8px;
+            VerticalLayout {
+                width: 34px; padding-top: 14px; padding-bottom: 22px;
+                Text { text: root.max-label; color: Palette.muted; font-size: 9px; }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: root.mid-label; color: Palette.muted; font-size: 9px; }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: "0m"; color: Palette.muted; font-size: 9px; }
+            }
+            for night[index] in root.model: Rectangle {
                 horizontal-stretch: 1;
+                opacity: root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start ? 1 : 0.3;
+                animate opacity { duration: 150ms; easing: ease-in-out; }
                 VerticalLayout {
-                    Rectangle { vertical-stretch: 1; }
-                    // Light sleep — top of bar stack
-                    Rectangle {
-                        background: (root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start)
-                                    ? Palette.accent : #4a9eff30;
-                        height: night.light-fraction * 148px;
-                        animate background { duration: 150ms; easing: ease-in-out; }
-                    }
-                    // Deep sleep — bottom of bar stack
-                    Rectangle {
-                        background: (root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start)
-                                    ? Palette.deep-sleep : #7c3aed30;
-                        border-radius: 3px;
-                        height: night.deep-fraction * 148px;
-                        animate background { duration: 150ms; easing: ease-in-out; }
+                    spacing: 4px;
+                    VerticalLayout {
+                        Rectangle { vertical-stretch: 1; }
+                        Rectangle {
+                            background: Palette.light-nap;
+                            height: root.nap-model[index].light-fraction * 160px;
+                        }
+                        Rectangle {
+                            background: Palette.deep-nap;
+                            height: root.nap-model[index].deep-fraction * 160px;
+                        }
+                        Rectangle {
+                            background: Palette.accent;
+                            height: night.light-fraction * 160px;
+                        }
+                        Rectangle {
+                            background: Palette.deep-sleep;
+                            height: night.deep-fraction * 160px;
+                            border-radius: 2px;
+                        }
                     }
                     Text {
                         text: night.label; color: Palette.muted; font-size: 10px;
@@ -123,12 +149,12 @@ export component SleepChart inherits VerticalLayout {
                     }
                 }
                 TouchArea {
-                    width: parent.width; height: parent.height;
                     clicked => {
                         if root.selected-bar-start == night.bar-start {
                             root.selected-bar-start = -1;
                             root.bar-tapped(-1, -1);
                         } else {
+                            root.selected-index = index;
                             root.selected-bar-start = night.bar-start;
                             root.bar-tapped(night.bar-start, night.bar-end);
                         }
@@ -136,20 +162,72 @@ export component SleepChart inherits VerticalLayout {
                 }
             }
         }
+        if !root.has-sleep && !root.has-naps: Text {
+            text: "No sleep or naps in this period";
+            color: Palette.muted; font-size: 12px;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
     }
 
-    // Legend — at the bottom
     HorizontalLayout {
         spacing: 16px;
-        HorizontalLayout {
-            spacing: 5px;
-            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.accent; y: 2px; }
-            Text { text: "Light"; color: Palette.muted; font-size: 11px; }
+        VerticalLayout {
+            spacing: 4px;
+            Text { text: "Sleep"; color: Palette.text; font-size: 12px; font-weight: 600; }
+            HorizontalLayout {
+                spacing: 4px;
+                Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.accent; y: 3px; }
+                Text { text: "Light"; color: Palette.muted; font-size: 10px; }
+                Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.deep-sleep; y: 3px; }
+                Text { text: "Deep"; color: Palette.muted; font-size: 10px; }
+            }
         }
-        HorizontalLayout {
-            spacing: 5px;
-            Rectangle { width: 10px; height: 10px; border-radius: 2px; background: Palette.deep-sleep; y: 2px; }
-            Text { text: "Deep"; color: Palette.muted; font-size: 11px; }
+        VerticalLayout {
+            spacing: 4px;
+            Text { text: "Naps"; color: Palette.text; font-size: 12px; font-weight: 600; }
+            HorizontalLayout {
+                spacing: 4px;
+                Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.light-nap; y: 3px; }
+                Text { text: "Light"; color: Palette.muted; font-size: 10px; }
+                Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.deep-nap; y: 3px; }
+                Text { text: "Deep"; color: Palette.muted; font-size: 10px; }
+            }
+        }
+    }
+    if root.detail-index >= 0 && root.detail-index < root.model.length: HorizontalLayout {
+        Text {
+            text: "Sleep: " + root.model[root.detail-index].total-label;
+            color: Palette.accent; font-size: 12px;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: "Naps: " + root.nap-model[root.detail-index].total-label;
+            color: Palette.light-nap; font-size: 12px;
+        }
+    }
+}
+
+export component NapSessions inherits VerticalLayout {
+    in property <[NapSession]> model;
+    padding-left: 16px; padding-right: 16px; padding-bottom: 12px;
+    spacing: 8px;
+
+    Text { text: "Nap sessions"; color: Palette.text; font-size: 15px; font-weight: 700; }
+    if root.model.length == 0: Text {
+        text: "No naps in the selected dates.";
+        color: Palette.muted; font-size: 12px;
+    }
+    for nap in root.model: Rectangle {
+        background: Palette.surface; border-radius: 10px;
+        VerticalLayout {
+            padding: 12px; spacing: 4px;
+            HorizontalLayout {
+                Text { text: nap.date-label; color: Palette.text; font-size: 13px; font-weight: 600; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: nap.duration-label; color: Palette.light-nap; font-size: 13px; font-weight: 600; }
+            }
+            Text { text: nap.time-label; color: Palette.text; font-size: 12px; }
+            if nap.deep-label != "": Text { text: nap.deep-label; color: Palette.light-nap; font-size: 11px; }
         }
     }
 }

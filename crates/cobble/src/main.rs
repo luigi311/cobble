@@ -2500,20 +2500,17 @@ fn reload_sleep_chart(window: &AppWindow, db_path: &PathBuf, period: i32, offset
                 window.set_sleep_avg_label(chart.avg_label.into());
                 window.set_sleep_delta_positive(chart.delta_positive);
                 window.set_sleep_delta_label(chart.delta_label.into());
-                let slint_bars: Vec<SleepBar> = chart
-                    .bars
-                    .into_iter()
-                    .map(|b| SleepBar {
-                        label: b.label.into(),
-                        bar_start: b.bar_start as i32,
-                        bar_end: b.bar_end as i32,
-                        light_fraction: b.light_fraction,
-                        deep_fraction: b.deep_fraction,
-                        total_label: b.total_label.into(),
-                        deep_label: b.deep_label.into(),
-                    })
-                    .collect();
-                window.set_sleep_bars(ModelRc::new(VecModel::from(slint_bars)));
+                window.set_sleep_max_label(cobble_db::format_duration(chart.max_secs).into());
+                window.set_sleep_mid_label(cobble_db::format_duration(chart.max_secs / 2).into());
+                window.set_has_sleep(chart.bars.iter().any(|b| b.light_secs + b.deep_secs > 0));
+                window.set_has_naps(
+                    chart
+                        .nap_bars
+                        .iter()
+                        .any(|b| b.light_secs + b.deep_secs > 0),
+                );
+                window.set_sleep_bars(to_slint_sleep_bars(chart.bars));
+                window.set_nap_bars(to_slint_sleep_bars(chart.nap_bars));
             }
         },
     }
@@ -2552,6 +2549,7 @@ fn reload_sleep_stats_for_range(
     db_path: &PathBuf,
     range: cobble_db::DateRange,
 ) {
+    reload_nap_sessions_for_range(window, db_path, range);
     match cobble_db::connect_readonly(db_path) {
         Err(e) => warn!("cannot open DB: {e}"),
         Ok(conn) => match cobble_db::load_sleep_stats_for_range(&conn, range) {
@@ -2570,6 +2568,47 @@ fn reload_sleep_stats_for_range(
             }
         },
     }
+}
+
+fn reload_nap_sessions_for_range(
+    window: &AppWindow,
+    db_path: &PathBuf,
+    range: cobble_db::DateRange,
+) {
+    match cobble_db::connect_readonly(db_path) {
+        Err(e) => warn!("cannot open DB: {e}"),
+        Ok(conn) => match cobble_db::load_nap_sessions_for_range(&conn, range) {
+            Err(e) => warn!("load nap sessions failed: {e}"),
+            Ok(sessions) => {
+                let sessions: Vec<NapSession> = sessions
+                    .into_iter()
+                    .map(|session| NapSession {
+                        date_label: session.date_label.into(),
+                        time_label: session.time_label.into(),
+                        duration_label: session.duration_label.into(),
+                        deep_label: session.deep_label.into(),
+                    })
+                    .collect();
+                window.set_nap_sessions(ModelRc::new(VecModel::from(sessions)));
+            }
+        },
+    }
+}
+
+fn to_slint_sleep_bars(bars: Vec<cobble_db::SleepBarData>) -> ModelRc<SleepBar> {
+    let bars: Vec<SleepBar> = bars
+        .into_iter()
+        .map(|bar| SleepBar {
+            label: bar.label.into(),
+            bar_start: bar.bar_start as i32,
+            bar_end: bar.bar_end as i32,
+            light_fraction: bar.light_fraction,
+            deep_fraction: bar.deep_fraction,
+            total_label: bar.total_label.into(),
+            deep_label: bar.deep_label.into(),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(bars))
 }
 
 /// Convert the UTC bounds carried by a chart bar back into its watch-local
