@@ -8,6 +8,7 @@ Wants=bluetooth.target
 Type=simple
 ExecStart=/usr/bin/cobbled
 Restart=on-failure
+RestartPreventExitStatus=73
 RestartSec=5s
 
 [Install]

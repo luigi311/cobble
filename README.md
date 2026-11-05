@@ -328,6 +328,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now cobbled.service
 ```
 
+Only one `cobbled` daemon may run at a time. Startup checks for an existing
+daemon before opening the database, connecting to D-Bus, or touching Bluetooth.
+The instance guard works across login sessions and configuration paths and is
+released automatically when the process exits, including after a crash.
+Older installed daemons are detected through `/proc`; a duplicate launch
+reports the existing PID when available and exits with status 73. The packaged
+service does not retry that exit status.
+
+Before running a development build, stop the installed daemon with
+`systemctl --user stop cobbled.service`. After installing an updated package,
+restart it with `systemctl --user restart cobbled.service`.
+
 ### Platform notes
 
 * **dbus-broker systems**: The notification monitor uses `BecomeMonitor`
