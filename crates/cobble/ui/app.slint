@@ -5,9 +5,9 @@
 //   charts.slint  – health charts/lists
 
 import { Palette } from "theme.slint";
-import { DaySteps, SleepBar, HealthSession, WatchDevice, InstalledApp, DeviceConfigEntry, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
+import { DaySteps, SleepBar, NapSession, NapSummary, HealthSession, WatchDevice, InstalledApp, DeviceConfigEntry, SleepStats, HeartStats, HeartTrendPoint } from "types.slint";
 import { Toggle, FormField, InfoRow, SettingsRow, ActionButton, PeriodControl, ErrorBanner, LoadingBanner, EnumSetting, NumericSetting } from "widgets.slint";
-import { StepsChart, SleepChart, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
+import { StepsChart, SleepChart, NapSummaryCard, SessionList, SleepStatsPanel, HeartStatsPanel } from "charts.slint";
 
 export component AppWindow inherits Window {
     title: "Pebble";
@@ -41,6 +41,13 @@ export component AppWindow inherits Window {
 
     // ── Sleep tab data ──
     in property <[SleepBar]> sleep-bars;
+    in property <[SleepBar]> nap-bars;
+    in property <[NapSession]> nap-sessions;
+    in property <NapSummary> nap-summary;
+    in property <bool> has-sleep;
+    in property <bool> has-naps;
+    in property <string> sleep-max-label;
+    in property <string> sleep-mid-label;
     in property <string> sleep-label: "No sleep data";
     in property <string> sleep-avg-label;
     in property <string> sleep-delta-label;
@@ -236,6 +243,10 @@ export component AppWindow inherits Window {
     property <int> heart-period: 1;
     property <int> sel-bar-start: -1;
     property <int> sel-sleep-bar-start: -1;
+    property <int> sel-sleep-bar-index: -1;
+    changed sel-sleep-bar-start => {
+        if root.sel-sleep-bar-start == -1 { root.sel-sleep-bar-index = -1; }
+    }
 
     VerticalLayout {
 
@@ -391,7 +402,7 @@ export component AppWindow inherits Window {
                         width: 70px; height: 30px; border-radius: 6px; background: Palette.surface;
                         y: (parent.height - self.height) / 2;
                         Text { text: "Refresh"; color: Palette.accent; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                        TouchArea { clicked => { root.sel-bar-start = -1; root.refresh-data(); } }
+                        TouchArea { clicked => { root.sel-bar-start = -1; root.sel-sleep-bar-start = -1; root.refresh-data(); } }
                     }
                 }
 
@@ -414,18 +425,32 @@ export component AppWindow inherits Window {
                     go-forward => { root.sel-sleep-bar-start = -1; root.sleep-go-forward(); }
                 }
 
-                SleepChart {
-                    model: root.sleep-bars;
-                    sleep-label: root.sleep-label;
-                    avg-label: root.sleep-avg-label;
-                    delta-label: root.sleep-delta-label;
-                    delta-positive: root.sleep-delta-positive;
-                    selected-bar-start <=> root.sel-sleep-bar-start;
-                    bar-tapped(s, e) => { root.sleep-bar-tapped(s, e); }
-                }
+                Flickable {
+                    content-height: sleep-page.preferred-height;
+                    sleep-page := VerticalLayout {
+                        alignment: start;
+                        SleepChart {
+                            model: root.sleep-bars;
+                            nap-model: root.nap-bars;
+                            has-sleep: root.has-sleep;
+                            has-naps: root.has-naps;
+                            max-label: root.sleep-max-label;
+                            mid-label: root.sleep-mid-label;
+                            avg-label: root.sleep-avg-label;
+                            delta-label: root.sleep-delta-label;
+                            delta-positive: root.sleep-delta-positive;
+                            weekly-averages: root.sleep-period-val == 2;
+                            selected-bar-start <=> root.sel-sleep-bar-start;
+                            selected-index <=> root.sel-sleep-bar-index;
+                            bar-tapped(s, e) => { root.sleep-bar-tapped(s, e); }
+                        }
 
-                SleepStatsPanel {
-                    stats: root.sleep-stats;
+                        if root.has-naps: NapSummaryCard { summary: root.nap-summary; }
+
+                        SleepStatsPanel {
+                            stats: root.sleep-stats;
+                        }
+                    }
                 }
             }
 

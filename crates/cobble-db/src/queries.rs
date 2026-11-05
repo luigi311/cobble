@@ -129,9 +129,12 @@ pub fn fetch_sleep_nights(conn: &Connection, range: DateRange) -> anyhow::Result
         let date = nights
             .values()
             .find(|n| {
-                n.phases
-                    .iter()
-                    .any(|p| !p.is_deep && p.local_start < local_end && local_start < p.local_end)
+                n.phases.iter().any(|p| {
+                    !p.is_deep
+                        && p.is_nap == (ty == 4)
+                        && p.utc_start < utc_end
+                        && utc_start < p.utc_end
+                })
             })
             .map(|n| n.wake_date)
             .or_else(|| wake_date(local_end));
@@ -553,11 +556,39 @@ pub fn load_sleep_chart(conn: &Connection, period: i32, offset: i32) -> anyhow::
     let range = range_for(period, offset);
     let nights = fetch_sleep_nights(conn, range)?;
 
-    let bars = if period == 2 {
-        weekly_sleep_bars(&nights, range)
-    } else {
-        nightly_sleep_bars(&nights)
+    // Split only the chart series. Headline metrics, statistics, and wellness
+    // exports continue to use the original nights, including naps.
+    let stage_bars = |is_nap| {
+        let stages: Vec<Night> = nights
+            .iter()
+            .map(|night| Night {
+                wake_date: night.wake_date,
+                phases: night
+                    .phases
+                    .iter()
+                    .filter(|phase| phase.is_nap == is_nap)
+                    .copied()
+                    .collect(),
+            })
+            .collect();
+        if period == 2 {
+            weekly_sleep_bars(&stages, range)
+        } else {
+            nightly_sleep_bars(&stages)
+        }
     };
+    let mut bars = stage_bars(false);
+    let mut nap_bars = stage_bars(true);
+    let max_secs = bars
+        .iter()
+        .zip(&nap_bars)
+        .map(|(sleep, nap)| sleep.light_secs + sleep.deep_secs + nap.light_secs + nap.deep_secs)
+        .max()
+        .unwrap_or(0);
+    for bar in bars.iter_mut().chain(&mut nap_bars) {
+        bar.light_fraction = bar.light_secs as f32 / max_secs.max(1) as f32;
+        bar.deep_fraction = bar.deep_secs as f32 / max_secs.max(1) as f32;
+    }
 
     let (summary, avg_label) = sleep_labels(&nights, period);
 
@@ -572,11 +603,113 @@ pub fn load_sleep_chart(conn: &Connection, period: i32, offset: i32) -> anyhow::
 
     Ok(SleepChart {
         bars,
+        nap_bars,
+        max_secs,
         summary,
         avg_label,
         delta_positive: delta_label.starts_with('+'),
         delta_label,
     })
+}
+
+/// Individual naps inside the selected wake-date range, with watch-local
+/// session times. Deep-nap overlays describe part of a nap, not extra sleep.
+pub fn load_nap_sessions_for_range(
+    conn: &Connection,
+    range: DateRange,
+) -> anyhow::Result<Vec<NapSessionData>> {
+    let nights = fetch_sleep_nights(conn, range)?;
+    let mut sessions = Vec::new();
+    for night in &nights {
+        for nap in night
+            .phases
+            .iter()
+            .filter(|phase| phase.is_nap && !phase.is_deep && phase.utc_end > phase.utc_start)
+        {
+            let (Some(start), Some(end)) = (
+                DateTime::from_timestamp(nap.local_start, 0),
+                DateTime::from_timestamp(nap.local_end, 0),
+            ) else {
+                continue;
+            };
+            let duration = nap.utc_end - nap.utc_start;
+            let deep: i64 = night
+                .phases
+                .iter()
+                .filter(|phase| phase.is_nap && phase.is_deep)
+                .map(|phase| {
+                    (phase.utc_end.min(nap.utc_end) - phase.utc_start.max(nap.utc_start)).max(0)
+                })
+                .sum();
+            let end_format = if start.date_naive() == end.date_naive() {
+                "%-I:%M %p"
+            } else {
+                "%b %-d, %-I:%M %p"
+            };
+            sessions.push((
+                nap.utc_start,
+                NapSessionData {
+                    duration_secs: duration,
+                    deep_secs: deep.min(duration),
+                    date_label: start.format("%a, %b %-d").to_string(),
+                    time_label: format!(
+                        "{} – {}",
+                        start.format("%-I:%M %p"),
+                        end.format(end_format)
+                    ),
+                    duration_label: format_duration(duration),
+                    deep_label: deep_label(deep.min(duration)),
+                },
+            ));
+        }
+    }
+    sessions.sort_by_key(|(start, _)| *start);
+    Ok(sessions.into_iter().map(|(_, session)| session).collect())
+}
+
+/// Compact nap information for the exact visible or selected date range.
+/// Durations come from primary nap sessions; deep phases are already included.
+pub fn summarize_naps(sessions: &[NapSessionData], range: DateRange) -> NapSummaryData {
+    let count = sessions.len();
+    let total_secs: i64 = sessions.iter().map(|session| session.duration_secs).sum();
+    let scope_label = if range.start == range.end {
+        range.start.format("%a, %b %-d").to_string()
+    } else if range.start.year() != range.end.year() {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d, %Y"),
+            range.end.format("%b %-d, %Y")
+        )
+    } else if range.start.month() == range.end.month() {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d"),
+            range.end.format("%-d")
+        )
+    } else {
+        format!(
+            "{}–{}",
+            range.start.format("%b %-d"),
+            range.end.format("%b %-d")
+        )
+    };
+    let latest_label = sessions.last().map_or_else(String::new, |session| {
+        let prefix = if count > 1 { "Latest: " } else { "" };
+        // Keep the start date even for a one-day selection: naps are grouped
+        // by wake date, and their start may be on the previous calendar date.
+        format!("{prefix}{} · {}", session.date_label, session.time_label)
+    });
+    NapSummaryData {
+        count,
+        scope_label,
+        total_label: format_duration(total_secs),
+        avg_label: format_duration(if count == 0 {
+            0
+        } else {
+            total_secs / count as i64
+        }),
+        latest_label,
+    }
 }
 
 fn total_sleep(nights: &[Night]) -> i64 {
@@ -1802,6 +1935,259 @@ mod tests {
         assert_eq!(chart.avg_label, "8h 0m");
         assert_eq!(chart.delta_label, "+100%"); // 8h vs the 4h night before
         assert!(chart.delta_positive);
+    }
+
+    #[test]
+    fn sleep_and_nap_charts_keep_combined_metrics_and_export_totals() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_session(&conn, 1, local(d(2026, 7, 3), 23, 0), 8 * 3600);
+        insert_session(&conn, 2, local(jul4, 1, 0), 2 * 3600);
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600);
+        insert_session(&conn, 4, local(jul4, 14, 15), 15 * 60);
+        insert_session(&conn, 1, local(d(2026, 7, 2), 23, 0), 6 * 3600);
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let chart = load_sleep_chart(&conn, 0, offset).unwrap();
+        let sleep = &chart.bars[0];
+        let nap = &chart.nap_bars[0];
+        assert_eq!((sleep.light_secs, sleep.deep_secs), (6 * 3600, 2 * 3600));
+        assert_eq!((nap.light_secs, nap.deep_secs), (45 * 60, 15 * 60));
+        assert_eq!(sleep.total_label, "8h 0m");
+        assert_eq!(nap.total_label, "1h 0m");
+        assert_eq!(chart.max_secs, 9 * 3600);
+        assert!((sleep.light_fraction + sleep.deep_fraction - 8.0 / 9.0).abs() < f32::EPSILON);
+        assert!((nap.light_fraction + nap.deep_fraction - 1.0 / 9.0).abs() < f32::EPSILON);
+        assert!(
+            (sleep.light_fraction + sleep.deep_fraction + nap.light_fraction + nap.deep_fraction
+                - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            (sleep.bar_start, sleep.bar_end),
+            (nap.bar_start, nap.bar_end)
+        );
+        assert_eq!(chart.avg_label, "9h 0m");
+        assert_eq!(chart.summary, "9h 0m · 2h 15m deep");
+        assert_eq!(chart.delta_label, "+50%");
+
+        let range = DateRange::day(jul4);
+        let stats = load_sleep_stats_for_range(&conn, range).unwrap();
+        assert_eq!(stats.deep_avg_label, "2h 15m");
+        assert_eq!(stats.highest_dur, "9h 0m");
+        assert_eq!(stats.avg_wakeup, "7:00 AM");
+        assert_eq!(stats.awake_pct, 0.0);
+        assert_eq!(
+            load_sleep_avg_label_for_range(&conn, range).unwrap(),
+            "AVG 9h 0m / night"
+        );
+        assert_eq!(
+            fetch_daily_wellness(&conn, range).unwrap()[0].sleep_secs,
+            Some(9 * 3600)
+        );
+    }
+
+    #[test]
+    fn month_sleep_and_nap_bars_share_denominator_and_selection_bounds() {
+        let conn = setup();
+        let range = range_for(2, 1);
+        let week = week_buckets(range)
+            .into_iter()
+            .find(|week| week.days().count() >= 3)
+            .unwrap();
+        let days: Vec<_> = week.days().take(3).collect();
+        for day in &days[..2] {
+            insert_session(&conn, 1, local(*day, 7, 0) - 8 * 3600, 8 * 3600);
+        }
+        insert_session(&conn, 3, local(days[0], 14, 0), 3600);
+        insert_session(&conn, 4, local(days[0], 14, 15), 15 * 60);
+        insert_session(&conn, 3, local(days[2], 15, 0), 3600); // nap-only day
+
+        let chart = load_sleep_chart(&conn, 2, 1).unwrap();
+        assert_eq!(chart.bars.len(), 1);
+        assert_eq!(chart.nap_bars.len(), 1);
+        let sleep = &chart.bars[0];
+        let nap = &chart.nap_bars[0];
+        assert_eq!(sleep.total_label, "5h 20m"); // 16h / 3 days with data
+        assert_eq!(nap.total_label, "40m"); // 2h / the same 3 days
+        assert_eq!(nap.deep_secs, 5 * 60);
+        assert_eq!(chart.max_secs, 6 * 3600);
+        assert!((nap.light_fraction + nap.deep_fraction - 1.0 / 9.0).abs() < f32::EPSILON);
+        assert_eq!(chart.avg_label, "AVG 6h 0m / night");
+        assert_eq!((sleep.bar_start, sleep.bar_end), week.utc_bounds());
+        assert_eq!((nap.bar_start, nap.bar_end), week.utc_bounds());
+        assert_eq!(load_nap_sessions_for_range(&conn, week).unwrap().len(), 2);
+        assert!(
+            load_nap_sessions_for_range(&conn, DateRange::day(days[1]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nap_only_and_sleep_only_days_keep_aligned_chart_buckets() {
+        let conn = setup();
+        let range = range_for(1, 0);
+        let days: Vec<_> = range.days().take(2).collect();
+        insert_session(&conn, 1, local(days[0], 7, 0) - 8 * 3600, 8 * 3600);
+        insert_session(&conn, 3, local(days[1], 14, 0), 30 * 60);
+        insert_session(&conn, 4, local(days[1], 14, 10), 10 * 60);
+
+        let chart = load_sleep_chart(&conn, 1, 0).unwrap();
+        assert_eq!(chart.bars.len(), 2);
+        assert_eq!(chart.nap_bars.len(), 2);
+        assert_eq!(chart.bars[0].total_label, "8h 0m");
+        assert_eq!(chart.nap_bars[0].total_label, "0m");
+        assert_eq!(chart.bars[1].light_secs + chart.bars[1].deep_secs, 0);
+        assert_eq!(chart.nap_bars[1].total_label, "30m");
+        assert_eq!(chart.nap_bars[1].deep_secs, 10 * 60);
+        assert_eq!(chart.avg_label, "AVG 4h 15m / night");
+        for (sleep, nap) in chart.bars.iter().zip(&chart.nap_bars) {
+            assert_eq!(sleep.bar_start, nap.bar_start);
+        }
+    }
+
+    #[test]
+    fn nap_sessions_show_local_times_deep_subsets_and_selected_wake_dates() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        let jul5 = d(2026, 7, 5);
+        insert_session(&conn, 3, local(jul4, 14, 0), 3600);
+        insert_session(&conn, 4, local(jul4, 14, 15), 15 * 60);
+        insert_session(&conn, 3, local(jul4, 17, 0), 30 * 60);
+        insert_session(&conn, 3, local(jul4, 23, 30), 3600);
+        insert_session(&conn, 4, local(jul4, 23, 45), 15 * 60);
+
+        let sessions = load_nap_sessions_for_range(&conn, DateRange::day(jul4)).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].date_label, "Sat, Jul 4");
+        assert_eq!(sessions[0].time_label, "2:00 PM – 3:00 PM");
+        assert_eq!(sessions[0].duration_label, "1h 0m");
+        assert_eq!(sessions[0].deep_label, "15m deep");
+        assert_eq!(sessions[0].duration_secs, 3600);
+        assert_eq!(sessions[0].deep_secs, 15 * 60);
+        assert_eq!(sessions[1].time_label, "5:00 PM – 5:30 PM");
+        assert!(sessions[1].deep_label.is_empty());
+        assert_eq!(sessions[1].duration_secs, 30 * 60);
+        assert_eq!(sessions[1].deep_secs, 0);
+
+        let sessions = load_nap_sessions_for_range(&conn, DateRange::day(jul5)).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].date_label, "Sat, Jul 4");
+        assert_eq!(sessions[0].time_label, "11:30 PM – Jul 5, 12:30 AM");
+        assert_eq!(sessions[0].duration_label, "1h 0m");
+        assert_eq!(sessions[0].deep_label, "15m deep");
+        let summary = summarize_naps(&sessions, DateRange::day(jul5));
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.total_label, "1h 0m");
+        assert_eq!(
+            summary.latest_label,
+            "Sat, Jul 4 · 11:30 PM – Jul 5, 12:30 AM"
+        );
+    }
+
+    #[test]
+    fn nap_summary_uses_numeric_durations_and_keeps_deep_time_inside_totals() {
+        let conn = setup();
+        let day = d(2026, 7, 4);
+        insert_session(&conn, 3, local(day, 13, 0), 30 * 60);
+        insert_session(&conn, 4, local(day, 13, 5), 10 * 60);
+        insert_session(&conn, 3, local(day, 16, 0), 60 * 60);
+        insert_session(&conn, 4, local(day, 16, 10), 20 * 60);
+        let range = DateRange::day(day);
+        let sessions = load_nap_sessions_for_range(&conn, range).unwrap();
+        let summary = summarize_naps(&sessions, range);
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.scope_label, "Sat, Jul 4");
+        assert_eq!(summary.total_label, "1h 30m");
+        assert_eq!(summary.avg_label, "45m");
+        assert_eq!(
+            summary.latest_label,
+            "Latest: Sat, Jul 4 · 4:00 PM – 5:00 PM"
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.deep_secs)
+                .sum::<i64>(),
+            30 * 60
+        );
+        assert_eq!(
+            fetch_daily_wellness(&conn, range).unwrap()[0].sleep_secs,
+            Some(90 * 60)
+        );
+        let mut with_partial_minutes = sessions;
+        with_partial_minutes[0].duration_secs += 119;
+        let summary = summarize_naps(&with_partial_minutes, range);
+        assert_eq!(summary.total_label, "1h 31m");
+        assert_eq!(summary.avg_label, "45m");
+    }
+
+    #[test]
+    fn nap_summary_handles_empty_ranges_and_formats_the_exact_scope() {
+        let day = d(2026, 7, 4);
+        let summary = summarize_naps(&[], DateRange::day(day));
+        assert_eq!(summary.count, 0);
+        assert_eq!(summary.total_label, "0m");
+        assert_eq!(summary.avg_label, "0m");
+        assert!(summary.latest_label.is_empty());
+        for (start, end, label) in [
+            (day, day, "Sat, Jul 4"),
+            (day, d(2026, 7, 10), "Jul 4–10"),
+            (d(2026, 6, 29), d(2026, 7, 5), "Jun 29–Jul 5"),
+            (d(2026, 12, 31), d(2027, 1, 1), "Dec 31, 2026–Jan 1, 2027"),
+        ] {
+            assert_eq!(
+                summarize_naps(&[], DateRange { start, end }).scope_label,
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn nap_summary_selected_partial_week_is_a_total_not_a_bar_average() {
+        let conn = setup();
+        let first = d(2026, 7, 4);
+        let second = d(2026, 7, 5);
+        insert_session(&conn, 3, local(first, 14, 0), 30 * 60);
+        insert_session(&conn, 3, local(second, 15, 0), 60 * 60);
+        insert_session(&conn, 3, local(d(2026, 7, 6), 12, 0), 2 * 3600);
+        let selected = DateRange {
+            start: first,
+            end: second,
+        };
+        let summary = summarize_naps(
+            &load_nap_sessions_for_range(&conn, selected).unwrap(),
+            selected,
+        );
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.total_label, "1h 30m");
+        assert_eq!(summary.avg_label, "45m");
+        let single = DateRange::day(first);
+        let summary = summarize_naps(&load_nap_sessions_for_range(&conn, single).unwrap(), single);
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.total_label, "30m");
+        assert!(!summary.latest_label.starts_with("Latest:"));
+        assert_eq!(summarize_naps(&[], DateRange::day(d(2026, 7, 3))).count, 0);
+    }
+
+    #[test]
+    fn deep_nap_stays_with_its_nap_when_overnight_sleep_overlaps() {
+        let conn = setup();
+        let jul4 = d(2026, 7, 4);
+        insert_session(&conn, 1, local(jul4, 22, 0), 8 * 3600);
+        insert_session(&conn, 3, local(jul4, 22, 30), 3600);
+        insert_session(&conn, 4, local(jul4, 22, 45), 15 * 60);
+
+        let offset = (watch_today() - jul4).num_days() as i32;
+        let chart = load_sleep_chart(&conn, 0, offset).unwrap();
+        assert_eq!(chart.nap_bars[0].deep_secs, 15 * 60);
+        assert_eq!(chart.avg_label, "1h 0m");
+        assert_eq!(
+            load_nap_sessions_for_range(&conn, DateRange::day(jul4)).unwrap()[0].deep_label,
+            "15m deep"
+        );
     }
 
     #[test]

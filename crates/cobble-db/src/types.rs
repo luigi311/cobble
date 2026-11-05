@@ -51,6 +51,25 @@ pub struct SleepBarData {
     pub deep_label: String,
 }
 
+pub struct NapSessionData {
+    /// Deep nap time is a subset of the session duration.
+    pub duration_secs: i64,
+    pub deep_secs: i64,
+    pub date_label: String,
+    pub time_label: String,
+    pub duration_label: String,
+    pub deep_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NapSummaryData {
+    pub count: usize,
+    pub scope_label: String,
+    pub total_label: String,
+    pub avg_label: String,
+    pub latest_label: String,
+}
+
 pub struct HealthSessionData {
     pub type_name: String,
     pub start_label: String,
@@ -182,7 +201,12 @@ pub struct StepsChart {
 
 /// Everything the sleep chart needs, computed in one call.
 pub struct SleepChart {
+    /// Overnight sleep and nap segments share date buckets in stacked bars.
     pub bars: Vec<SleepBarData>,
+    pub nap_bars: Vec<SleepBarData>,
+    /// Common duration scale based on the combined sleep and nap stacks.
+    pub max_secs: i64,
+    /// Headline metrics include both overnight sleep and naps.
     pub summary: String,
     pub avg_label: String,
     pub delta_label: String,
