@@ -47,6 +47,11 @@ channel, and disconnect or cancellation stops transport tasks and subscriptions.
 Detected link loss also fails pending requests and releases resources without
 requiring a separate disconnect call. Reconnect and fallback wait for owned
 BlueZ operations and unsubscribe replies to finish, including after cancellation.
+Reverse mode uses `WriteValue` commands for characteristics supporting writes
+without response, avoiding `AcquireWrite`'s exclusive socket lock. Any pending
+write is awaited before transport teardown finishes. Link-loss logs include
+the closure reason and elapsed connection time; a failed connection-status
+poll alone does not force a reconnect.
 
 ## Weather
 
@@ -322,6 +327,18 @@ connects to your session D-Bus, which only exists inside your login):
 systemctl --user daemon-reload
 systemctl --user enable --now cobbled.service
 ```
+
+Only one `cobbled` daemon may run at a time. Startup checks for an existing
+daemon before opening the database, connecting to D-Bus, or touching Bluetooth.
+The instance guard works across login sessions and configuration paths and is
+released automatically when the process exits, including after a crash.
+Older installed daemons are detected through `/proc`; a duplicate launch
+reports the existing PID when available and exits with status 73. The packaged
+service does not retry that exit status.
+
+Before running a development build, stop the installed daemon with
+`systemctl --user stop cobbled.service`. After installing an updated package,
+restart it with `systemctl --user restart cobbled.service`.
 
 ### Platform notes
 

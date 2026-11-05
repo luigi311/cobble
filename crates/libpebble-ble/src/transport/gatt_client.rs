@@ -7,7 +7,7 @@ use std::time::Duration;
 use bluer::{
     Device,
     gatt::{
-        CharacteristicWriter, WriteOp,
+        WriteOp,
         remote::{Characteristic, CharacteristicWriteRequest},
     },
 };
@@ -18,7 +18,10 @@ use tracing::{debug, warn};
 
 use super::link::StatusGuard;
 use super::{LinkState, PpogTransport, TransportMode, TransportStatus};
-use super::{lifecycle::stopped, notification::Subscription};
+use super::{
+    lifecycle::{Completion, spawn_cleanup, stopped},
+    notification::Subscription,
+};
 use crate::error::PebbleError;
 use crate::uuids::{
     PPOGATT_WATCH_SERVER_V2_NOTIFY, PPOGATT_WATCH_SERVER_V2_SERVICE, PPOGATT_WATCH_SERVER_V2_WRITE,
@@ -57,32 +60,29 @@ pub async fn discover_reverse_v2(
     Ok(None)
 }
 
-enum Writer {
-    Acquired(CharacteristicWriter),
-    Dbus(Characteristic, WriteOp),
-}
+/// Retain the single serial packet write even if its caller times out or stops.
+/// Teardown must await its reply before fallback can send a new reset handshake.
+#[derive(Default)]
+struct PendingWrite(Mutex<Option<Completion>>);
 
-impl Writer {
-    /// Send a packet through the acquired socket or the selected D-Bus write operation.
-    async fn send(&self, packet: &[u8]) -> Result<(), PebbleError> {
-        match self {
-            Self::Acquired(writer) => writer
-                .send(packet)
-                .await
-                .map_err(|e| PebbleError::Other(format!("reverse PPoGATT write: {e}"))),
-            Self::Dbus(characteristic, op_type) => {
-                characteristic
-                    .write_ext(
-                        packet,
-                        &CharacteristicWriteRequest {
-                            op_type: *op_type,
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                Ok(())
-            }
+impl PendingWrite {
+    async fn send(
+        &self,
+        write: impl std::future::Future<Output = Result<(), PebbleError>> + Send + 'static,
+    ) -> Result<(), PebbleError> {
+        let done = spawn_cleanup(write);
+        *self.0.lock().unwrap() = Some(done.clone());
+        done.wait().await
+    }
+
+    async fn finish(&self) -> Result<(), PebbleError> {
+        let pending = self.0.lock().unwrap().clone();
+        if let Some(done) = pending {
+            // Preserve failures, including ambiguous D-Bus timeouts. They
+            // require physical BLE teardown before a new transport can start.
+            done.wait().await?;
         }
+        Ok(())
     }
 }
 
@@ -110,28 +110,29 @@ pub fn start_gatt_client(
         let notifications = futures::stream::unfold(notifications, |mut rx| async {
             rx.recv().await.map(|packet| (packet, rx))
         });
+        let pending_write = PendingWrite::default();
         let result = tokio::select! {
             _ = stopped(&mut stop_rx) => Ok(()),
             result = async {
                 subscription.wait_ready().await?;
-                let (writer, limit) = match characteristics.write.write_io().await {
-                    Ok(writer) => { let limit = writer.mtu(); (Writer::Acquired(writer), limit) }
-                    Err(error) => {
-                        debug!("reverse PPoGATT AcquireWrite unavailable ({error}); using WriteValue");
-                        let limit = characteristics.write.mtu().await.unwrap_or(20);
-                        let op_type = match characteristics.write.flags().await {
-                            Ok(flags) if flags.write_without_response => WriteOp::Command,
-                            _ => WriteOp::Request,
-                        };
-                        (Writer::Dbus(characteristics.write, op_type), limit)
-                    }
+                // Ordinary GATT writes avoid AcquireWrite's exclusive socket
+                // lock, which also blocks WriteValue when left acquired.
+                let limit = characteristics.write.mtu().await.unwrap_or(20);
+                let op_type = match characteristics.write.flags().await {
+                    Ok(flags) if flags.write_without_response => WriteOp::Command,
+                    _ => WriteOp::Request,
                 };
-                debug!("PPoGATT reverse-v2 subscribed; GATT value limit={limit}");
+                debug!("PPoGATT reverse-v2 subscribed; using WriteValue {op_type:?}; GATT value limit={limit}");
                 *task_size.lock().unwrap() = limit;
-                let writer = Arc::new(writer);
-                run_client(notifications, send_rx, task_size, limit, &status.0, on_data, move |packet| {
-                    let writer = writer.clone();
-                    async move { writer.send(&packet).await }
+                run_client(notifications, send_rx, task_size, limit, &status.0, on_data, |packet| {
+                    let characteristic = characteristics.write.clone();
+                    pending_write.send(async move {
+                        characteristic.write_ext(&packet, &CharacteristicWriteRequest {
+                            op_type,
+                            ..Default::default()
+                        }).await?;
+                        Ok(())
+                    })
                 }).await
             } => result,
         };
@@ -139,9 +140,12 @@ pub fn start_gatt_client(
             warn!("PPoGATT reverse-v2 stopped: {error}");
         }
         status.0.send_replace(TransportStatus::Closed);
+        let write_result = pending_write.finish().await;
         // StopNotify is awaited even when setup or I/O failed. An error here
         // prevents fallback until the enclosing BLE teardown has completed.
-        subscription.shutdown().await
+        let subscription_result = subscription.shutdown().await;
+        write_result?;
+        subscription_result
     });
     PpogTransport::new(
         TransportMode::ReverseV2,
@@ -219,6 +223,67 @@ mod tests {
     use super::*;
     use crate::endpoints::{Endpoint, pebble_pack};
     use crate::transport::wait_ready;
+
+    /// Cancelling a send must not let a late D-Bus write cross the teardown
+    /// barrier and reset a replacement session after its handshake has begun.
+    #[tokio::test]
+    async fn cancelled_reverse_write_finishes_before_transport_cleanup() {
+        let pending = Arc::new(PendingWrite::default());
+        let (started, writing) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let (completed, completion) = oneshot::channel();
+        let sender = pending.clone();
+        let send = tokio::spawn(async move {
+            sender
+                .send(async move {
+                    let _ = started.send(());
+                    let _ = released.await;
+                    let _ = completed.send(());
+                    Ok(())
+                })
+                .await
+        });
+        writing.await.unwrap();
+        send.abort();
+        assert!(send.await.unwrap_err().is_cancelled());
+
+        let mut cleanup = tokio::spawn(async move { pending.finish().await });
+        assert!(
+            timeout(Duration::from_millis(10), &mut cleanup)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(1), cleanup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        completion.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_reverse_write_requires_ble_teardown_before_fallback() {
+        let pending = PendingWrite::default();
+        let result = pending
+            .send(async { Err(PebbleError::Other("simulated WriteValue failure".into())) })
+            .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("WriteValue failure")
+        );
+        let cleanup = timeout(Duration::from_secs(1), pending.finish())
+            .await
+            .unwrap();
+        assert!(
+            cleanup
+                .unwrap_err()
+                .to_string()
+                .contains("WriteValue failure")
+        );
+    }
 
     struct SimulatedLink {
         watch: mpsc::UnboundedSender<Vec<u8>>,

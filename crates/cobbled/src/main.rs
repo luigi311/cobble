@@ -6,6 +6,7 @@
 //! connection, and runs until signalled.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +27,7 @@ mod codec;
 mod config;
 mod config_watcher;
 mod http;
+mod instance;
 mod integrations;
 mod location;
 mod mpris_monitor;
@@ -59,10 +61,38 @@ struct Cli {
 }
 
 /// Initialize configuration, storage and D-Bus services, then run until shutdown.
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    let _instance = match instance::InstanceGuard::acquire() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("cobbled: cannot start: {error}");
+            return if error.kind() == std::io::ErrorKind::AddrInUse {
+                ExitCode::from(instance::ALREADY_RUNNING_EXIT_CODE)
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+    };
+    // Keep the instance guard until the runtime has stopped all background
+    // tasks as well as the main daemon future.
+    let result = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(run(cli)),
+        Err(error) => Err(error.into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let config_path = match cli.config {
         Some(p) => p,
         None => config::default_config_path()?,
