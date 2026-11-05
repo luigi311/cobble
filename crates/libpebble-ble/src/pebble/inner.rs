@@ -1,7 +1,7 @@
 //! Core state and handler types for a Pebble BLE session.
 //!
 //! `PebbleInner` holds handler registrations, pending transactions,
-//! screenshot reassembly, and the GATT server handle — everything that
+//! screenshot reassembly, and the active transport handle — everything that
 //! lives inside the `Arc<Mutex<…>>` of a `Pebble`.
 
 use std::collections::HashMap;
@@ -19,7 +19,8 @@ use crate::endpoints::phone_control::PhoneAction;
 use crate::endpoints::put_bytes::PutBytesResponse;
 use crate::endpoints::screenshot::ScreenshotVersion;
 use crate::endpoints::system::{WatchColorInfo, WatchVersionInfo};
-use crate::transport::gatt_server::PebbleGattServerHandle;
+use crate::transport::notification::Subscription;
+use crate::transport::{PpogTransport, TaskGuard};
 
 // ── Handler type aliases ───────────────────────────────────────────────
 
@@ -122,8 +123,13 @@ pub(crate) struct PebbleInner {
     /// `None` is sent on an error reply or unknown color.
     pub(crate) watch_color_pending: Vec<oneshot::Sender<Option<&'static WatchColorInfo>>>,
     pub(crate) txn: u8,
-    /// Handle to the GATT server send channel (set once server is started).
-    pub(crate) gatt_server: Option<PebbleGattServerHandle>,
+    /// The selected forward or reverse PPoGATT transport.
+    pub(crate) transport: Option<PpogTransport>,
+    pub(crate) connection_tasks: Vec<TaskGuard>,
+    pub(crate) connection_requests: Vec<crate::transport::lifecycle::Completion>,
+    pub(crate) subscriptions: Vec<Subscription>,
+    pub(crate) connection_id: u64,
+    pub(crate) device: Option<bluer::Device>,
     /// Open DataLog sessions keyed by the 1-byte handle from the watch.
     pub(crate) datalog_sessions: HashMap<u8, DatalogSession>,
     /// BlobDB2 protocol version negotiated at connect time (0 = v0/unknown, 1+ = InsertWithTimestamp capable).
@@ -159,7 +165,12 @@ impl PebbleInner {
             watch_version_pending: Vec::new(),
             watch_color_pending: Vec::new(),
             txn: 0,
-            gatt_server: None,
+            transport: None,
+            connection_tasks: Vec::new(),
+            connection_requests: Vec::new(),
+            subscriptions: Vec::new(),
+            connection_id: 0,
+            device: None,
             datalog_sessions: HashMap::new(),
             blob_db_version: 0,
         }

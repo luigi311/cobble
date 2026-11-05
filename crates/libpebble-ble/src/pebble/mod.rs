@@ -3,7 +3,7 @@
 //! `Pebble` owns:
 //!   * a bluer GATT *client* connection used for the fed9 pairing/connectivity
 //!     handshake, and
-//!   * the phone-hosted PPoGATT GATT *server* the watch connects back to.
+//!   * an automatically selected reverse-v2 GATT client or forward GATT server.
 //!
 //! Pairing: `connect()` handles first-time bonding. It registers a temporary
 //! auto-accept bluer agent, writes 0x09 to the pairing-trigger characteristic
@@ -64,6 +64,7 @@ mod connection;
 mod dispatch;
 mod inner;
 mod language;
+mod lifecycle;
 
 use dispatch::rand_u16;
 pub use inner::{
@@ -83,6 +84,8 @@ pub struct Pebble {
     preference_operation: Arc<AsyncMutex<()>>,
     install_operation: Arc<AsyncMutex<()>>,
     language_operation: Arc<AsyncMutex<()>>,
+    lifecycle: Arc<lifecycle::ConnectionLifecycle>,
+    cancel_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// Confirmed byte-level progress for a PBW installation.
@@ -301,6 +304,8 @@ impl Pebble {
             preference_operation: Arc::new(AsyncMutex::new(())),
             install_operation: Arc::new(AsyncMutex::new(())),
             language_operation: Arc::new(AsyncMutex::new(())),
+            lifecycle: lifecycle::ConnectionLifecycle::shared(adapter, address),
+            cancel_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -391,19 +396,106 @@ impl Pebble {
     // ---- connect / disconnect ----
 
     pub async fn disconnect(&self) {
-        let _ = self.connected_tx.send(false);
-        let mut inner = self.inner.lock().unwrap();
-        inner.gatt_server = None;
-        // Fail any in-flight watch-info requests immediately instead of leaving
-        // their callers pending until the per-request timeout fires.
-        inner.watch_version_pending.clear();
-        inner.watch_color_pending.clear();
-        inner.language_pending.clear();
-        inner.app_fetch_pending.clear();
-        inner.put_bytes_pending.take();
-        if let Some(acc) = inner.screenshot.take() {
-            let _ = acc.done.send(Err("watch disconnected".into()));
+        self.cancel_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(done) = self.clear_connection()
+            && let Err(error) = done.wait().await
+        {
+            warn!("connection teardown failed: {error}");
         }
+    }
+
+    fn clear_connection(&self) -> Option<crate::transport::lifecycle::Completion> {
+        Self::clear_connection_for(&self.inner, &self.connected_tx, &self.lifecycle, None)
+    }
+
+    fn clear_connection_for(
+        state: &Arc<Mutex<PebbleInner>>,
+        connected: &tokio::sync::watch::Sender<bool>,
+        lifecycle: &Arc<lifecycle::ConnectionLifecycle>,
+        expected: Option<u64>,
+    ) -> Option<crate::transport::lifecycle::Completion> {
+        let (done, pending, handlers) = {
+            let mut inner = state.lock().unwrap();
+            if expected.is_some_and(|expected| inner.connection_id != expected) {
+                return None;
+            }
+            inner.connection_id = inner.connection_id.wrapping_add(1);
+            let _ = connected.send(false);
+            let transport = inner.transport.take();
+            if let Some(transport) = &transport {
+                transport.stop();
+            }
+            let subscriptions = std::mem::take(&mut inner.subscriptions);
+            for subscription in &subscriptions {
+                subscription.stop();
+            }
+            let tasks = std::mem::take(&mut inner.connection_tasks);
+            for task in &tasks {
+                task.0.abort();
+            }
+            let device = inner.device.take();
+            let requests = std::mem::take(&mut inner.connection_requests);
+            let pending: Vec<_> = inner.pending.drain().collect();
+            let handlers = inner.nack_handlers.clone();
+            inner.pending_order.clear();
+            inner.datalog_sessions.clear();
+            inner.blobdb2_pending.clear();
+            inner.blobdb_pending.clear();
+            inner.watch_version_pending.clear();
+            inner.watch_color_pending.clear();
+            inner.language_pending.clear();
+            inner.app_fetch_pending.clear();
+            inner.put_bytes_pending.take();
+            inner.blob_db_version = 0;
+            inner.observed_preferences.clear();
+            if let Some(acc) = inner.screenshot.take() {
+                let _ = acc.done.send(Err("watch disconnected".into()));
+            }
+            let mut cleanup = lifecycle.cleanup.lock().unwrap();
+            let done = if transport.is_none()
+                && subscriptions.is_empty()
+                && tasks.is_empty()
+                && requests.is_empty()
+                && device.is_none()
+            {
+                cleanup.pending()
+            } else {
+                let keep_alive = lifecycle.clone();
+                Some(cleanup.push(async move {
+                    let _keep_alive = keep_alive;
+                    let mut result = Ok(());
+                    for request in requests {
+                        let _ = request.wait().await;
+                    }
+                    for mut task in tasks {
+                        let _ = (&mut task.0).await;
+                    }
+                    if let Some(transport) = transport {
+                        result = transport.shutdown().await;
+                    }
+                    for subscription in subscriptions {
+                        if let Err(error) = subscription.shutdown().await {
+                            result = Err(error);
+                        }
+                    }
+                    if let Some(device) = device {
+                        // Do not cancel Disconnect after sending it: a late
+                        // completion could otherwise close a replacement link.
+                        return lifecycle::disconnect_device(&device).await;
+                    }
+                    result
+                }))
+            };
+            (done, pending, handlers)
+        };
+        for (txn, sender) in pending {
+            let _ = sender.send(false);
+            for handler in &handlers {
+                handler(txn);
+            }
+        }
+        done
     }
 
     // ---- public API ----
@@ -1434,9 +1526,12 @@ impl Pebble {
         let message = pebble_pack(endpoint, payload)
             .ok_or_else(|| PebbleError::Other("payload too large for Pebble Protocol".into()))?;
         let inner = self.inner.lock().unwrap();
-        if let Some(srv) = &inner.gatt_server {
-            srv.send(message);
-            Ok(())
+        if let Some(srv) = &inner.transport {
+            if srv.send(message) {
+                Ok(())
+            } else {
+                Err(PebbleError::NotConnected)
+            }
         } else {
             Err(PebbleError::NotConnected)
         }

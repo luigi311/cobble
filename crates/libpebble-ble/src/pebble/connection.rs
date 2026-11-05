@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bluer::{AdapterEvent, Address, Device};
 use futures::StreamExt;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
@@ -18,11 +18,19 @@ use crate::endpoints::Endpoint;
 use crate::endpoints::blob_db::{BlobDB2Incoming, BlobDBStatus, build_blobdb2_version};
 use crate::error::PebbleError;
 use crate::transport::agent::build_pairing_agent;
+use crate::transport::gatt_client::{discover_reverse_v2, start_gatt_client};
 use crate::transport::gatt_server::start_gatt_server;
+use crate::transport::{PpogTransport, TaskGuard, TransportMode, TransportStatus, wait_ready};
 use crate::uuids::{
     BATTERY_LEVEL_CHARACTERISTIC, CONNECTION_PARAMS_CHARACTERISTIC, CONNECTIVITY_CHARACTERISTIC,
     MTU_CHARACTERISTIC, PAIRING_TRIGGER_CHARACTERISTIC,
 };
+
+#[derive(Clone, Copy)]
+struct AttemptId {
+    epoch: u64,
+    generation: u64,
+}
 
 impl Pebble {
     // ── scanning ───────────────────────────────────────────────────────
@@ -76,6 +84,66 @@ impl Pebble {
         connect_attempts: u32,
         retry_delay: f64,
     ) -> Result<(), PebbleError> {
+        let epoch = self.cancel_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        let operation = self.lifecycle.operation.clone().lock_owned().await;
+        let mut attempt = ConnectionAttemptGuard {
+            pebble: self,
+            operation: Some(operation),
+            finished: false,
+        };
+        self.clear_connection();
+        self.lifecycle.wait_cleanup().await?;
+        self.ensure_attempt(epoch)?;
+        let mut result = self
+            .connect_session(pairing, conn_timeout, connect_attempts, retry_delay, epoch)
+            .await;
+        if matches!(&result, Err(PebbleError::PairingFailed(_))) {
+            warn!("pairing failed; clearing stale bond and retrying with a fresh connection");
+            self.ensure_attempt(epoch)?;
+            self.clear_connection();
+            self.lifecycle.wait_cleanup().await?;
+            result = self
+                .retry_pairing_after(
+                    epoch,
+                    tokio::time::sleep(Duration::from_secs(2)),
+                    || async {
+                        if let Err(error) = self.forget_for_attempt(Some(epoch)).await {
+                            self.ensure_attempt(epoch)?;
+                            warn!("could not clear stale bond: {error}");
+                        }
+                        // RemoveDevice invalidates every service/characteristic object.
+                        self.connect_session(
+                            pairing,
+                            conn_timeout,
+                            connect_attempts,
+                            retry_delay,
+                            epoch,
+                        )
+                        .await
+                    },
+                )
+                .await;
+        }
+        if result.is_err()
+            && let Some(done) = self.clear_connection()
+            && let Err(error) = done.wait().await
+        {
+            warn!("connection teardown failed: {error}");
+        }
+        attempt.finished = true;
+        result
+    }
+
+    async fn connect_session(
+        &self,
+        pairing: bool,
+        conn_timeout: f64,
+        connect_attempts: u32,
+        retry_delay: f64,
+        epoch: u64,
+    ) -> Result<(), PebbleError> {
+        let identity = self.capture_attempt(epoch)?;
+        let generation = identity.generation;
         let address = Address::from_str(&self.address)
             .map_err(|e| PebbleError::Other(format!("invalid address: {e}")))?;
 
@@ -84,62 +152,14 @@ impl Pebble {
             .adapter(&self.adapter_name)
             .map_err(|e| PebbleError::Other(format!("adapter {}: {e}", self.adapter_name)))?;
 
-        // 1. Start the phone-hosted PPoGATT GATT server FIRST (watch connects back to this).
-        let connected_notify = Arc::new(Notify::new());
-        let session_ready_notify = Arc::new(Notify::new());
-        let inner_for_data = Arc::clone(&self.inner);
-        let inner_for_disc = Arc::clone(&self.inner);
-        let connected_tx_for_disc = Arc::clone(&self.connected_tx);
-        let connected_notify_for_task = Arc::clone(&connected_notify);
-        let session_ready_for_task = Arc::clone(&session_ready_notify);
-
-        let gatt_server = start_gatt_server(
-            &adapter,
-            Arc::new(move |msg| {
-                let inner = Arc::clone(&inner_for_data);
-                tokio::spawn(async move {
-                    super::dispatch::on_pebble_message(msg, &inner);
-                });
-            }),
-            Arc::new(move || {
-                debug!("watch disconnected from PPoGATT server");
-                let _ = connected_tx_for_disc.send(false);
-                let (pending, nack_handlers) = {
-                    let mut inner = inner_for_disc.lock().unwrap();
-                    let pending: Vec<(u8, tokio::sync::oneshot::Sender<bool>)> =
-                        inner.pending.drain().collect();
-                    inner.pending_order.clear();
-                    let nack_handlers = inner.nack_handlers.clone();
-                    inner.datalog_sessions.clear();
-                    inner.blobdb2_pending.clear();
-                    inner.language_pending.clear();
-                    if let Some(acc) = inner.screenshot.take() {
-                        let _ = acc.done.send(Err("watch disconnected".into()));
-                    }
-                    (pending, nack_handlers)
-                };
-                for (txn, sender) in pending {
-                    let _ = sender.send(false);
-                    for h in &nack_handlers {
-                        h(txn);
-                    }
-                }
-            }),
-            connected_notify_for_task,
-            session_ready_for_task,
-        )
-        .await?;
-
-        self.inner.lock().unwrap().gatt_server = Some(gatt_server);
-
-        // 2. Register pairing agent.
+        // Register pairing agent.
         let agent = build_pairing_agent(address);
         let _agent_handle = session.register_agent(agent).await.map_err(|e| {
             warn!("could not register pairing agent: {e}; relying on a system agent");
             PebbleError::Other(e.to_string())
         });
 
-        // 3. Connect to the watch (with retries).
+        // Connect to the watch (with retries).
         let device = self
             .connect_client(
                 &adapter,
@@ -147,71 +167,101 @@ impl Pebble {
                 conn_timeout,
                 connect_attempts,
                 retry_delay,
+                identity,
             )
             .await?;
+        self.check_identity(identity)?;
 
-        // 4. Pairing / bonding.
+        let weak_inner = Arc::downgrade(&self.inner);
+        let on_data: Arc<dyn Fn(Vec<u8>) + Send + Sync> = Arc::new(move |message| {
+            if let Some(inner) = weak_inner.upgrade() {
+                if inner.lock().unwrap().connection_id != generation {
+                    return;
+                }
+                dispatch::on_pebble_message(message, &inner);
+            }
+        });
+        let reverse = match timeout(
+            Duration::from_secs_f64(conn_timeout),
+            discover_reverse_v2(&device),
+        )
+        .await
+        {
+            Ok(Ok(characteristics)) => characteristics,
+            Ok(Err(error)) => {
+                warn!("reverse PPoGATT v2 discovery failed: {error}; using forward");
+                None
+            }
+            Err(_) => {
+                warn!("reverse PPoGATT v2 discovery timed out; using forward");
+                None
+            }
+        };
+        // Legacy watches can attempt their subscription during pairing, so
+        // publish the forward service before triggering that handshake.
+        if reverse.is_none() {
+            let transport = start_gatt_server(&adapter, on_data.clone()).await?;
+            self.install_transport(transport, generation)?;
+        }
+
+        // Pairing / bonding.
         let already_paired = device.is_paired().await.unwrap_or(false);
 
         if !already_paired && pairing {
-            for attempt in 1u32..=2 {
-                match self.do_pairing(&device).await {
-                    Ok(()) => {
-                        info!("pairing completed");
-                        if let Err(e) = device.set_trusted(true).await {
-                            debug!("could not set Trusted: {e}");
-                        }
-                        break;
-                    }
-                    Err(e) if attempt == 1 => {
-                        warn!("pairing failed ({e}); clearing stale bond and retrying");
-                        if let Err(e2) = adapter.remove_device(address).await {
-                            debug!("RemoveDevice failed: {e2}");
-                        }
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                    Err(e) => {
-                        return Err(PebbleError::PairingFailed(format!(
-                            "pairing with {} failed twice: {e}",
-                            self.address
-                        )));
-                    }
-                }
+            self.do_pairing(&device, identity).await?;
+            info!("pairing completed");
+            if let Err(error) = device.set_trusted(true).await {
+                debug!("could not set Trusted: {error}");
             }
         }
 
-        // 5. Subscribe to fed9 characteristics.
+        // Subscribe to fed9 characteristics.
         self.subscribe_fed9(&device).await;
 
-        // 5b. Read + subscribe to the standard BLE battery level.
+        // Read + subscribe to the standard BLE battery level.
         self.subscribe_battery(&device).await;
 
-        // 6. Write 0x09 to pairing trigger (announce server mode).
-        self.write_pairing_trigger(&device).await;
-
-        // 7. Wait for watch to connect back to our GATT server.
-        let timeout_dur = Duration::from_secs_f64(conn_timeout);
-        match timeout(timeout_dur, connected_notify.notified()).await {
-            Ok(()) => {
-                debug!("PPoGATT data channel established");
-                match timeout(Duration::from_secs(10), session_ready_notify.notified()).await {
-                    Ok(()) => debug!("PPoGATT session ready"),
-                    Err(_) => {
-                        warn!("PPoGATT session not confirmed ready; early sends may be dropped")
-                    }
-                }
-            }
-            Err(_) => {
-                warn!(
-                    "watch did not connect back within {conn_timeout}s; sends may not reach watch"
-                )
-            }
-        }
+        let mode = select_transport(
+            reverse.is_some(),
+            || async {
+                let characteristics = reverse.expect("reverse service was discovered");
+                let transport = start_gatt_client(characteristics, on_data.clone());
+                let status = self.install_transport(transport, generation)?;
+                timeout(Duration::from_secs(22), wait_ready(status))
+                    .await
+                    .map_err(|_| PebbleError::Timeout("reverse PPoGATT setup/handshake".into()))?
+            },
+            || async {
+                let status = self
+                    .prepare_forward(generation, || async {
+                        start_gatt_server(&adapter, on_data.clone())
+                            .await
+                            .map_err(PebbleError::from)
+                    })
+                    .await?;
+                self.ensure_attempt(epoch)?;
+                self.write_pairing_trigger(&device).await;
+                timeout(Duration::from_secs_f64(conn_timeout), wait_ready(status))
+                    .await
+                    .map_err(|_| PebbleError::Timeout("forward PPoGATT handshake".into()))?
+            },
+        )
+        .await?;
+        info!("PPoGATT transport selected: {mode}");
+        let transport_status = self.transport_status(generation)?;
 
         // Startup synchronization uses the same connected guard as later API calls.
-        let _ = self.connected_tx.send(true);
+        {
+            let inner = self.inner.lock().unwrap();
+            self.ensure_attempt(epoch)?;
+            if inner.connection_id != generation {
+                return Err(PebbleError::NotConnected);
+            }
+            let _ = self.connected_tx.send(true);
+        }
+        self.monitor_connection(device, transport_status, generation);
 
-        // 8. BlobDB2 version handshake.
+        // BlobDB2 version handshake.
         let blob_db_version = self.negotiate_blobdb2_version().await;
         self.inner.lock().unwrap().blob_db_version = blob_db_version;
         if blob_db_version >= 1 {
@@ -221,65 +271,230 @@ impl Pebble {
             }
         }
 
-        // 9. Monitor device events for disconnect, with a keepalive poll fallback.
+        if !self.is_connected() {
+            return Err(PebbleError::NotConnected);
+        }
+        info!("Pebble connected and ready");
+        Ok(())
+    }
+
+    fn ensure_attempt(&self, epoch: u64) -> Result<(), PebbleError> {
+        if self.cancel_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(PebbleError::NotConnected);
+        }
+        Ok(())
+    }
+
+    fn capture_attempt(&self, epoch: u64) -> Result<AttemptId, PebbleError> {
+        let inner = self.inner.lock().unwrap();
+        self.ensure_attempt(epoch)?;
+        Ok(AttemptId {
+            epoch,
+            generation: inner.connection_id,
+        })
+    }
+
+    fn check_identity(&self, identity: AttemptId) -> Result<(), PebbleError> {
+        let inner = self.inner.lock().unwrap();
+        self.ensure_attempt(identity.epoch)?;
+        if inner.connection_id != identity.generation {
+            return Err(PebbleError::NotConnected);
+        }
+        Ok(())
+    }
+
+    /// Register connection-producing RPCs atomically with both identities and
+    /// their device. Teardown retains them even if the caller is cancelled.
+    fn begin_request(
+        &self,
+        identity: AttemptId,
+        device: Option<Device>,
+        future: impl std::future::Future<Output = Result<(), PebbleError>> + Send + 'static,
+    ) -> Result<crate::transport::lifecycle::Completion, PebbleError> {
+        let mut inner = self.inner.lock().unwrap();
+        self.ensure_attempt(identity.epoch)?;
+        if inner.connection_id != identity.generation {
+            return Err(PebbleError::NotConnected);
+        }
+        if let Some(device) = device {
+            inner.device = Some(device);
+        }
+        let request = crate::transport::lifecycle::spawn_cleanup(future);
+        inner.connection_requests.push(request.clone());
+        Ok(request)
+    }
+
+    async fn poll_pairing<S, SF, D, DF>(
+        &self,
+        identity: AttemptId,
+        checks: usize,
+        mut paired: S,
+        mut delay: D,
+    ) -> Result<bool, PebbleError>
+    where
+        S: FnMut() -> SF,
+        SF: std::future::Future<Output = Result<bool, bluer::Error>>,
+        D: FnMut() -> DF,
+        DF: std::future::Future<Output = ()>,
+    {
+        for _ in 0..checks {
+            self.check_identity(identity)?;
+            let paired = paired().await.unwrap_or(false);
+            self.check_identity(identity)?;
+            if paired {
+                return Ok(true);
+            }
+            delay().await;
+            self.check_identity(identity)?;
+        }
+        Ok(false)
+    }
+
+    async fn retry_pairing_after<D, R, RF>(
+        &self,
+        epoch: u64,
+        delay: D,
+        retry: R,
+    ) -> Result<(), PebbleError>
+    where
+        D: std::future::Future<Output = ()>,
+        R: FnOnce() -> RF,
+        RF: std::future::Future<Output = Result<(), PebbleError>>,
+    {
+        self.ensure_attempt(epoch)?;
+        delay.await;
+        self.ensure_attempt(epoch)?;
+        retry().await
+    }
+
+    fn transport_status(
+        &self,
+        generation: u64,
+    ) -> Result<watch::Receiver<TransportStatus>, PebbleError> {
+        let inner = self.inner.lock().unwrap();
+        if inner.connection_id != generation {
+            return Err(PebbleError::NotConnected);
+        }
+        inner
+            .transport
+            .as_ref()
+            .map(PpogTransport::status)
+            .ok_or(PebbleError::NotConnected)
+    }
+
+    async fn prepare_forward<F, FF>(
+        &self,
+        generation: u64,
+        start: F,
+    ) -> Result<watch::Receiver<TransportStatus>, PebbleError>
+    where
+        F: FnOnce() -> FF,
+        FF: std::future::Future<Output = Result<PpogTransport, PebbleError>>,
+    {
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.connection_id != generation {
+                return Err(PebbleError::NotConnected);
+            }
+            if let Some(transport) = &inner.transport
+                && transport.mode() == TransportMode::Forward
+            {
+                return Ok(transport.status());
+            }
+        }
+        self.stop_transport(generation).await?;
+        if self.inner.lock().unwrap().connection_id != generation {
+            return Err(PebbleError::NotConnected);
+        }
+        let transport = start().await?;
+        self.install_transport(transport, generation)
+    }
+
+    fn install_transport(
+        &self,
+        transport: PpogTransport,
+        generation: u64,
+    ) -> Result<watch::Receiver<TransportStatus>, PebbleError> {
+        let status = transport.status();
+        // Activate only after installing the send path. The watch can request
+        // PhoneVersion immediately after the reset exchange completes.
+        let mut inner = self.inner.lock().unwrap();
+        if inner.connection_id != generation {
+            return Err(PebbleError::NotConnected);
+        }
+        inner.transport = Some(transport);
+        inner.transport.as_mut().unwrap().activate();
+        Ok(status)
+    }
+
+    async fn stop_transport(&self, generation: u64) -> Result<(), PebbleError> {
+        let done = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.connection_id != generation {
+                return Err(PebbleError::NotConnected);
+            }
+            inner.transport.take().map(|transport| {
+                transport.stop();
+                let lifecycle = self.lifecycle.clone();
+                self.lifecycle.cleanup.lock().unwrap().push(async move {
+                    let _lifecycle = lifecycle;
+                    transport.shutdown().await
+                })
+            })
+        };
+        if let Some(done) = done {
+            done.wait().await?;
+        }
+        Ok(())
+    }
+
+    fn track_connection_task(&self, task: tokio::task::JoinHandle<()>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .connection_tasks
+            .push(TaskGuard(task));
+    }
+
+    fn monitor_connection(
+        &self,
+        device: Device,
+        mut transport: watch::Receiver<TransportStatus>,
+        generation: u64,
+    ) {
+        let weak_inner = Arc::downgrade(&self.inner);
         let connected_tx = Arc::clone(&self.connected_tx);
-        tokio::spawn(async move {
-            match device.events().await {
-                Err(e) => {
-                    warn!(
-                        "could not subscribe to device events: {e}; falling back to keepalive polling"
-                    );
-                    let mut poll = tokio::time::interval(Duration::from_secs(60));
-                    poll.tick().await;
-                    loop {
-                        poll.tick().await;
-                        match device.is_connected().await {
-                            Ok(false) | Err(_) => {
-                                debug!("keepalive: device not connected; triggering disconnect");
-                                let _ = connected_tx.send(false);
-                                return;
-                            }
-                            Ok(true) => {}
+        let lifecycle = self.lifecycle.clone();
+        self.track_connection_task(tokio::spawn(async move {
+            let events = device.events().await;
+            let mut events = match events {
+                Ok(events) => Some(Box::pin(events)),
+                Err(error) => { warn!("device event subscription failed: {error}; using keepalive polling"); None }
+            };
+            let mut poll = tokio::time::interval(Duration::from_secs(60));
+            poll.tick().await;
+            loop {
+                if *transport.borrow_and_update() == TransportStatus::Closed { break; }
+                tokio::select! {
+                    changed = transport.changed() => { if changed.is_err() { break; } }
+                    event = async {
+                        match &mut events {
+                            Some(events) => events.next().await,
+                            None => std::future::pending().await,
                         }
+                    } => {
+                        if matches!(event, None | Some(bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false)))) { break; }
                     }
-                }
-                Ok(mut events) => {
-                    let mut poll = tokio::time::interval(Duration::from_secs(60));
-                    poll.tick().await;
-                    loop {
-                        tokio::select! {
-                            event = events.next() => match event {
-                                Some(bluer::DeviceEvent::PropertyChanged(
-                                    bluer::DeviceProperty::Connected(false),
-                                )) => {
-                                    debug!("BlueZ reports device Connected=False; watch dropped");
-                                    let _ = connected_tx.send(false);
-                                    return;
-                                }
-                                None => {
-                                    debug!("device event stream ended; triggering disconnect");
-                                    let _ = connected_tx.send(false);
-                                    return;
-                                }
-                                _ => {}
-                            },
-                            _ = poll.tick() => {
-                                match device.is_connected().await {
-                                    Ok(false) | Err(_) => {
-                                        debug!("keepalive: device not connected; triggering disconnect");
-                                        let _ = connected_tx.send(false);
-                                        return;
-                                    }
-                                    Ok(true) => {}
-                                }
-                            }
-                        }
+                    _ = poll.tick() => {
+                        if !device.is_connected().await.unwrap_or(false) { break; }
                     }
                 }
             }
-        });
-        info!("Pebble connected and ready");
-        Ok(())
+            if let Some(inner) = weak_inner.upgrade() {
+                debug!("PPoGATT/BLE link closed; cleaning up connection");
+                Pebble::clear_connection_for(&inner, &connected_tx, &lifecycle, Some(generation));
+            }
+        }));
     }
 
     // ── private connection helpers ─────────────────────────────────────
@@ -291,16 +506,23 @@ impl Pebble {
         conn_timeout: f64,
         attempts: u32,
         retry_delay: f64,
+        identity: AttemptId,
     ) -> Result<Device, PebbleError> {
         let mut last_err: Option<PebbleError> = None;
         for i in 1..=attempts {
+            self.check_identity(identity)?;
             if i > 1 {
                 let scan_duration: f64 = 3.0 * i as f64;
                 let _ = Pebble::scan(adapter.name(), scan_duration).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             };
             let device = adapter.device(address)?;
-            let result = timeout(Duration::from_secs_f64(conn_timeout), device.connect()).await;
+            let request_device = device.clone();
+            let request = self.begin_request(identity, Some(device.clone()), async move {
+                request_device.connect().await.map_err(PebbleError::from)
+            })?;
+            let result = timeout(Duration::from_secs_f64(conn_timeout), request.wait()).await;
+            self.check_identity(identity)?;
             match result {
                 Ok(Ok(())) => return Ok(device),
                 Ok(Err(e)) => {
@@ -310,7 +532,7 @@ impl Pebble {
                         return Ok(device);
                     }
                     warn!("connect attempt {i}/{attempts} failed: {e}");
-                    last_err = Some(PebbleError::Ble(e));
+                    last_err = Some(e);
                 }
                 Err(_) => {
                     warn!("connect attempt {i}/{attempts} timed out");
@@ -321,42 +543,62 @@ impl Pebble {
                 }
             }
             if i < attempts {
-                let _ = adapter.device(address).map(|d| {
-                    tokio::spawn(async move {
-                        let _ = d.disconnect().await;
-                    });
+                // A timed-out Connect call still owns a BlueZ request. Finish
+                // it before disconnecting or starting the next retry.
+                let _ = request.wait().await;
+                let retry_device = device.clone();
+                let lifecycle = self.lifecycle.clone();
+                let done = self.lifecycle.cleanup.lock().unwrap().push(async move {
+                    let _lifecycle = lifecycle;
+                    super::lifecycle::disconnect_device(&retry_device).await
                 });
+                done.wait().await?;
                 tokio::time::sleep(Duration::from_secs_f64(retry_delay * i as f64)).await;
             }
         }
         Err(last_err.unwrap_or_else(|| PebbleError::Other("connect failed".into())))
     }
 
-    async fn do_pairing(&self, device: &Device) -> Result<(), PebbleError> {
+    async fn do_pairing(&self, device: &Device, identity: AttemptId) -> Result<(), PebbleError> {
+        self.check_identity(identity)?;
         if let Some(c) = dispatch::find_char(device, PAIRING_TRIGGER_CHARACTERISTIC).await {
+            self.check_identity(identity)?;
             let _ = c.read().await;
+            self.check_identity(identity)?;
             let _ = c.write(&[0x09]).await;
         }
         info!("waiting for the watch to initiate bonding; CONFIRM ON THE WATCH when prompted");
-
-        for _ in 0..20 {
-            if device.is_paired().await.unwrap_or(false) {
-                debug!("bonded (watch-initiated)");
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if self
+            .poll_pairing(
+                identity,
+                20,
+                || device.is_paired(),
+                || tokio::time::sleep(Duration::from_millis(500)),
+            )
+            .await?
+        {
+            debug!("bonded (watch-initiated)");
+            return Ok(());
         }
-
         debug!("watch did not initiate bonding; calling pair() from the host");
-        if let Err(e) = device.pair().await {
-            warn!("host-initiated pair() failed: {e}");
+        let pair_device = device.clone();
+        let request = self.begin_request(identity, Some(device.clone()), async move {
+            pair_device.pair().await.map_err(PebbleError::from)
+        })?;
+        if let Err(error) = request.wait().await {
+            warn!("host-initiated pair() failed: {error}");
         }
-        for _ in 0..6 {
-            if device.is_paired().await.unwrap_or(false) {
-                debug!("bonded (host-initiated)");
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if self
+            .poll_pairing(
+                identity,
+                6,
+                || device.is_paired(),
+                || tokio::time::sleep(Duration::from_millis(500)),
+            )
+            .await?
+        {
+            debug!("bonded (host-initiated)");
+            return Ok(());
         }
         Err(PebbleError::PairingFailed("pairing timed out".into()))
     }
@@ -369,18 +611,14 @@ impl Pebble {
         ] {
             if let Some(c) = dispatch::find_char(device, char_uuid).await {
                 let label = label.to_string();
-                tokio::spawn(async move {
-                    match c.notify().await {
-                        Ok(stream) => {
-                            debug!("subscribed to {label}");
-                            tokio::pin!(stream);
-                            while let Some(data) = stream.next().await {
-                                trace!("{label} update: {} bytes", data.len());
-                            }
-                        }
-                        Err(e) => warn!("subscribe to {label} failed: {e}"),
+                let mut subscription = crate::transport::notification::Subscription::start(c);
+                let mut events = subscription.events();
+                self.inner.lock().unwrap().subscriptions.push(subscription);
+                self.track_connection_task(tokio::spawn(async move {
+                    while let Some(data) = events.recv().await {
+                        trace!("{label} update: {} bytes", data.len());
                     }
-                });
+                }));
             } else {
                 trace!("fed9 characteristic {label} not found on device");
             }
@@ -392,7 +630,7 @@ impl Pebble {
         {
             let watch_mtu = u16::from_le_bytes([data[0], data[1]]) as usize;
             debug!("watch requested MTU: {watch_mtu}");
-            if let Some(srv) = &self.inner.lock().unwrap().gatt_server
+            if let Some(srv) = &self.inner.lock().unwrap().transport
                 && watch_mtu >= 23
             {
                 srv.set_mtu(watch_mtu);
@@ -413,20 +651,17 @@ impl Pebble {
             }
             Err(e) => debug!("battery read failed: {e}"),
         }
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            match c.notify().await {
-                Ok(stream) => {
-                    debug!("subscribed to battery level");
-                    tokio::pin!(stream);
-                    while let Some(data) = stream.next().await {
-                        super::dispatch::update_battery(&inner, &data);
-                    }
+        let inner = Arc::downgrade(&self.inner);
+        let mut subscription = crate::transport::notification::Subscription::start(c);
+        let mut events = subscription.events();
+        self.inner.lock().unwrap().subscriptions.push(subscription);
+        self.track_connection_task(tokio::spawn(async move {
+            while let Some(data) = events.recv().await {
+                if let Some(inner) = inner.upgrade() {
+                    super::dispatch::update_battery(&inner, &data);
                 }
-                Err(e) => warn!("subscribe to battery failed: {e}"),
             }
-        });
+        }));
     }
 
     async fn write_pairing_trigger(&self, device: &Device) {
@@ -470,12 +705,590 @@ impl Pebble {
     /// Remove the Bluetooth bond (unpair). The supervisor re-pairs on the
     /// next reconnect.
     pub async fn forget(&self) -> Result<(), PebbleError> {
+        self.forget_for_attempt(None).await
+    }
+
+    async fn forget_for_attempt(&self, epoch: Option<u64>) -> Result<(), PebbleError> {
+        if let Some(epoch) = epoch {
+            self.ensure_attempt(epoch)?;
+        }
         let address = Address::from_str(&self.address)
             .map_err(|e| PebbleError::Other(format!("invalid address: {e}")))?;
         let session = bluer::Session::new().await?;
         let adapter = session.adapter(&self.adapter_name)?;
-        adapter.remove_device(address).await?;
+        let request = {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(epoch) = epoch {
+                self.ensure_attempt(epoch)?;
+            }
+            let request = crate::transport::lifecycle::spawn_cleanup(async move {
+                adapter
+                    .remove_device(address)
+                    .await
+                    .map_err(PebbleError::from)
+            });
+            inner.connection_requests.push(request.clone());
+            request
+        };
+        request.wait().await?;
         info!("removed {} from BlueZ (stale bond cleared)", self.address);
         Ok(())
+    }
+}
+
+/// Keep fallback policy independent of BlueZ so failures and missing services
+/// can be tested without modifying any real Bluetooth connection.
+async fn select_transport<R, RF, F, FF>(
+    has_reverse: bool,
+    reverse: R,
+    forward: F,
+) -> Result<TransportMode, PebbleError>
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Result<(), PebbleError>>,
+    F: FnOnce() -> FF,
+    FF: std::future::Future<Output = Result<(), PebbleError>>,
+{
+    if has_reverse {
+        debug!("PPoGATT attempting reverse-v2");
+        match reverse().await {
+            Ok(()) => return Ok(TransportMode::ReverseV2),
+            Err(error) => {
+                warn!("reverse PPoGATT v2 setup failed: {error}; falling back to forward")
+            }
+        }
+    } else {
+        debug!("reverse PPoGATT v2 service unavailable; using forward");
+    }
+    forward().await?;
+    Ok(TransportMode::Forward)
+}
+
+struct ConnectionAttemptGuard<'a> {
+    pebble: &'a Pebble,
+    operation: Option<tokio::sync::OwnedMutexGuard<()>>,
+    finished: bool,
+}
+impl Drop for ConnectionAttemptGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let done = self.pebble.clear_connection();
+            let operation = self.operation.take();
+            // Handoff the lock as well as the cleanup receipt. A replacement
+            // Pebble for the same address cannot connect before teardown ends.
+            tokio::spawn(async move {
+                if let Some(done) = done {
+                    let _ = done.wait().await;
+                }
+                drop(operation);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::ping::build_pong;
+    use crate::endpoints::{Endpoint, pebble_pack};
+    use crate::transport::test_transport;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn absent_reverse_service_uses_forward_without_attempting_reverse() {
+        assert_eq!(
+            select_transport(
+                false,
+                || async {
+                    panic!("reverse service is absent");
+                },
+                || async { Ok(()) }
+            )
+            .await
+            .unwrap(),
+            TransportMode::Forward
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_reverse_setup_does_not_start_forward() {
+        assert_eq!(
+            select_transport(
+                true,
+                || async { Ok(()) },
+                || async {
+                    panic!("forward must not be started");
+                }
+            )
+            .await
+            .unwrap(),
+            TransportMode::ReverseV2
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_subscription_and_handshake_failures_fall_back_to_forward() {
+        for error in [
+            PebbleError::Other("invalid cached GATT handle".into()),
+            PebbleError::Timeout("reverse PPoGATT subscription".into()),
+            PebbleError::Timeout("reverse PPoGATT handshake".into()),
+        ] {
+            let attempted = AtomicBool::new(false);
+            let mode = select_transport(
+                true,
+                || async {
+                    attempted.store(true, Ordering::SeqCst);
+                    Err(error)
+                },
+                || async {
+                    assert!(attempted.load(Ordering::SeqCst));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(mode, TransportMode::Forward);
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_of_both_transports_propagates_the_forward_failure() {
+        let result = select_transport(
+            true,
+            || async { Err(PebbleError::Other("reverse failure".into())) },
+            || async { Err(PebbleError::Timeout("forward handshake".into())) },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PebbleError::Timeout(message)) if message == "forward handshake")
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_endpoint_replies_use_the_selected_transport() {
+        for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
+            let pebble = Pebble::new("00:00:00:00:00:00", "hci0");
+            let (transport, mut outgoing) = test_transport(mode);
+            pebble.install_transport(transport, 0).unwrap();
+            // Ping request: command 0 followed by a big-endian cookie.
+            dispatch::on_pebble_message(
+                pebble_pack(Endpoint::Ping, &[0, 1, 2, 3, 4]).unwrap(),
+                &pebble.inner,
+            );
+            assert_eq!(
+                outgoing.recv().await.unwrap(),
+                pebble_pack(Endpoint::Ping, &build_pong(0x01020304)).unwrap()
+            );
+            let mut open = vec![crate::endpoints::datalog::DATALOG_OPENSESSION, 7];
+            open.extend_from_slice(&[0; 16]);
+            open.extend_from_slice(&1_700_000_000_u32.to_le_bytes());
+            open.extend_from_slice(&81_u32.to_le_bytes());
+            open.push(0);
+            open.extend_from_slice(&249_u16.to_le_bytes());
+            dispatch::on_pebble_message(
+                pebble_pack(Endpoint::DataLog, &open).unwrap(),
+                &pebble.inner,
+            );
+            assert_eq!(
+                outgoing.recv().await.unwrap(),
+                pebble_pack(
+                    Endpoint::DataLog,
+                    &crate::endpoints::datalog::build_reply(7, true)
+                )
+                .unwrap()
+            );
+            assert_eq!(pebble.inner.lock().unwrap().datalog_sessions[&7].tag, 81);
+            pebble.connected_tx.send_replace(true);
+            pebble.fetch_health_data().unwrap();
+            assert_eq!(
+                outgoing.recv().await.unwrap(),
+                pebble_pack(
+                    Endpoint::DataLog,
+                    &crate::endpoints::datalog::build_report_sessions()
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                outgoing.recv().await.unwrap(),
+                pebble_pack(
+                    Endpoint::HealthSync,
+                    &crate::endpoints::health::build_health_sync_request()
+                )
+                .unwrap()
+            );
+            pebble.disconnect().await;
+            assert!(!pebble.is_connected());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_connection_attempt_releases_transport_and_pending_requests() {
+        let pebble = Pebble::new("00:00:00:00:00:00", "hci0");
+        let (transport, _outgoing) = test_transport(TransportMode::ReverseV2);
+        let mut status = pebble.install_transport(transport, 0).unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        pebble.inner.lock().unwrap().pending.insert(1, sender);
+        let attempt = ConnectionAttemptGuard {
+            pebble: &pebble,
+            operation: None,
+            finished: false,
+        };
+        drop(attempt);
+        assert_eq!(receiver.await, Ok(false));
+        assert!(pebble.inner.lock().unwrap().transport.is_none());
+        timeout(Duration::from_secs(1), async {
+            while *status.borrow_and_update() != TransportStatus::Closed {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_connection_attempt_cannot_install_a_transport_after_disconnect() {
+        let pebble = Pebble::new("00:00:00:00:00:00", "hci0");
+        let (transport, _outgoing) = test_transport(TransportMode::ReverseV2);
+        let mut status = transport.status();
+        pebble.disconnect().await;
+        assert!(pebble.install_transport(transport, 0).is_err());
+        assert!(pebble.inner.lock().unwrap().transport.is_none());
+        assert!(!pebble.is_connected());
+        timeout(Duration::from_secs(1), async {
+            while *status.borrow_and_update() != TransportStatus::Closed {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_holds_the_shared_gate_until_old_disconnect_finishes() {
+        let pebble = Arc::new(Pebble::new("00:00:00:00:00:11", "council-cancel"));
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let (disconnect_started, disconnecting) = tokio::sync::oneshot::channel();
+        pebble.lifecycle.cleanup.lock().unwrap().push(async move {
+            disconnect_started.send(()).unwrap();
+            blocked.await.unwrap();
+            Ok(())
+        });
+        disconnecting.await.unwrap();
+        let (startup_started, started) = tokio::sync::oneshot::channel();
+        let old = pebble.clone();
+        let startup = tokio::spawn(async move {
+            let operation = old.lifecycle.operation.clone().lock_owned().await;
+            let _guard = ConnectionAttemptGuard {
+                pebble: &old,
+                operation: Some(operation),
+                finished: false,
+            };
+            startup_started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        startup.abort();
+        assert!(startup.await.unwrap_err().is_cancelled());
+        let replacement = Pebble::new("00:00:00:00:00:11", "council-cancel");
+        assert!(Arc::ptr_eq(&pebble.lifecycle, &replacement.lifecycle));
+        drop(pebble);
+        let mut reconnect = Box::pin(replacement.lifecycle.operation.clone().lock_owned());
+        assert!(futures::poll!(reconnect.as_mut()).is_pending());
+        release.send(()).unwrap();
+        let _operation = timeout(Duration::from_secs(1), reconnect).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detected_link_loss_cleans_resources_and_nacks_requests_without_public_disconnect() {
+        use crate::transport::notification::test_subscription;
+        let pebble = Pebble::new("00:00:00:00:00:12", "council-loss");
+        let (transport, _outgoing) = test_transport(TransportMode::ReverseV2);
+        let mut status = pebble.install_transport(transport, 0).unwrap();
+        pebble.connected_tx.send_replace(true);
+        let (stop_started, stopping) = tokio::sync::oneshot::channel();
+        let (release, stopped) = tokio::sync::oneshot::channel();
+        let subscription = test_subscription(stop_started, stopped);
+        let (nack, nacked) = tokio::sync::oneshot::channel();
+        let (version, version_result) = tokio::sync::oneshot::channel();
+        {
+            let mut inner = pebble.inner.lock().unwrap();
+            inner.pending.insert(42, nack);
+            inner.watch_version_pending.push(version);
+            inner.subscriptions.push(subscription);
+        }
+        // Both Closed transport status and Device.Connected=false reach this
+        // production monitor cleanup path, with the captured generation.
+        let done = Pebble::clear_connection_for(
+            &pebble.inner,
+            &pebble.connected_tx,
+            &pebble.lifecycle,
+            Some(0),
+        )
+        .unwrap();
+        assert!(!pebble.is_connected());
+        assert_eq!(nacked.await, Ok(false));
+        assert!(version_result.await.is_err());
+        assert!(pebble.inner.lock().unwrap().transport.is_none());
+        assert!(pebble.inner.lock().unwrap().subscriptions.is_empty());
+        stopping.await.unwrap();
+        while *status.borrow_and_update() != TransportStatus::Closed {
+            status.changed().await.unwrap();
+        }
+        let mut waiting = Box::pin(done.wait());
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_link_loss_callback_cannot_clean_a_new_generation() {
+        let pebble = Pebble::new("00:00:00:00:00:13", "council-generation");
+        pebble.inner.lock().unwrap().connection_id = 1;
+        let (transport, _outgoing) = test_transport(TransportMode::Forward);
+        pebble.install_transport(transport, 1).unwrap();
+        pebble.connected_tx.send_replace(true);
+        assert!(
+            Pebble::clear_connection_for(
+                &pebble.inner,
+                &pebble.connected_tx,
+                &pebble.lifecycle,
+                Some(0)
+            )
+            .is_none()
+        );
+        assert!(pebble.is_connected());
+        assert!(pebble.inner.lock().unwrap().transport.is_some());
+        pebble.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_waits_for_an_in_flight_connect_request_after_cancellation() {
+        let pebble = Pebble::new("00:00:00:00:00:14", "council-request");
+        let (release, pending_reply) = tokio::sync::oneshot::channel();
+        let request = crate::transport::lifecycle::spawn_cleanup(async move {
+            pending_reply.await.unwrap();
+            Ok(())
+        });
+        pebble
+            .inner
+            .lock()
+            .unwrap()
+            .connection_requests
+            .push(request);
+        let done = pebble.clear_connection().unwrap();
+        let mut cancelled = Box::pin(done.wait());
+        assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        drop(cancelled);
+        let pending = pebble.lifecycle.cleanup.lock().unwrap().pending().unwrap();
+        let mut reconnect = Box::pin(pending.wait());
+        assert!(futures::poll!(reconnect.as_mut()).is_pending());
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(1), reconnect)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_disconnect_cancels_pairing_retry_before_forget_or_connect() {
+        use std::sync::atomic::AtomicUsize;
+        let pebble = Pebble::new("00:00:00:00:00:21", "council-pairing-retry");
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let removes = AtomicUsize::new(0);
+        let connects = AtomicUsize::new(0);
+        let mut retry = Box::pin(pebble.retry_pairing_after(
+            0,
+            async {
+                wait.await.unwrap();
+            },
+            || async {
+                removes.fetch_add(1, Ordering::SeqCst);
+                connects.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        pebble.disconnect().await;
+        release.send(()).unwrap();
+        assert!(matches!(retry.await, Err(PebbleError::NotConnected)));
+        assert_eq!(removes.load(Ordering::SeqCst), 0);
+        assert_eq!(connects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn forward_setup_reuses_existing_transport_and_checks_disconnect_without_panicking() {
+        let pebble = Pebble::new("00:00:00:00:00:22", "council-forward-reuse");
+        let (transport, _outgoing) = test_transport(TransportMode::Forward);
+        pebble.install_transport(transport, 0).unwrap();
+        pebble
+            .prepare_forward(0, || async { panic!("forward already exists") })
+            .await
+            .unwrap();
+        pebble.disconnect().await;
+        assert!(matches!(
+            pebble.transport_status(0),
+            Err(PebbleError::NotConnected)
+        ));
+        assert!(
+            pebble
+                .prepare_forward(0, || async { panic!("attempt was disconnected") })
+                .await
+                .is_err()
+        );
+        assert!(!pebble.inner.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_forward_registration_returns_error_without_poisoning_state() {
+        let pebble = Pebble::new("00:00:00:00:00:23", "council-forward-registration");
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut setup = Box::pin(pebble.prepare_forward(0, || async {
+            wait.await.unwrap();
+            Ok(test_transport(TransportMode::Forward).0)
+        }));
+        assert!(futures::poll!(setup.as_mut()).is_pending());
+        pebble.disconnect().await;
+        release.send(()).unwrap();
+        assert!(matches!(setup.await, Err(PebbleError::NotConnected)));
+        assert!(!pebble.inner.is_poisoned());
+        assert!(pebble.inner.lock().unwrap().transport.is_none());
+    }
+
+    #[tokio::test]
+    async fn actual_forward_setup_waits_for_reverse_cleanup_and_respects_disconnect() {
+        use crate::transport::test_transport_with_cleanup;
+        for disconnect in [false, true] {
+            let pebble = Pebble::new(
+                "00:00:00:00:00:24",
+                if disconnect {
+                    "council-fallback-cancel"
+                } else {
+                    "council-fallback-order"
+                },
+            );
+            let (entered, stopping) = tokio::sync::oneshot::channel();
+            let (release, wait) = tokio::sync::oneshot::channel();
+            let (reverse, _outgoing) =
+                test_transport_with_cleanup(TransportMode::ReverseV2, async move {
+                    entered.send(()).unwrap();
+                    wait.await.unwrap();
+                });
+            pebble.install_transport(reverse, 0).unwrap();
+            let started_forward = AtomicBool::new(false);
+            let mut setup = Box::pin(pebble.prepare_forward(0, || async {
+                started_forward.store(true, Ordering::SeqCst);
+                Ok(test_transport(TransportMode::Forward).0)
+            }));
+            assert!(futures::poll!(setup.as_mut()).is_pending());
+            stopping.await.unwrap();
+            assert!(!started_forward.load(Ordering::SeqCst));
+            if disconnect {
+                pebble.clear_connection();
+            }
+            release.send(()).unwrap();
+            let result = timeout(Duration::from_secs(1), setup).await.unwrap();
+            assert_eq!(result.is_ok(), !disconnect);
+            assert_eq!(started_forward.load(Ordering::SeqCst), !disconnect);
+            pebble.disconnect().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_pairing_poll_prevents_host_pair_from_running() {
+        use std::sync::atomic::AtomicUsize;
+        let pebble = Pebble::new("00:00:00:00:00:30", "council-pair-poll");
+        let identity = pebble.capture_attempt(0).unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut wait = Some(wait);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut pairing = Box::pin(async {
+            if !pebble
+                .poll_pairing(
+                    identity,
+                    1,
+                    || async { Ok(false) },
+                    || {
+                        let wait = wait.take().expect("one polling delay");
+                        async move {
+                            let _ = wait.await;
+                        }
+                    },
+                )
+                .await?
+            {
+                let calls = calls.clone();
+                let request = pebble.begin_request(identity, None, async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })?;
+                request.wait().await?;
+            }
+            Ok::<(), PebbleError>(())
+        });
+        assert!(futures::poll!(pairing.as_mut()).is_pending());
+        pebble.disconnect().await;
+        release.send(()).unwrap();
+        assert!(matches!(pairing.await, Err(PebbleError::NotConnected)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disconnect_retains_pending_pair_until_its_rpc_completes() {
+        let pebble = Pebble::new("00:00:00:00:00:31", "council-pair-pending");
+        let identity = pebble.capture_attempt(0).unwrap();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let request = pebble
+            .begin_request(identity, None, async move {
+                started.send(()).unwrap();
+                wait.await.unwrap();
+                Ok(())
+            })
+            .unwrap();
+        running.await.unwrap();
+        let mut disconnect = Box::pin(pebble.disconnect());
+        assert!(futures::poll!(disconnect.as_mut()).is_pending());
+        assert!(pebble.inner.lock().unwrap().connection_requests.is_empty());
+        let mut pending_pair = Box::pin(request.wait());
+        assert!(futures::poll!(pending_pair.as_mut()).is_pending());
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(1), disconnect).await.unwrap();
+        pending_pair.await.unwrap();
+        assert!(pebble.check_identity(identity).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_epoch_cannot_adopt_new_generation_or_register_connect() {
+        let pebble = Pebble::new("00:00:00:00:00:32", "council-capture");
+        pebble.ensure_attempt(0).unwrap(); // Original check passes.
+        pebble.disconnect().await; // Deterministic interleaving before capture.
+        assert!(matches!(
+            pebble.capture_attempt(0),
+            Err(PebbleError::NotConnected)
+        ));
+        let replacement_generation = pebble.inner.lock().unwrap().connection_id;
+        let calls = Arc::new(AtomicBool::new(false));
+        let mark = calls.clone();
+        assert!(
+            pebble
+                .begin_request(
+                    AttemptId {
+                        epoch: 0,
+                        generation: replacement_generation
+                    },
+                    None,
+                    async move {
+                        mark.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                )
+                .is_err()
+        );
+        tokio::task::yield_now().await;
+        assert!(!calls.load(Ordering::SeqCst));
+        assert!(pebble.inner.lock().unwrap().connection_requests.is_empty());
     }
 }
