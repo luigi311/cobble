@@ -41,6 +41,35 @@ async def test_extended_weather_uses_shared_contract_and_original_location_slot(
     assert asdict(forecast) == raw
 
 
+async def test_default_slot_sets_current_location_without_mutating_forecast():
+    """The default slot is current even when the caller's record is not."""
+    _, forecast = forecast_fixture()
+    forecast.is_current_location = False
+    original = asdict(forecast)
+    call = AsyncMock()
+    client = CobbleClient()
+    client._iface = SimpleNamespace(call_push_weather_forecast=call)
+    await client.push_weather_forecast(forecast)
+    _, payload = call.call_args.args
+    assert json.loads(payload) == {**original, "is_current_location": True}
+    assert asdict(forecast) == original
+
+
+@pytest.mark.parametrize("is_current_location", [False, True])
+async def test_custom_slot_preserves_current_location_flag(is_current_location):
+    """An explicit key leaves the caller's location flag intact."""
+    _, forecast = forecast_fixture()
+    forecast.is_current_location = is_current_location
+    call = AsyncMock()
+    client = CobbleClient()
+    client._iface = SimpleNamespace(call_push_weather_forecast=call)
+    key = bytes(range(16))
+    await client.push_weather_forecast(forecast, location_key=key)
+    sent_key, payload = call.call_args.args
+    assert sent_key == key
+    assert json.loads(payload) == asdict(forecast)
+
+
 async def test_invalid_location_and_nonfinite_coordinates_do_not_reach_dbus():
     _, forecast = forecast_fixture()
     call = AsyncMock()

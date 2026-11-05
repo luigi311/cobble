@@ -1,6 +1,7 @@
 //! Capability-selected weather records. The v4.5 fixed block matches upstream
 //! WeatherAppBlobRecordV4: 250 bytes followed by the same pstring16s as v3.
 
+pub use cobble_contracts::{MAX_DAILY, MAX_HOURLY};
 use cobble_contracts::{WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast};
 
 use super::blob_db::{WeatherType, build_weather_blob};
@@ -8,8 +9,6 @@ use super::blob_db::{WeatherType, build_weather_blob};
 pub const WEATHER_APP_CAPABILITY: u64 = 1 << 11;
 pub const WEATHER_DB_V4_CAPABILITY: u64 = 1 << 24;
 pub const UNKNOWN_TIMELINE_ATTRIBUTES_CAPABILITY: u64 = 1 << 25;
-pub const MAX_DAILY: usize = 7;
-pub const MAX_HOURLY: usize = 24;
 const TEMP_UNKNOWN: i16 = i16::MAX;
 
 /// Resolve the separate temperature preference, falling back to distance units.

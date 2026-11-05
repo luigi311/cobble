@@ -174,18 +174,29 @@ fn parse_forecast(json: &Value, lat: f64, lon: f64, name: &str) -> anyhow::Resul
             .filter(|v| v % 60 == 0)
             .and_then(|v| i16::try_from(v / 60).ok()),
         daily: days,
-        today_hourly: hourly_forecast(&json["hourly"], midnight),
-        tomorrow_hourly: hourly_forecast(&json["hourly"], tomorrow_midnight),
+        today_hourly: hourly_forecast(&json["hourly"], midnight, tomorrow_midnight),
+        tomorrow_hourly: times
+            .get(2)
+            .and_then(Value::as_i64)
+            .map(|next_midnight| hourly_forecast(&json["hourly"], tomorrow_midnight, next_midnight))
+            .unwrap_or_default(),
         sunrise_sunset_pins: true,
     })
 }
 
-/// Keep hour indices anchored to local midnight, filling gaps with unknown readings.
-fn hourly_forecast(hourly: &Value, midnight: i64) -> Vec<WeatherHourlyForecast> {
+/// Keep up to 24 slots before the next local midnight, filling gaps with unknown readings.
+fn hourly_forecast(
+    hourly: &Value,
+    midnight: i64,
+    next_midnight: i64,
+) -> Vec<WeatherHourlyForecast> {
     let mut hours = Vec::new();
     if let Some(times) = hourly["time"].as_array() {
         for (i, timestamp) in times.iter().enumerate() {
-            let Some(delta) = timestamp.as_i64().and_then(|t| t.checked_sub(midnight)) else {
+            let Some(timestamp) = timestamp.as_i64().filter(|t| *t < next_midnight) else {
+                continue;
+            };
+            let Some(delta) = timestamp.checked_sub(midnight) else {
                 continue;
             };
             if !(0..86400).contains(&delta) || delta % 3600 != 0 {
@@ -331,6 +342,47 @@ mod tests {
         assert_eq!(data.daily[2].high_temp, None);
         assert_eq!(data.daily[2].weather_type, 255);
         assert!(data.sunrise_sunset_pins);
+    }
+
+    /// Neither day's next midnight can fill a missing slot on a 23-hour day.
+    #[test]
+    fn hourly_forecasts_respect_local_day_boundaries_and_keep_24_slot_limit() {
+        use libpebble_ble::endpoints::weather::{WEATHER_DB_V4_CAPABILITY, build_weather_record};
+
+        for (today_hours, tomorrow_hours) in [(23usize, 24usize), (24, 23), (24, 24), (25, 25)] {
+            let mut json = response();
+            let start = json["daily"]["time"][0].as_i64().unwrap();
+            let tomorrow = start + today_hours as i64 * 3600;
+            let next_day = tomorrow + tomorrow_hours as i64 * 3600;
+            json["daily"]["time"] = json!([start, tomorrow, next_day]);
+            let readings = today_hours + tomorrow_hours + 1;
+            json["hourly"] = json!({
+                "time": (0..readings).map(|i| start + i as i64 * 3600).collect::<Vec<_>>(),
+                "temperature_2m": (0..readings).collect::<Vec<_>>()
+            });
+            let data = parse_forecast(&json, 0.0, 0.0, "Test").unwrap();
+            assert_eq!(data.today_hourly.len(), today_hours.min(24));
+            assert_eq!(data.tomorrow_hourly.len(), tomorrow_hours.min(24));
+            assert_eq!(
+                data.today_hourly.last().unwrap().temp,
+                Some(today_hours.min(24) as i16 - 1)
+            );
+            assert_eq!(data.tomorrow_hourly[0].temp, Some(today_hours as i16));
+            let record = build_weather_record(&data, 0, WEATHER_DB_V4_CAPABILITY, false).unwrap();
+            assert_eq!(record[69], if today_hours < 24 { 0 } else { 24 });
+            assert_eq!(record[201], if tomorrow_hours < 24 { 0 } else { 24 });
+        }
+    }
+
+    /// Keep the required two daily forecasts without guessing an unknown third midnight.
+    #[test]
+    fn missing_next_midnight_omits_tomorrows_hourly_series() {
+        let mut json = response();
+        json["daily"]["time"].as_array_mut().unwrap().truncate(2);
+        let data = parse_forecast(&json, 0.0, 0.0, "Test").unwrap();
+        assert_eq!(data.daily.len(), 2);
+        assert!(!data.today_hourly.is_empty());
+        assert!(data.tomorrow_hourly.is_empty());
     }
 
     /// Required missing readings fail; absent optional forecasts remain unknown instead of clear/zero.

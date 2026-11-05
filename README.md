@@ -82,9 +82,12 @@ also expose `push_weather_forecast(location_key, forecast)` and
 `push_weather_forecast(forecast, location_key=...)`, respectively. Both use the
 shared `WeatherForecast`, `WeatherDailyForecast`, and `WeatherHourlyForecast`
 models. The additive D-Bus method `PushWeatherForecast(ay, s)` accepts a 16-byte
-location key and JSON matching
+location key and at most 64 KiB of JSON matching
 [`WeatherForecast`](crates/cobble-contracts/src/weather.rs). Use the same key to
-replace a location. Custom forecasts can set `sunrise_sunset_pins=true` and
+replace a location. Decoding retains the first seven daily entries and the first
+24 entries of each hourly series; surplus entries are ignored. The Python
+client's default location key marks the sent copy as the current location.
+Custom forecasts can set `sunrise_sunset_pins=true` and
 populate daily `sunrise_utc`/`sunset_utc` fields to publish solar pins too.
 
 ## PebbleKit JS

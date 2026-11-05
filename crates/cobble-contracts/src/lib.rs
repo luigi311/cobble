@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 mod weather;
-pub use weather::{WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast};
+pub use weather::{
+    MAX_DAILY, MAX_HOURLY, WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast,
+};
 
 pub const CONFIG_API_VERSION: u16 = 1;
 pub const DEVICE_CONFIG_API_VERSION: u16 = 1;

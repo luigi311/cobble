@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from dbus_fast import DBusError, Variant
@@ -761,10 +761,12 @@ class CobbleClient:
 
         Temperatures are Celsius. The same location key replaces the previous
         entry; omitting it uses the original PushWeather current-location slot.
+        That default slot sets is_current_location=True in the sent copy only.
         """
         self._require_iface()
         if location_key is None:
             location_key = bytes.fromhex("e4c75d6ae95f4b778c3251a1c2b1d5c4")
+            forecast = replace(forecast, is_current_location=True)
         if len(location_key) != 16:
             raise ValueError(f"location_key must be 16 bytes, got {len(location_key)}")
         payload = json.dumps(asdict(forecast), allow_nan=False)

@@ -3,6 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum daily entries retained when decoding and encoding a forecast.
+pub const MAX_DAILY: usize = 7;
+/// Maximum entries retained for either local day's hourly series.
+pub const MAX_HOURLY: usize = 24;
+
 /// A location's current conditions and optional extended forecast.
 ///
 /// Weather icons use Pebble codes 0–8 or 255 (unknown). Wind is always mph,
@@ -39,18 +44,49 @@ pub struct WeatherForecast {
     pub wind_direction_deg: Option<u16>,
     #[serde(default)]
     pub utc_offset_minutes: Option<i16>,
-    /// Today first; at most seven days are encoded.
-    #[serde(default)]
+    /// Today first; entries after the first seven are ignored during decoding and encoding.
+    #[serde(default, deserialize_with = "deserialize_entries::<_, _, MAX_DAILY>")]
     pub daily: Vec<WeatherDailyForecast>,
     /// Local hours 0–23, including earlier hours today. The curve requires 24 known temperatures.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entries::<_, _, MAX_HOURLY>")]
     pub today_hourly: Vec<WeatherHourlyForecast>,
     /// Tomorrow's local hours 0–23; incomplete temperature series fall back to daily data.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entries::<_, _, MAX_HOURLY>")]
     pub tomorrow_hourly: Vec<WeatherHourlyForecast>,
     /// Also update sunrise/sunset timeline pins for the first three forecast days.
     #[serde(default)]
     pub sunrise_sunset_pins: bool,
+}
+
+/// Retain only the encoded prefix, consuming surplus JSON without allocating forecast entries.
+fn deserialize_entries<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Entries<T, const MAX: usize>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const MAX: usize> serde::de::Visitor<'de> for Entries<T, MAX> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a forecast array")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX));
+            while entries.len() < MAX {
+                let Some(entry) = seq.next_element()? else {
+                    return Ok(entries);
+                };
+                entries.push(entry);
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_seq(Entries::<T, MAX>(std::marker::PhantomData))
 }
 
 /// One local day's forecast. Missing temperatures are encoded as unknown.
@@ -135,4 +171,30 @@ impl Default for WeatherHourlyForecast {
 
 fn unknown_weather() -> u8 {
     255
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Surplus entries are consumed without invoking their type's deserializer.
+    #[test]
+    fn surplus_forecast_entries_are_not_materialized() {
+        static DECODED: AtomicUsize = AtomicUsize::new(0);
+        struct Entry;
+        impl<'de> Deserialize<'de> for Entry {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                bool::deserialize(deserializer)?;
+                DECODED.fetch_add(1, Ordering::Relaxed);
+                Ok(Self)
+            }
+        }
+        let input = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(
+            std::iter::repeat_n(true, 1000),
+        );
+        let entries = deserialize_entries::<_, Entry, MAX_DAILY>(input).unwrap();
+        assert_eq!(entries.len(), MAX_DAILY);
+        assert_eq!(DECODED.load(Ordering::Relaxed), MAX_DAILY);
+    }
 }
