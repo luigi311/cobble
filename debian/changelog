@@ -1,3 +1,15 @@
+cobbled (0.9.1-1) unstable; urgency=medium
+
+  * Prevent concurrent cobbled instances across D-Bus sessions, detect older
+    running daemons, and avoid service restart loops after duplicate launches.
+  * Use ordinary GATT writes for reverse PPoGATT v2, retain pending writes
+    during teardown, and require BLE cleanup after write failures.
+  * Preserve connections on transient BlueZ polling errors and log link-loss
+    causes and connection uptime.
+  * Show naps in sleep charts and add a compact nap summary.
+
+ -- Luis Garcia <git@luigi311.com>  Thu, 05 Nov 2026 19:19:09 +0000
+
 cobbled (0.9.0-1) UNRELEASED; urgency=medium
 
   * Add firmware-gated five-minute heart-rate sampling and preserve unknown

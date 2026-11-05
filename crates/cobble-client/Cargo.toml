@@ -1,6 +1,6 @@
 [package]
 name = "cobble-client"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 description = "Rust D-Bus client for the cobbled Pebble BLE daemon."
 
