@@ -1,5 +1,6 @@
 use std::process::Command;
 
+/// Verify exported APIs and configuration dictionaries through an isolated session bus.
 #[test]
 fn exported_dbus_contract_contains_all_client_settings_apis() {
     let root = std::env::temp_dir().join(format!("cobbled-dbus-contract-{}", std::process::id()));

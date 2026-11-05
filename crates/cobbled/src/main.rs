@@ -58,6 +58,7 @@ struct Cli {
     verbose: u8,
 }
 
+/// Initialize configuration, storage and D-Bus services, then run until shutdown.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();

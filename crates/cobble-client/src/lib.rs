@@ -86,6 +86,7 @@ pub fn offline_database_path() -> std::result::Result<PathBuf, String> {
     )
 }
 
+/// Convert a value into an owned D-Bus variant, propagating conversion errors.
 fn wire_value(value: impl Into<zbus::Variant<'static>>) -> Result<OwnedValue> {
     OwnedValue::try_from(value.into())
 }

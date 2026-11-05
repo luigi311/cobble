@@ -35,6 +35,7 @@ impl NotificationMonitor {
         }
     }
 
+    /// Start forwarding desktop notifications using BecomeMonitor or an eavesdrop match.
     pub async fn start(
         &mut self,
         on_notification: Arc<dyn Fn(String, String, String) + Send + Sync + 'static>,

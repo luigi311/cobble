@@ -165,6 +165,7 @@ impl MprisMonitor {
     // D-Bus property helpers
     // ------------------------------------------------------------------
 
+    /// Read an MPRIS property, returning None on a failed request or type conversion.
     async fn get_prop<T>(&self, bus: &str, iface: &str, prop: &str) -> Option<T>
     where
         T: TryFrom<OwnedValue, Error = zbus::Error>,
@@ -386,6 +387,7 @@ impl MprisMonitor {
         }
     }
 
+    /// Read a player's metadata dictionary, returning an empty map if unavailable or malformed.
     async fn read_metadata(&self, state: &PlayerState) -> HashMap<String, OwnedValue> {
         let reply = match self
             .conn

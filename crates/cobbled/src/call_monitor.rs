@@ -110,6 +110,7 @@ pub async fn run_call_monitor(
 // ModemManager
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Discover existing ModemManager calls and track subsequent call and property signals.
 async fn watch_modem_manager(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     trace!("call-monitor: starting ModemManager watcher");
     let _ = add_match(conn, "type='signal',sender='org.freedesktop.ModemManager1',interface='org.freedesktop.ModemManager1.Modem.Voice',member='CallAdded'").await;
@@ -258,6 +259,7 @@ async fn handle_mm_property_change(
 // oFono
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Discover existing oFono calls and track subsequent call and property signals.
 async fn watch_ofono(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     trace!("call-monitor: starting oFono watcher");
     let _ = add_match(conn, "type='signal',sender='org.ofono',interface='org.ofono.VoiceCallManager',member='CallAdded'").await;
@@ -307,6 +309,7 @@ async fn watch_ofono(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     }
 }
 
+/// Add a modem's existing oFono calls to shared call tracking.
 async fn scan_ofono_calls(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap, modem: &str) {
     let calls: Option<Vec<zbus::ObjectPath<'_>>> =
         get_ofono_prop(conn, modem, "org.ofono.VoiceCallManager", "Calls").await;
@@ -504,6 +507,7 @@ async fn list_mm_objects(
     Ok(paths)
 }
 
+/// Read a ModemManager property, returning None on a failed request or type conversion.
 async fn get_mm_prop<T>(conn: &Connection, path: &str, iface: &str, prop: &str) -> Option<T>
 where
     T: TryFrom<OwnedValue, Error = zbus::Error>,
@@ -525,6 +529,7 @@ where
         .and_then(|ov| T::try_from(ov).ok())
 }
 
+/// Read an oFono property, returning None on a failed request or type conversion.
 async fn get_ofono_prop<T>(conn: &Connection, path: &str, iface: &str, prop: &str) -> Option<T>
 where
     T: TryFrom<OwnedValue, Error = zbus::Error>,
