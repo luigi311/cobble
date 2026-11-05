@@ -10,6 +10,7 @@ pub mod uuids;
 
 mod pebble;
 
+pub use cobble_contracts::{WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast};
 pub use endpoints::Endpoint;
 pub use endpoints::app_message::AppMessageValue;
 pub use endpoints::app_run_state::AppRunStateCmd;

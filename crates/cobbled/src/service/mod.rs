@@ -40,6 +40,7 @@
 //!     FactoryReset(b confirm)  (DESTRUCTIVE; requires confirm=true)
 //!     Forget()  remove the Bluetooth bond (unpair); re-pairs on next reconnect
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
+//!     PushWeatherForecast(ay location_key, s forecast_json) -> ()
 //!     ReprocessHealthData()
 //!     SyncWellness()
 //!     GetWellnessSyncStatus() -> a{sv}
@@ -2706,6 +2707,24 @@ impl CobbleDaemon {
                 tomorrow_low,
                 is_current_location,
             )
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
+    /// Push a JSON-encoded WeatherForecast (Celsius inputs) with optional daily/hourly data.
+    /// Existing PushWeather callers can keep using the original method signature.
+    pub(crate) async fn push_weather_forecast(
+        &self,
+        location_key: Vec<u8>,
+        forecast_json: &str,
+    ) -> Result<(), DaemonError> {
+        let key: [u8; 16] = location_key
+            .try_into()
+            .map_err(|_| DaemonError::Failed("location_key must be 16 bytes".into()))?;
+        let forecast: libpebble_ble::WeatherForecast = serde_json::from_str(forecast_json)
+            .map_err(|e| DaemonError::Failed(format!("invalid weather forecast: {e}")))?;
+        self.require_pebble()?
+            .push_weather_forecast(&key, &forecast)
             .await
             .map_err(|e| DaemonError::Failed(e.to_string()))
     }

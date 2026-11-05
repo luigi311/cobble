@@ -114,11 +114,15 @@ pub(crate) struct PebbleInner {
     pub(crate) put_bytes_pending: Option<oneshot::Sender<PutBytesResponse>>,
     /// Latest raw records observed through BlobDB2, keyed by wire DB and key.
     pub(crate) observed_preferences: HashMap<(u8, String), Vec<u8>>,
+    /// Coalesced effective weather temperature-unit changes; startup subscribers see the latest.
+    pub(crate) weather_units_tx: tokio::sync::watch::Sender<u64>,
     /// Monotonic notification of BlobDB2 SyncDone messages: `(generation, db)`.
     pub(crate) sync_done_tx: tokio::sync::watch::Sender<(u64, u8)>,
     /// Futures awaiting a WatchVersionResponse (endpoint 16). All are resolved
     /// when the next response arrives.
     pub(crate) watch_version_pending: Vec<oneshot::Sender<WatchVersionInfo>>,
+    /// Capability bits from this connection's latest version response.
+    pub(crate) watch_capabilities: Option<u64>,
     /// Futures awaiting a factory-registry watch-color response (endpoint 5001).
     /// `None` is sent on an error reply or unknown color.
     pub(crate) watch_color_pending: Vec<oneshot::Sender<Option<&'static WatchColorInfo>>>,
@@ -161,8 +165,10 @@ impl PebbleInner {
             app_fetch_pending: HashMap::new(),
             put_bytes_pending: None,
             observed_preferences: HashMap::new(),
+            weather_units_tx: tokio::sync::watch::channel(0).0,
             sync_done_tx,
             watch_version_pending: Vec::new(),
+            watch_capabilities: None,
             watch_color_pending: Vec::new(),
             txn: 0,
             transport: None,

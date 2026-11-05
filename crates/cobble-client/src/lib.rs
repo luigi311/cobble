@@ -707,6 +707,10 @@ pub trait CobbleDaemon {
         is_current_location: bool,
     ) -> Result<()>;
 
+    /// Send a JSON-encoded extended weather forecast; temperatures are Celsius.
+    async fn push_weather_forecast(&self, location_key: Vec<u8>, forecast_json: &str)
+    -> Result<()>;
+
     // ---- Daemon control ----
 
     async fn sync_wellness(&self) -> Result<()>;
@@ -1163,6 +1167,20 @@ impl CobbleClient {
                 tomorrow_low,
                 is_current_location,
             )
+            .await
+    }
+
+    /// Push current, daily, and hourly weather using the watch's supported record version.
+    pub async fn push_weather_forecast(
+        &self,
+        location_key: Vec<u8>,
+        forecast: &WeatherForecast,
+    ) -> Result<()> {
+        let json = serde_json::to_string(forecast)
+            .map_err(|e| Error::Failure(format!("invalid weather forecast: {e}")))?;
+        self.proxy()
+            .await?
+            .push_weather_forecast(location_key, &json)
             .await
     }
 

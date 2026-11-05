@@ -53,6 +53,7 @@ from ._device_config import (
     WatchIdentity,
 )
 from ._types import Int, i8, i16, i32, u8, u16, u32
+from ._weather import WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast
 from .client import CobbleClient, DaemonNotRunningError, NotConnectedError
 
 __all__ = [
@@ -80,6 +81,9 @@ __all__ = [
     "NotConnectedError",
     "PreferenceField",
     "WatchIdentity",
+    "WeatherDailyForecast",
+    "WeatherForecast",
+    "WeatherHourlyForecast",
     "i8",
     "i16",
     "i32",

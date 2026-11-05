@@ -898,6 +898,7 @@ dependencies = [
  "cobble-config",
  "cobble-contracts",
  "futures-util",
+ "serde_json",
  "tokio",
  "toml 0.8.2",
  "zbus",
@@ -3505,6 +3506,7 @@ version = "0.8.0"
 dependencies = [
  "bluer",
  "chrono",
+ "cobble-contracts",
  "dbus",
  "dbus-tokio",
  "futures",

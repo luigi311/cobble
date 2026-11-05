@@ -48,6 +48,45 @@ Detected link loss also fails pending requests and releases resources without
 requiring a separate disconnect call. Reconnect and fallback wait for owned
 BlueZ operations and unsubscribe replies to finish, including after cancellation.
 
+## Weather
+
+The daemon fetches current conditions, seven daily forecasts, and hourly data
+from Open-Meteo after connection and every three hours. Forecast days and hourly
+slots follow the location's local midnight. Supported watches receive weather
+DB **v4.5**, including feels-like temperature, UV, precipitation probability,
+wind, humidity, visibility, and today's and tomorrow's hourly forecasts.
+Watches without the v4 capability receive **v3** records. If a watch rejects a
+v4 record as unsupported or invalid, Cobble retries it as v3.
+
+Input temperatures are Celsius. Cobble converts them to the watch's separate
+`unitsTemperature` preference, falling back to `unitsDistance` when automatic.
+If preferences are missing, Cobble retries their sync when supported, then logs
+a Celsius default if they remain unavailable (including legacy BlobDB v0).
+Changing the effective temperature unit triggers a fresh forecast immediately.
+The integer-Celsius API rounds readings before conversion; Fahrenheit output
+can differ by 1°F from directly rounding the provider's Fahrenheit reading.
+Wind is sent in mph, visibility in metres, precipitation in millimetres, UV as
+index times ten, and solar times as UTC Unix seconds. Missing extended readings
+use the firmware's unknown values. Hourly temperatures have no unknown value:
+a day's curve is enabled only with 24 known temperatures, otherwise the watch
+uses daily data. This avoids false 0° readings from padded hours. Today's hourly
+UV is independent and remains available for incomplete days.
+
+The automatic provider also updates sunrise and sunset timeline pins for three
+days. The newer pin-kind attribute is sent only when the watch advertises
+support for unknown timeline attributes. Logs show `Weather format selected:
+v4.5` or `Weather format selected: v3` after the record is accepted by the watch.
+
+The original `PushWeather` method remains available. Rust and Python clients
+also expose `push_weather_forecast(location_key, forecast)` and
+`push_weather_forecast(forecast, location_key=...)`, respectively. Both use the
+shared `WeatherForecast`, `WeatherDailyForecast`, and `WeatherHourlyForecast`
+models. The additive D-Bus method `PushWeatherForecast(ay, s)` accepts a 16-byte
+location key and JSON matching
+[`WeatherForecast`](crates/cobble-contracts/src/weather.rs). Use the same key to
+replace a location. Custom forecasts can set `sunrise_sunset_pins=true` and
+populate daily `sunrise_utc`/`sunset_utc` fields to publish solar pins too.
+
 ## PebbleKit JS
 
 When a sideloaded app with `pebble-js-app.js` opens on the watch, `cobbled`
@@ -92,6 +131,7 @@ crates/libpebble-ble/src/
     blob_db.rs         BlobDB inserts, notification builder, weather blobs,
                        and BlobDB2 bidirectional sync protocol (endpoints
                        0xb1db / 0xb2db).
+    weather.rs         Capability-selected v3/v4.5 weather records and solar pins.
     datalog.rs         DataLog session protocol — used by health data sync
                        (endpoint 0x11).
     health.rs          Health/settings blob decode + encode: activityPreferences
@@ -328,6 +368,7 @@ Object path: `/org/cobble/Daemon` — session bus.
 | Method | `PushCallEnd` | `(u)` | cookie — end call on watch |
 | Method | `ReprocessHealthData` | `()` | rebuild derived health tables from raw blobs |
 | Method | `PushWeather` | `(ay, s, s, n, y, n, n, y, n, n, b)` | location\_key (16 bytes), location\_name, forecast\_short, current\_temp\_c, current\_weather, today\_high\_c, today\_low\_c, tomorrow\_weather, tomorrow\_high\_c, tomorrow\_low\_c, is\_current\_location. Weather types: 0=PartlyCloudy 1=CloudyDay 2=LightSnow 3=LightRain 4=HeavyRain 5=HeavySnow 6=Generic 7=Sun 8=RainAndSnow |
+| Method | `PushWeatherForecast` | `(ay, s)` | location\_key (16 bytes), forecast JSON; extended daily/hourly metrics and optional solar pins; Celsius inputs, automatic wire-format and watch-unit selection |
 | Method | `ReloadConfig` | `()` | re-read config; disconnects if address/adapter changed. Also called automatically by the filesystem watcher. |
 | Method | `SyncWellness` | `()` | request one serialized Intervals.icu reconciliation; fails when the integration is disabled/invalid or the app database is unavailable |
 | Method | `GetWellnessSyncStatus` | `() → a{sv}` | live and durable account-scoped status; includes `enabled`, `configured`, `valid`, `running`, `athlete_id`, hash-aware `exported_dates`/`pending_dates`, `last_success`, `last_error`, and `last_error_at` |

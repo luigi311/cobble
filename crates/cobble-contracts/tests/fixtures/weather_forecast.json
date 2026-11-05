@@ -1,0 +1,46 @@
+{
+  "location_name": "Berlin",
+  "forecast_short": "Rain",
+  "current_temp": 12,
+  "current_weather": 3,
+  "today_high": 15,
+  "today_low": 7,
+  "tomorrow_weather": 0,
+  "tomorrow_high": 16,
+  "tomorrow_low": 8,
+  "is_current_location": true,
+  "feels_like": 11,
+  "latitude": 52.52,
+  "longitude": 13.41,
+  "uv_index_x10": 16,
+  "precip_probability": 45,
+  "wind_speed_mph": 8,
+  "wind_direction_deg": 270,
+  "utc_offset_minutes": 60,
+  "daily": [
+    {
+      "high_temp": 15,
+      "low_temp": 7,
+      "weather_type": 3,
+      "precip_probability": 45,
+      "wind_speed_mph": 8,
+      "uv_index_x10": 16,
+      "feels_like": 11,
+      "wind_direction_deg": 270,
+      "wmo_code": 61,
+      "humidity_pct": 70,
+      "visibility_m": 10000,
+      "precip_sum_mm": 3,
+      "sunrise_utc": 1700020000,
+      "sunset_utc": 1700060000
+    }
+  ],
+  "today_hourly": [
+    { "weather_type": 7, "temp": 8, "uv_index_x10": 4 },
+    { "weather_type": 255, "temp": null, "uv_index_x10": null }
+  ],
+  "tomorrow_hourly": [
+    { "weather_type": 1, "temp": 9, "uv_index_x10": null }
+  ],
+  "sunrise_sunset_pins": false
+}

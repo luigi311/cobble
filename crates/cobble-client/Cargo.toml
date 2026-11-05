@@ -5,6 +5,7 @@ edition = "2024"
 description = "Rust D-Bus client for the cobbled Pebble BLE daemon."
 
 [dependencies]
+serde_json = "1"
 cobble-contracts = { path = "../cobble-contracts" }
 cobble-config = { path = "../cobble-config" }
 toml = "0.8"

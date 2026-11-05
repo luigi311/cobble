@@ -22,6 +22,7 @@ pub mod screenshot;
 pub mod system;
 pub mod time;
 pub mod watch_pref;
+pub mod weather;
 
 pub use app_message::AppMessageValue;
 pub use app_run_state::AppRunStateCmd;
