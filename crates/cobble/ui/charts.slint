@@ -159,7 +159,7 @@ export component SleepChart inherits VerticalLayout {
 export component SessionList inherits Flickable {
     in property <[HealthSession]> model;
     vertical-stretch: 1;
-    viewport-height: items.preferred-height;
+    content-height: items.preferred-height;
     items := VerticalLayout {
         alignment: start;
         for s in root.model: Rectangle {

@@ -147,9 +147,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build the session D-Bus connection.
-    let conn = zbus::connection::Builder::session()?
-        .name(BUS_NAME)?
-        .serve_at(OBJECT_PATH, daemon.clone())?
+    let conn = zbus::connection::Builder::session()
+        .name(BUS_NAME)
+        .serve_at(OBJECT_PATH, daemon.clone())
         .build()
         .await?;
 

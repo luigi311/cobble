@@ -18,7 +18,7 @@ use std::{
 
 use futures::StreamExt;
 use tracing::{debug, info, trace, warn};
-use zbus::{Connection, Message, MessageStream, zvariant::OwnedValue};
+use zbus::{Connection, Message, MessageStream, OwnedVariant as OwnedValue};
 
 const NOTIFICATIONS_IFACE: &str = "org.freedesktop.Notifications";
 
@@ -39,7 +39,7 @@ impl NotificationMonitor {
         &mut self,
         on_notification: Arc<dyn Fn(String, String, String) + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
-        let conn = zbus::connection::Builder::session()?.build().await?;
+        let conn = zbus::connection::Builder::session().build().await?;
 
         let rule = format!("type='method_call',interface='{NOTIFICATIONS_IFACE}',member='Notify'");
 

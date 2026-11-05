@@ -16,6 +16,9 @@ trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || 
 i=0
 while [ "$i" -lt 100 ]; do
   if gdbus introspect --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --xml 2>/dev/null; then
+    # Exercise the variant dictionaries through an independent D-Bus client.
+    gdbus call --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --method org.cobble.Daemon.GetDaemonConfig >/dev/null
+    gdbus call --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --method org.cobble.Daemon.GetDeviceConfig >/dev/null
     exit 0
   fi
   i=$((i + 1))

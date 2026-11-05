@@ -84,7 +84,8 @@ use cobble_db::{AppDb, DateRange, PbwAppRecord, WellnessExportStatus};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{debug, warn};
 use zbus::{
-    Connection, interface, message::Header, object_server::SignalEmitter, zvariant::OwnedValue,
+    Connection, OwnedVariant as OwnedValue, interface, message::Header,
+    object_server::SignalEmitter,
 };
 
 use crate::codec::{WireDict, decode_wire_dict, encode_wire_dict};

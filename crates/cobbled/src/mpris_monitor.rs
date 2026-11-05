@@ -15,7 +15,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
-use zbus::{Connection, MessageStream, zvariant::OwnedValue};
+use zbus::{Connection, MessageStream, OwnedVariant as OwnedValue};
 
 use crate::service::CobbleDaemon;
 
@@ -167,7 +167,7 @@ impl MprisMonitor {
 
     async fn get_prop<T>(&self, bus: &str, iface: &str, prop: &str) -> Option<T>
     where
-        T: TryFrom<OwnedValue, Error = zbus::zvariant::Error>,
+        T: TryFrom<OwnedValue, Error = zbus::Error>,
     {
         let reply = self
             .conn
@@ -181,7 +181,7 @@ impl MprisMonitor {
             .await
             .ok()?;
         let body = reply.body();
-        let v: zbus::zvariant::Value<'_> = body.deserialize().ok()?;
+        let v: zbus::Variant<'_> = body.deserialize().ok()?;
         OwnedValue::try_from(v)
             .ok()
             .and_then(|ov| T::try_from(ov).ok())
@@ -402,7 +402,7 @@ impl MprisMonitor {
             Err(_) => return HashMap::new(),
         };
         let body = reply.body();
-        let v: zbus::zvariant::Value<'_> = match body.deserialize() {
+        let v: zbus::Variant<'_> = match body.deserialize() {
             Ok(v) => v,
             Err(_) => return HashMap::new(),
         };

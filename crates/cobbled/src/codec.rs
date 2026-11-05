@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use libpebble_ble::AppMessageValue;
-use zbus::zvariant::{Array, OwnedValue, Str};
+use zbus::{Array, OwnedVariant as OwnedValue, Str};
 
 /// `(tag, payload)` pair as it appears on the wire.
 pub type WireValue = (String, OwnedValue);

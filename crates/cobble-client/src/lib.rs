@@ -25,9 +25,9 @@ use std::{
 };
 
 pub use cobble_contracts::*;
+pub use zbus::OwnedVariant as OwnedValue;
 use zbus::{Connection, proxy};
 pub use zbus::{Error, Result};
-pub use zvariant::OwnedValue;
 
 /// AppMessage wire type matching the D-Bus signature `a{i(sv)}`.
 ///
@@ -86,8 +86,8 @@ pub fn offline_database_path() -> std::result::Result<PathBuf, String> {
     )
 }
 
-fn wire_value(value: impl Into<zvariant::Value<'static>>) -> Result<OwnedValue> {
-    OwnedValue::try_from(value.into()).map_err(Error::Variant)
+fn wire_value(value: impl Into<zbus::Variant<'static>>) -> Result<OwnedValue> {
+    OwnedValue::try_from(value.into())
 }
 
 fn required_string(map: &VarDict, key: &str) -> Result<String> {
