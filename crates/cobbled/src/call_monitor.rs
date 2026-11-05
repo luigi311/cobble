@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, trace, warn};
-use zbus::{Connection, MessageStream, zvariant::OwnedValue};
+use zbus::{Connection, MessageStream, OwnedVariant as OwnedValue};
 
 use crate::service::CobbleDaemon;
 
@@ -110,6 +110,7 @@ pub async fn run_call_monitor(
 // ModemManager
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Discover existing ModemManager calls and track subsequent call and property signals.
 async fn watch_modem_manager(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     trace!("call-monitor: starting ModemManager watcher");
     let _ = add_match(conn, "type='signal',sender='org.freedesktop.ModemManager1',interface='org.freedesktop.ModemManager1.Modem.Voice',member='CallAdded'").await;
@@ -144,7 +145,7 @@ async fn watch_modem_manager(conn: &Connection, daemon: &CobbleDaemon, map: &Cal
                 == Some("org.freedesktop.ModemManager1.Modem.Voice")
         {
             let body = msg.body();
-            if let Ok(call_path) = body.deserialize::<zbus::zvariant::ObjectPath<'_>>() {
+            if let Ok(call_path) = body.deserialize::<zbus::ObjectPath<'_>>() {
                 let call_path = call_path.to_string();
                 debug!("call-monitor: MM call added {call_path}");
                 handle_mm_call(conn, daemon, map, &call_path).await;
@@ -258,6 +259,7 @@ async fn handle_mm_property_change(
 // oFono
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Discover existing oFono calls and track subsequent call and property signals.
 async fn watch_ofono(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     trace!("call-monitor: starting oFono watcher");
     let _ = add_match(conn, "type='signal',sender='org.ofono',interface='org.ofono.VoiceCallManager',member='CallAdded'").await;
@@ -293,7 +295,7 @@ async fn watch_ofono(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
         {
             let body = msg.body();
             if let Ok((call_path, props)) =
-                body.deserialize::<(zbus::zvariant::ObjectPath<'_>, HashMap<String, OwnedValue>)>()
+                body.deserialize::<(zbus::ObjectPath<'_>, HashMap<String, OwnedValue>)>()
             {
                 let call_path_str = call_path.to_string();
                 debug!("call-monitor: oFono call added {call_path_str}");
@@ -307,8 +309,9 @@ async fn watch_ofono(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap) {
     }
 }
 
+/// Add a modem's existing oFono calls to shared call tracking.
 async fn scan_ofono_calls(conn: &Connection, daemon: &CobbleDaemon, map: &CallMap, modem: &str) {
-    let calls: Option<Vec<zbus::zvariant::ObjectPath<'_>>> =
+    let calls: Option<Vec<zbus::ObjectPath<'_>>> =
         get_ofono_prop(conn, modem, "org.ofono.VoiceCallManager", "Calls").await;
     if let Some(calls) = calls {
         for call_path in calls {
@@ -504,9 +507,10 @@ async fn list_mm_objects(
     Ok(paths)
 }
 
+/// Read a ModemManager property, returning None on a failed request or type conversion.
 async fn get_mm_prop<T>(conn: &Connection, path: &str, iface: &str, prop: &str) -> Option<T>
 where
-    T: TryFrom<OwnedValue, Error = zbus::zvariant::Error>,
+    T: TryFrom<OwnedValue, Error = zbus::Error>,
 {
     let reply = conn
         .call_method(
@@ -519,15 +523,16 @@ where
         .await
         .ok()?;
     let body = reply.body();
-    let v: zbus::zvariant::Value<'_> = body.deserialize().ok()?;
+    let v: zbus::Variant<'_> = body.deserialize().ok()?;
     OwnedValue::try_from(v)
         .ok()
         .and_then(|ov| T::try_from(ov).ok())
 }
 
+/// Read an oFono property, returning None on a failed request or type conversion.
 async fn get_ofono_prop<T>(conn: &Connection, path: &str, iface: &str, prop: &str) -> Option<T>
 where
-    T: TryFrom<OwnedValue, Error = zbus::zvariant::Error>,
+    T: TryFrom<OwnedValue, Error = zbus::Error>,
 {
     let reply = conn
         .call_method(Some("org.ofono"), path, Some(iface), "GetProperties", &())

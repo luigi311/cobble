@@ -9,4 +9,4 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-toml = "0.8"
+toml = "1"

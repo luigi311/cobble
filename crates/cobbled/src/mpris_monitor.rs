@@ -15,7 +15,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
-use zbus::{Connection, MessageStream, zvariant::OwnedValue};
+use zbus::{Connection, MessageStream, OwnedVariant as OwnedValue};
 
 use crate::service::CobbleDaemon;
 
@@ -165,9 +165,10 @@ impl MprisMonitor {
     // D-Bus property helpers
     // ------------------------------------------------------------------
 
+    /// Read an MPRIS property, returning None on a failed request or type conversion.
     async fn get_prop<T>(&self, bus: &str, iface: &str, prop: &str) -> Option<T>
     where
-        T: TryFrom<OwnedValue, Error = zbus::zvariant::Error>,
+        T: TryFrom<OwnedValue, Error = zbus::Error>,
     {
         let reply = self
             .conn
@@ -181,7 +182,7 @@ impl MprisMonitor {
             .await
             .ok()?;
         let body = reply.body();
-        let v: zbus::zvariant::Value<'_> = body.deserialize().ok()?;
+        let v: zbus::Variant<'_> = body.deserialize().ok()?;
         OwnedValue::try_from(v)
             .ok()
             .and_then(|ov| T::try_from(ov).ok())
@@ -386,6 +387,7 @@ impl MprisMonitor {
         }
     }
 
+    /// Read a player's metadata dictionary, returning an empty map if unavailable or malformed.
     async fn read_metadata(&self, state: &PlayerState) -> HashMap<String, OwnedValue> {
         let reply = match self
             .conn
@@ -402,7 +404,7 @@ impl MprisMonitor {
             Err(_) => return HashMap::new(),
         };
         let body = reply.body();
-        let v: zbus::zvariant::Value<'_> = match body.deserialize() {
+        let v: zbus::Variant<'_> = match body.deserialize() {
             Ok(v) => v,
             Err(_) => return HashMap::new(),
         };

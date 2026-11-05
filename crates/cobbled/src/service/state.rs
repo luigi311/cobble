@@ -13,7 +13,7 @@ use cobble_config::Config;
 use cobble_contracts::DeviceConfigState;
 use cobble_db::AppDb;
 use tokio::sync::{mpsc, oneshot};
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant as OwnedValue, Variant as Value};
 
 pub const BUS_NAME: &str = "org.cobble.Daemon";
 pub const OBJECT_PATH: &str = "/org/cobble/Daemon";

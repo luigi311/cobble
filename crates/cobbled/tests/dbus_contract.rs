@@ -1,5 +1,6 @@
 use std::process::Command;
 
+/// Verify exported APIs and configuration dictionaries through an isolated session bus.
 #[test]
 fn exported_dbus_contract_contains_all_client_settings_apis() {
     let root = std::env::temp_dir().join(format!("cobbled-dbus-contract-{}", std::process::id()));
@@ -16,6 +17,9 @@ trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || 
 i=0
 while [ "$i" -lt 100 ]; do
   if gdbus introspect --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --xml 2>/dev/null; then
+    # Exercise the variant dictionaries through an independent D-Bus client.
+    gdbus call --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --method org.cobble.Daemon.GetDaemonConfig >/dev/null
+    gdbus call --session --dest org.cobble.Daemon --object-path /org/cobble/Daemon --method org.cobble.Daemon.GetDeviceConfig >/dev/null
     exit 0
   fi
   i=$((i + 1))

@@ -271,7 +271,7 @@ export component AppWindow inherits Window {
 
             // ── Device tab ───────────────────────────────────────────────────
             if active-tab == 0: Flickable {
-                viewport-height: device-page.preferred-height;
+                content-height: device-page.preferred-height;
                 device-page := VerticalLayout {
                     padding: 20px; spacing: 16px; alignment: start;
 
@@ -459,7 +459,7 @@ export component AppWindow inherits Window {
             // ── Settings tab ─────────────────────────────────────────────────
             // settings-page 0 = category menu, 1 = Daemon Config detail.
             if active-tab == 4 && root.settings-page == 0: Flickable {
-                viewport-height: settings-menu.preferred-height;
+                content-height: settings-menu.preferred-height;
                 settings-menu := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
 
@@ -504,7 +504,7 @@ export component AppWindow inherits Window {
 
             // ── Settings ▸ Daemon Config ──────────────────────────────────────
             if active-tab == 4 && root.settings-page == 1: Flickable {
-                viewport-height: config-page.preferred-height;
+                content-height: config-page.preferred-height;
                 config-page := VerticalLayout {
                     padding: 20px; spacing: 16px; alignment: start;
 
@@ -644,7 +644,7 @@ export component AppWindow inherits Window {
 
             // ── Settings ▸ Device Config ──────────────────────────────────────
             if active-tab == 4 && root.settings-page == 3: Flickable {
-                viewport-height: device-config-page.preferred-height;
+                content-height: device-config-page.preferred-height;
                 device-config-page := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
                     HorizontalLayout {
@@ -1016,7 +1016,7 @@ export component AppWindow inherits Window {
 
             // ── Settings ▸ Device Actions ─────────────────────────────────────
             if active-tab == 4 && root.settings-page == 2: Flickable {
-                viewport-height: actions-page.preferred-height;
+                content-height: actions-page.preferred-height;
                 actions-page := VerticalLayout {
                     padding: 20px; spacing: 12px; alignment: start;
 

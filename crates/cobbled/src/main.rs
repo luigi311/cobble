@@ -58,6 +58,7 @@ struct Cli {
     verbose: u8,
 }
 
+/// Initialize configuration, storage and D-Bus services, then run until shutdown.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -147,9 +148,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build the session D-Bus connection.
-    let conn = zbus::connection::Builder::session()?
-        .name(BUS_NAME)?
-        .serve_at(OBJECT_PATH, daemon.clone())?
+    let conn = zbus::connection::Builder::session()
+        .name(BUS_NAME)
+        .serve_at(OBJECT_PATH, daemon.clone())
         .build()
         .await?;
 

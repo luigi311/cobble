@@ -261,6 +261,11 @@ uv run pytest
 
 ## Installing the daemon
 
+HTTPS clients use the operating system's CA certificate store. Install and
+populate that store before running source-built binaries (`sudo apt install
+ca-certificates` on Debian/Ubuntu). The `.deb` declares this runtime dependency
+for both `cobbled` and its `cobbled-pkjs` helper.
+
 ```sh
 # Build the release binary
 cargo build --release

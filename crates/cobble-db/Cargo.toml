@@ -5,7 +5,7 @@ edition = "2024"
 description = "Shared SQLite health database schema, queries, and write operations for cobbled and cobble."
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 anyhow = "1"
 tracing = "0.1"

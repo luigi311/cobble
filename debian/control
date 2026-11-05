@@ -18,7 +18,7 @@ Rules-Requires-Root: no
 
 Package: cobbled
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ca-certificates, ${shlibs:Depends}, ${misc:Depends}
 Description: Cobble — Pebble smartwatch BLE daemon
  Connects to a Pebble smartwatch over Bluetooth Low Energy and runs as a
  user service providing time sync, desktop-notification forwarding, and an
