@@ -34,6 +34,7 @@ impl ConnectionLifecycle {
         lifecycle
     }
 
+    /// Await prior teardown and revalidate a failed disconnect through a fresh BlueZ session.
     pub async fn wait_cleanup(self: &Arc<Self>) -> Result<(), PebbleError> {
         let lifecycle = self.clone();
         self.wait_cleanup_with(async move {
@@ -49,6 +50,7 @@ impl ConnectionLifecycle {
         .await
     }
 
+    /// Replace a failed cleanup tail with an owned recovery job, propagating recovery failure.
     async fn wait_cleanup_with(
         &self,
         recovery: impl std::future::Future<Output = Result<(), PebbleError>> + Send + 'static,
@@ -65,6 +67,7 @@ impl ConnectionLifecycle {
     }
 }
 
+/// Recognize errors proving that BlueZ no longer owns the device object.
 fn missing(error: &bluer::Error) -> bool {
     matches!(
         error.kind,
@@ -116,6 +119,7 @@ mod tests {
         .into()
     }
 
+    /// Check that a missing device permits the retry loop to reach rediscovery.
     #[tokio::test]
     async fn missing_device_disconnect_permits_rediscovery_and_the_next_connect_attempt() {
         let mut attempted = 0;

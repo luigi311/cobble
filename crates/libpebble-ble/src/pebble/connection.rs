@@ -77,6 +77,7 @@ impl Pebble {
         self.connect_with_options(true, 30.0, 3, 2.0).await
     }
 
+    /// Serialize startup and prior teardown, retry pairing when needed, and clean up failures.
     pub async fn connect_with_options(
         &self,
         pairing: bool,
@@ -134,6 +135,7 @@ impl Pebble {
         result
     }
 
+    /// Establish one BLE session, select its transport, and synchronize watch preferences.
     async fn connect_session(
         &self,
         pairing: bool,
@@ -278,6 +280,7 @@ impl Pebble {
         Ok(())
     }
 
+    /// Reject attempts cancelled by a public disconnect, including across pairing retries.
     fn ensure_attempt(&self, epoch: u64) -> Result<(), PebbleError> {
         if self.cancel_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
             return Err(PebbleError::NotConnected);
@@ -285,6 +288,7 @@ impl Pebble {
         Ok(())
     }
 
+    /// Capture the session generation under the same lock that validates the attempt epoch.
     fn capture_attempt(&self, epoch: u64) -> Result<AttemptId, PebbleError> {
         let inner = self.inner.lock().unwrap();
         self.ensure_attempt(epoch)?;
@@ -294,6 +298,7 @@ impl Pebble {
         })
     }
 
+    /// Reject a cancelled attempt or an identity belonging to a cleared session.
     fn check_identity(&self, identity: AttemptId) -> Result<(), PebbleError> {
         let inner = self.inner.lock().unwrap();
         self.ensure_attempt(identity.epoch)?;
@@ -324,6 +329,7 @@ impl Pebble {
         Ok(request)
     }
 
+    /// Poll bonding with cancellation checks around every property read and retry delay.
     async fn poll_pairing<S, SF, D, DF>(
         &self,
         identity: AttemptId,
@@ -350,6 +356,7 @@ impl Pebble {
         Ok(false)
     }
 
+    /// Retry pairing after a delay only if the original attempt remains uncancelled.
     async fn retry_pairing_after<D, R, RF>(
         &self,
         epoch: u64,
@@ -367,6 +374,7 @@ impl Pebble {
         retry().await
     }
 
+    /// Return the active transport's status or reject a missing or superseded session.
     fn transport_status(
         &self,
         generation: u64,
@@ -382,6 +390,8 @@ impl Pebble {
             .ok_or(PebbleError::NotConnected)
     }
 
+    /// Reuse forward mode or await reverse teardown before registering its replacement.
+    /// Recheck the generation around asynchronous work to reject concurrent disconnects.
     async fn prepare_forward<F, FF>(
         &self,
         generation: u64,
@@ -410,6 +420,7 @@ impl Pebble {
         self.install_transport(transport, generation)
     }
 
+    /// Install and activate a transport only while its session generation is current.
     fn install_transport(
         &self,
         transport: PpogTransport,
@@ -427,6 +438,7 @@ impl Pebble {
         Ok(status)
     }
 
+    /// Remove the current transport and await its owned cleanup before allowing fallback.
     async fn stop_transport(&self, generation: u64) -> Result<(), PebbleError> {
         let done = {
             let mut inner = self.inner.lock().unwrap();
@@ -456,6 +468,8 @@ impl Pebble {
             .push(TaskGuard(task));
     }
 
+    /// Route transport closure, BlueZ disconnect events, and failed polling through cleanup.
+    /// The generation check prevents an old monitor from clearing a replacement session.
     fn monitor_connection(
         &self,
         device: Device,
@@ -499,6 +513,8 @@ impl Pebble {
 
     // ── private connection helpers ─────────────────────────────────────
 
+    /// Retry BLE connection with rediscovery and confirmed teardown between attempts.
+    /// Retain issued Connect requests so cancellation cannot leave a late connection open.
     async fn connect_client(
         &self,
         adapter: &bluer::Adapter,
@@ -559,6 +575,8 @@ impl Pebble {
         Err(last_err.unwrap_or_else(|| PebbleError::Other("connect failed".into())))
     }
 
+    /// Prefer watch-initiated bonding, then retain a host Pair request if polling expires.
+    /// Cancelled identities cannot initiate pairing; teardown awaits any issued request.
     async fn do_pairing(&self, device: &Device, identity: AttemptId) -> Result<(), PebbleError> {
         self.check_identity(identity)?;
         if let Some(c) = dispatch::find_char(device, PAIRING_TRIGGER_CHARACTERISTIC).await {
@@ -603,6 +621,7 @@ impl Pebble {
         Err(PebbleError::PairingFailed("pairing timed out".into()))
     }
 
+    /// Own available fed9 subscriptions and apply the watch's MTU hint to the transport.
     async fn subscribe_fed9(&self, device: &Device) {
         for (char_uuid, label) in [
             (CONNECTIVITY_CHARACTERISTIC, "connectivity"),
@@ -708,6 +727,7 @@ impl Pebble {
         self.forget_for_attempt(None).await
     }
 
+    /// Retain RemoveDevice until it completes, checking the retry epoch when supplied.
     async fn forget_for_attempt(&self, epoch: Option<u64>) -> Result<(), PebbleError> {
         if let Some(epoch) = epoch {
             self.ensure_attempt(epoch)?;
@@ -770,6 +790,7 @@ struct ConnectionAttemptGuard<'a> {
     finished: bool,
 }
 impl Drop for ConnectionAttemptGuard<'_> {
+    /// Hand a cancelled attempt's gate to cleanup so a replacement cannot connect early.
     fn drop(&mut self) {
         if !self.finished {
             let done = self.pebble.clear_connection();
@@ -826,6 +847,7 @@ mod tests {
         );
     }
 
+    /// Check that either reverse startup failure reaches the forward transport.
     #[tokio::test]
     async fn reverse_subscription_and_handshake_failures_fall_back_to_forward() {
         for error in [
@@ -864,6 +886,7 @@ mod tests {
         );
     }
 
+    /// Exercise automatic endpoint replies through both selected transport modes.
     #[tokio::test]
     async fn automatic_endpoint_replies_use_the_selected_transport() {
         for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
@@ -921,6 +944,7 @@ mod tests {
         }
     }
 
+    /// Check that cancelling startup closes its transport and fails pending requests.
     #[tokio::test]
     async fn cancelled_connection_attempt_releases_transport_and_pending_requests() {
         let pebble = Pebble::new("00:00:00:00:00:00", "hci0");
@@ -945,6 +969,7 @@ mod tests {
         .unwrap();
     }
 
+    /// Check that disconnect invalidates subsequent installation by the old attempt.
     #[tokio::test]
     async fn stale_connection_attempt_cannot_install_a_transport_after_disconnect() {
         let pebble = Pebble::new("00:00:00:00:00:00", "hci0");
@@ -998,6 +1023,7 @@ mod tests {
         let _operation = timeout(Duration::from_secs(1), reconnect).await.unwrap();
     }
 
+    /// Exercise detected link loss without requiring a later public disconnect call.
     #[tokio::test]
     async fn detected_link_loss_cleans_resources_and_nacks_requests_without_public_disconnect() {
         use crate::transport::notification::test_subscription;
@@ -1157,6 +1183,7 @@ mod tests {
         assert!(pebble.inner.lock().unwrap().transport.is_none());
     }
 
+    /// Block reverse teardown and check that forward registration waits and honours disconnect.
     #[tokio::test]
     async fn actual_forward_setup_waits_for_reverse_cleanup_and_respects_disconnect() {
         use crate::transport::test_transport_with_cleanup;
@@ -1196,6 +1223,7 @@ mod tests {
         }
     }
 
+    /// Disconnect during a pending pairing poll and check that no host Pair is issued.
     #[tokio::test]
     async fn disconnect_during_pairing_poll_prevents_host_pair_from_running() {
         use std::sync::atomic::AtomicUsize;

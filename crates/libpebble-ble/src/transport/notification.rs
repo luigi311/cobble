@@ -24,6 +24,7 @@ pub(crate) struct Subscription {
 }
 
 impl Subscription {
+    /// Start an owned notification worker that survives cancellation of readiness waits.
     pub fn start(characteristic: Characteristic) -> Self {
         let (stop, stop_rx) = watch::channel(false);
         let (ready_tx, ready) = watch::channel(None);
@@ -63,6 +64,7 @@ impl Subscription {
         self.stop.send_replace(true);
     }
 
+    /// Wait for StartNotify to complete or report setup failure without cancelling its owner.
     pub async fn wait_ready(&self) -> Result<(), PebbleError> {
         let mut ready = self.ready.clone();
         loop {
@@ -92,6 +94,7 @@ fn error(error: dbus::Error) -> PebbleError {
     PebbleError::Other(format!("BlueZ notification: {error}"))
 }
 
+/// Own a dedicated bus connection from signal registration through the StopNotify reply.
 async fn run_subscription(
     characteristic: Characteristic,
     mut stop: watch::Receiver<bool>,
@@ -162,6 +165,7 @@ async fn run_subscription(
     result
 }
 
+/// Issue a notification method, treating confirmed absence as successful StopNotify cleanup.
 async fn notify_call(
     proxy: &Proxy<'_, Arc<SyncConnection>>,
     method: &'static str,
@@ -176,6 +180,7 @@ async fn notify_call(
     result.map_err(error)
 }
 
+/// Recognize only BlueZ errors that prove the owned notification session is absent.
 fn already_stopped(error: &dbus::Error) -> bool {
     matches!(error.name(), Some("org.bluez.Error.NotConnected" | "org.bluez.Error.DoesNotExist" |
         "org.freedesktop.DBus.Error.UnknownObject")) ||
@@ -184,6 +189,7 @@ fn already_stopped(error: &dbus::Error) -> bool {
         (error.name() == Some("org.bluez.Error.Failed") && error.message() == Some("No notify session started"))
 }
 
+/// Publish the setup outcome, wait for stop after success, and always await cleanup.
 async fn owned_exchange<Start, StartF, Stop, StopF>(
     stop: &mut watch::Receiver<bool>,
     ready: &watch::Sender<Option<Result<(), String>>>,

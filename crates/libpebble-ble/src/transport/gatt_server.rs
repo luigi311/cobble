@@ -45,6 +45,7 @@ const READ_BLOB: [u8; 19] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 /// Handle to a forward PPoGATT link. Drop to unregister and stop its I/O.
 pub type PebbleGattServerHandle = PpogTransport;
 
+/// Register the phone-hosted services and return an inactive forward transport.
 pub async fn start_gatt_server(
     adapter: &Adapter,
     on_data: Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>,

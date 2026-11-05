@@ -59,22 +59,23 @@ pub async fn discover_reverse_v2(
 
 enum Writer {
     Acquired(CharacteristicWriter),
-    Dbus(Characteristic),
+    Dbus(Characteristic, WriteOp),
 }
 
 impl Writer {
+    /// Send a packet through the acquired socket or the selected D-Bus write operation.
     async fn send(&self, packet: &[u8]) -> Result<(), PebbleError> {
         match self {
             Self::Acquired(writer) => writer
                 .send(packet)
                 .await
                 .map_err(|e| PebbleError::Other(format!("reverse PPoGATT write: {e}"))),
-            Self::Dbus(characteristic) => {
+            Self::Dbus(characteristic, op_type) => {
                 characteristic
                     .write_ext(
                         packet,
                         &CharacteristicWriteRequest {
-                            op_type: WriteOp::Command,
+                            op_type: *op_type,
                             ..Default::default()
                         },
                     )
@@ -85,6 +86,7 @@ impl Writer {
     }
 }
 
+/// Create an inactive reverse transport whose worker owns subscription setup and teardown.
 pub fn start_gatt_client(
     characteristics: ReverseCharacteristics,
     on_data: Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>,
@@ -115,9 +117,13 @@ pub fn start_gatt_client(
                 let (writer, limit) = match characteristics.write.write_io().await {
                     Ok(writer) => { let limit = writer.mtu(); (Writer::Acquired(writer), limit) }
                     Err(error) => {
-                        debug!("reverse PPoGATT AcquireWrite unavailable ({error}); using WriteValue commands");
+                        debug!("reverse PPoGATT AcquireWrite unavailable ({error}); using WriteValue");
                         let limit = characteristics.write.mtu().await.unwrap_or(20);
-                        (Writer::Dbus(characteristics.write), limit)
+                        let op_type = match characteristics.write.flags().await {
+                            Ok(flags) if flags.write_without_response => WriteOp::Command,
+                            _ => WriteOp::Request,
+                        };
+                        (Writer::Dbus(characteristics.write, op_type), limit)
                     }
                 };
                 debug!("PPoGATT reverse-v2 subscribed; GATT value limit={limit}");
@@ -197,6 +203,7 @@ where
     }
 }
 
+/// Bound each packet write to five seconds so a stalled backend closes the transport.
 async fn send_packet<F, Fut>(send: &mut F, packet: Vec<u8>) -> Result<(), PebbleError>
 where
     F: FnMut(Vec<u8>) -> Fut,
@@ -223,6 +230,7 @@ mod tests {
     }
 
     impl SimulatedLink {
+        /// Run the production reverse I/O loop with channels and an optional write failure.
         fn new(fail_write: bool) -> Self {
             let (watch, notifications) = mpsc::unbounded_channel();
             let notifications = futures::stream::unfold(notifications, |mut rx| async {

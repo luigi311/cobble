@@ -395,6 +395,7 @@ impl Pebble {
 
     // ---- connect / disconnect ----
 
+    /// Cancel startup, fail pending requests, and await transport and physical link teardown.
     pub async fn disconnect(&self) {
         self.cancel_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -409,6 +410,8 @@ impl Pebble {
         Self::clear_connection_for(&self.inner, &self.connected_tx, &self.lifecycle, None)
     }
 
+    /// Clear a matching session and enqueue owned teardown after all issued BLE requests.
+    /// Fail protocol waiters immediately; stale monitors leave newer sessions untouched.
     fn clear_connection_for(
         state: &Arc<Mutex<PebbleInner>>,
         connected: &tokio::sync::watch::Sender<bool>,
@@ -1522,6 +1525,7 @@ impl Pebble {
         self.refresh_watch_preferences().await
     }
 
+    /// Frame and queue an endpoint message, rejecting oversized payloads or closed transports.
     fn send_pebble(&self, endpoint: Endpoint, payload: &[u8]) -> Result<(), PebbleError> {
         let message = pebble_pack(endpoint, payload)
             .ok_or_else(|| PebbleError::Other("payload too large for Pebble Protocol".into()))?;

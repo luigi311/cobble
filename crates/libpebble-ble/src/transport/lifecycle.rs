@@ -8,6 +8,7 @@ use tokio::sync::watch;
 pub(crate) struct Completion(watch::Receiver<Option<Result<(), String>>>);
 
 impl Completion {
+    /// Await a retained job result without cancelling the job when this wait is dropped.
     pub async fn wait(&self) -> Result<(), PebbleError> {
         let mut rx = self.0.clone();
         loop {
@@ -21,6 +22,7 @@ impl Completion {
     }
 }
 
+/// Spawn an owned job and retain its outcome for any current or later cleanup waiter.
 pub(crate) fn spawn_cleanup(
     future: impl Future<Output = Result<(), PebbleError>> + Send + 'static,
 ) -> Completion {
@@ -42,6 +44,7 @@ impl CleanupQueue {
         self.tail.clone()
     }
 
+    /// Run a cleanup job after the previous one finishes, even if its predecessor failed.
     pub fn push(
         &mut self,
         future: impl Future<Output = Result<(), PebbleError>> + Send + 'static,
@@ -60,6 +63,7 @@ impl CleanupQueue {
     }
 }
 
+/// Wait until stop is requested or all senders of the stop channel are dropped.
 pub(crate) async fn stopped(stop: &mut watch::Receiver<bool>) {
     loop {
         if *stop.borrow_and_update() {

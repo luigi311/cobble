@@ -238,6 +238,7 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
     }
 }
 
+/// Acknowledge incoming pushes on the active transport and resolve AppMessage callbacks.
 fn on_app_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     trace!("inbound APP_MESSAGE raw: {} bytes", payload.len());
     let Some(parsed) = parse_app_message(&payload) else {
@@ -281,6 +282,7 @@ fn on_app_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     }
 }
 
+/// Track DataLog sessions, deliver identified batches, and reply on the active transport.
 fn on_datalog_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     let Some((cmd, handle, rest)) = datalog::parse_header(&payload) else {
         debug!(
@@ -551,6 +553,7 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
     }
 }
 
+/// Frame a BlobDB2 reply and queue it when a transport is installed.
 fn blobdb2_send(inner: &Arc<Mutex<PebbleInner>>, payload: Vec<u8>) {
     if let Some(pkt) = pebble_pack(Endpoint::BlobDbV2, &payload)
         && let Some(srv) = &inner.lock().unwrap().transport

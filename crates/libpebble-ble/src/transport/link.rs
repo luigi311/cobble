@@ -21,6 +21,7 @@ pub enum TransportMode {
 }
 
 impl fmt::Display for TransportMode {
+    /// Format the stable transport label used in connection logs.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Forward => "forward",
@@ -58,6 +59,7 @@ pub struct PpogTransport {
 }
 
 impl PpogTransport {
+    /// Own an inactive worker and retain its completion so shutdown can await cleanup.
     pub(crate) fn new(
         mode: TransportMode,
         send_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -145,6 +147,7 @@ impl Drop for StatusGuard {
     }
 }
 
+/// Await the retained handshake status, failing if the transport closes before readiness.
 pub(crate) async fn wait_ready(
     mut status: watch::Receiver<TransportStatus>,
 ) -> Result<(), PebbleError> {
@@ -207,6 +210,7 @@ impl LinkState {
         self.pending.push_back(message);
     }
 
+    /// Process resets, DATA, and ACKs, returning control packets and complete messages.
     pub fn receive(&mut self, packet: &[u8]) -> LinkOutput {
         let mut output = LinkOutput {
             packets: Vec::new(),
@@ -278,6 +282,7 @@ impl LinkState {
         output
     }
 
+    /// Encode the reset confirmation for the negotiated framing version.
     fn reset_complete(&self) -> Vec<u8> {
         if self.version == 0 {
             vec![ppogatt_header(PPoGATTType::ResetComplete, 0)]
@@ -353,6 +358,7 @@ mod tests {
     use super::*;
     use crate::endpoints::{Endpoint, pebble_pack};
 
+    /// Complete a simulated reset exchange with the supplied peer receive window.
     fn ready(mode: TransportMode, window: u8) -> LinkState {
         let mut state = LinkState::new(mode);
         if mode == TransportMode::Forward {
@@ -371,6 +377,7 @@ mod tests {
         state
     }
 
+    /// Check that each transport completes its reset exchange before sending DATA.
     #[test]
     fn both_transports_use_the_upstream_reset_exchange() {
         for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
@@ -386,6 +393,7 @@ mod tests {
         }
     }
 
+    /// Exercise both legacy reset encodings and the framing-v0 transmit window.
     #[test]
     fn forward_still_negotiates_legacy_framing_v0() {
         for request in [vec![2], vec![2, 0]] {
@@ -415,6 +423,7 @@ mod tests {
         assert!(state.is_ready());
     }
 
+    /// Check that an unexpected reset confirmation invalidates either active transport.
     #[test]
     fn in_session_reset_complete_marks_both_transports_not_ready() {
         for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
@@ -427,6 +436,7 @@ mod tests {
         }
     }
 
+    /// Reject malformed resets and early DATA while preserving queued outbound messages.
     #[test]
     fn malformed_handshakes_and_early_data_do_not_establish_a_link() {
         let mut state = LinkState::new(TransportMode::ReverseV2);
@@ -449,6 +459,7 @@ mod tests {
         assert_eq!(state.next_packet(20), Some(vec![0, 42]));
     }
 
+    /// Exercise window limits, cumulative ACKs, and sequence wrap across repeated sends.
     #[test]
     fn negotiated_transmit_windows_and_sequence_wrap_are_respected() {
         for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
@@ -474,6 +485,7 @@ mod tests {
         }
     }
 
+    /// Check packet size limits and exact message reconstruction at several GATT sizes.
     #[test]
     fn segmentation_fits_the_characteristic_at_default_and_large_mtu() {
         let message = pebble_pack(Endpoint::PutBytes, &vec![42; 300]).unwrap();
@@ -491,6 +503,7 @@ mod tests {
         }
     }
 
+    /// Exercise out-of-order buffering, contiguous ACKs, and duplicate suppression.
     #[test]
     fn receive_reassembles_out_of_order_fragments_and_acknowledges_only_contiguous_data() {
         for mode in [TransportMode::Forward, TransportMode::ReverseV2] {
