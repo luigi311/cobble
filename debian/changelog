@@ -1,3 +1,23 @@
+cobbled (0.9.0-1) UNRELEASED; urgency=medium
+
+  * Add firmware-gated five-minute heart-rate sampling and preserve unknown
+    sampling intervals when applying other settings.
+  * Align system and notification text-size controls with current PebbleOS
+    and select installed language packs by their reported names.
+  * Ignore malformed battery readings without overwriting the last valid level.
+  * Validate health record origins, versions, and layouts, recognize OpenWorkout
+    sessions, and rebuild derived health data once from retained raw records.
+  * Prefer reverse PPoGATT v2 with automatic forward fallback and improve
+    pairing, disconnect cleanup, and reconnect recovery.
+  * Add weather v4.5 with extended daily and hourly forecasts, watch temperature
+    units, sunrise and sunset pins, and legacy v3 fallback.
+  * Expose extended weather forecasts through D-Bus and the Rust and Python
+    clients, bound forecast input, and correct local-day and location handling.
+  * Update dependencies, migrate to zbus 6, and declare the ca-certificates
+    runtime dependency.
+
+ -- Luis Garcia <git@luigi311.com>  Thu, 05 Nov 2026 08:01:21 +0000
+
 cobbled (0.8.0-1) unstable; urgency=medium
 
   * Add isolated PebbleKit JS execution so watchapp JavaScript failures cannot
