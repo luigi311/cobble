@@ -47,6 +47,11 @@ channel, and disconnect or cancellation stops transport tasks and subscriptions.
 Detected link loss also fails pending requests and releases resources without
 requiring a separate disconnect call. Reconnect and fallback wait for owned
 BlueZ operations and unsubscribe replies to finish, including after cancellation.
+Reverse mode uses `WriteValue` commands for characteristics supporting writes
+without response, avoiding `AcquireWrite`'s exclusive socket lock. Any pending
+write is awaited before transport teardown finishes. Link-loss logs include
+the closure reason and elapsed connection time; a failed connection-status
+poll alone does not force a reconnect.
 
 ## Weather
 

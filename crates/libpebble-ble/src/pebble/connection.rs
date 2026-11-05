@@ -468,44 +468,42 @@ impl Pebble {
             .push(TaskGuard(task));
     }
 
-    /// Route transport closure, BlueZ disconnect events, and failed polling through cleanup.
+    /// Route transport closure and confirmed BlueZ disconnection through cleanup.
     /// The generation check prevents an old monitor from clearing a replacement session.
     fn monitor_connection(
         &self,
         device: Device,
-        mut transport: watch::Receiver<TransportStatus>,
+        transport: watch::Receiver<TransportStatus>,
         generation: u64,
     ) {
         let weak_inner = Arc::downgrade(&self.inner);
         let connected_tx = Arc::clone(&self.connected_tx);
         let lifecycle = self.lifecycle.clone();
         self.track_connection_task(tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
             let events = device.events().await;
-            let mut events = match events {
+            let events = match events {
                 Ok(events) => Some(Box::pin(events)),
-                Err(error) => { warn!("device event subscription failed: {error}; using keepalive polling"); None }
-            };
-            let mut poll = tokio::time::interval(Duration::from_secs(60));
-            poll.tick().await;
-            loop {
-                if *transport.borrow_and_update() == TransportStatus::Closed { break; }
-                tokio::select! {
-                    changed = transport.changed() => { if changed.is_err() { break; } }
-                    event = async {
-                        match &mut events {
-                            Some(events) => events.next().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if matches!(event, None | Some(bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false)))) { break; }
-                    }
-                    _ = poll.tick() => {
-                        if !device.is_connected().await.unwrap_or(false) { break; }
-                    }
+                Err(error) => {
+                    warn!(
+                        "device event subscription failed: {error}; using connection-status polling"
+                    );
+                    None
                 }
-            }
+            };
+            let reason = wait_for_link_loss(
+                transport,
+                events,
+                tokio::time::interval(Duration::from_secs(60)),
+                || device.is_connected(),
+            )
+            .await;
             if let Some(inner) = weak_inner.upgrade() {
-                debug!("PPoGATT/BLE link closed; cleaning up connection");
+                warn!(
+                    reason,
+                    uptime_secs = started.elapsed().as_secs(),
+                    "PPoGATT/BLE link closed; cleaning up connection"
+                );
                 Pebble::clear_connection_for(&inner, &connected_tx, &lifecycle, Some(generation));
             }
         }));
@@ -756,6 +754,58 @@ impl Pebble {
     }
 }
 
+/// A failed property read leaves connection state unknown. Keep monitoring until
+/// a transport closes, BlueZ reports disconnection, or the device is removed.
+async fn wait_for_link_loss<E, C, CF>(
+    mut transport: watch::Receiver<TransportStatus>,
+    mut events: Option<E>,
+    mut poll: tokio::time::Interval,
+    mut connected: C,
+) -> &'static str
+where
+    E: futures::Stream<Item = bluer::DeviceEvent> + Unpin,
+    C: FnMut() -> CF,
+    CF: std::future::Future<Output = Result<bool, bluer::Error>>,
+{
+    poll.tick().await; // Skip the immediate first tick.
+    loop {
+        if *transport.borrow_and_update() == TransportStatus::Closed {
+            return "PPoGATT transport closed";
+        }
+        tokio::select! {
+            changed = transport.changed() => {
+                if changed.is_err() {
+                    return "PPoGATT status stream ended";
+                }
+            }
+            event = async {
+                match &mut events {
+                    Some(events) => events.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match event {
+                    None => return "BlueZ device event stream ended",
+                    Some(bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false))) => {
+                        return "BlueZ reported Connected=false";
+                    }
+                    _ => {}
+                }
+            }
+            _ = poll.tick() => {
+                match connected().await {
+                    Ok(true) => trace!("BLE connection poll confirmed connected"),
+                    Ok(false) => return "BlueZ connection poll reported disconnected",
+                    Err(error) if matches!(error.kind, bluer::ErrorKind::NotFound | bluer::ErrorKind::DoesNotExist) => {
+                        return "BlueZ device no longer exists";
+                    }
+                    Err(error) => warn!("BLE connection poll failed: {error}; keeping current session"),
+                }
+            }
+        }
+    }
+}
+
 /// Keep fallback policy independent of BlueZ so failures and missing services
 /// can be tested without modifying any real Bluetooth connection.
 async fn select_transport<R, RF, F, FF>(
@@ -814,6 +864,103 @@ mod tests {
     use crate::endpoints::{Endpoint, pebble_pack};
     use crate::transport::test_transport;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A transient polling failure must survive a subsequent successful poll;
+    /// confirmed disconnection must still close the link, with or without events.
+    #[tokio::test]
+    async fn connection_monitor_survives_failed_poll_until_confirmed_disconnection() {
+        for with_events in [false, true] {
+            let (_status, transport) = watch::channel(TransportStatus::Ready);
+            let unavailable = dbus::Error::new_custom(
+                "org.freedesktop.DBus.Error.NoReply",
+                "temporary backend failure",
+            );
+            let mut checks = std::collections::VecDeque::from([
+                Err(bluer::Error::from(unavailable)),
+                Ok(true),
+                Ok(false),
+            ]);
+            let reason = timeout(
+                Duration::from_secs(1),
+                wait_for_link_loss(
+                    transport,
+                    with_events.then(futures::stream::pending::<bluer::DeviceEvent>),
+                    tokio::time::interval(Duration::from_millis(1)),
+                    || std::future::ready(checks.pop_front().expect("unexpected extra poll")),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reason, "BlueZ connection poll reported disconnected");
+            assert!(checks.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_monitor_detects_bluez_events_without_waiting_for_poll() {
+        let (_status, transport) = watch::channel(TransportStatus::Ready);
+        let events = futures::stream::iter([
+            bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(true)),
+            bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false)),
+        ]);
+        let reason = timeout(
+            Duration::from_secs(1),
+            wait_for_link_loss(
+                transport,
+                Some(events),
+                tokio::time::interval(Duration::from_secs(60)),
+                || async { panic!("connection event should close the link before polling") },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason, "BlueZ reported Connected=false");
+    }
+
+    #[tokio::test]
+    async fn connection_monitor_detects_transport_closure_after_poll_failure() {
+        let (status, transport) = watch::channel(TransportStatus::Ready);
+        let reason = timeout(
+            Duration::from_secs(1),
+            wait_for_link_loss(
+                transport,
+                Some(futures::stream::pending::<bluer::DeviceEvent>()),
+                tokio::time::interval(Duration::from_millis(1)),
+                || {
+                    status.send_replace(TransportStatus::Closed);
+                    std::future::ready(Err(bluer::Error::from(dbus::Error::new_custom(
+                        "org.freedesktop.DBus.Error.NoReply",
+                        "temporary backend failure",
+                    ))))
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason, "PPoGATT transport closed");
+    }
+
+    #[tokio::test]
+    async fn connection_monitor_detects_removed_device_without_events() {
+        let (_status, transport) = watch::channel(TransportStatus::Ready);
+        let reason = timeout(
+            Duration::from_secs(1),
+            wait_for_link_loss(
+                transport,
+                None::<futures::stream::Pending<bluer::DeviceEvent>>,
+                tokio::time::interval(Duration::from_millis(1)),
+                || {
+                    std::future::ready(Err(bluer::Error {
+                        kind: bluer::ErrorKind::DoesNotExist,
+                        message: "device removed".into(),
+                    }))
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason, "BlueZ device no longer exists");
+    }
 
     #[tokio::test]
     async fn absent_reverse_service_uses_forward_without_attempting_reverse() {
