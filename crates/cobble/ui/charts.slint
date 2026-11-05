@@ -16,14 +16,14 @@ export component StepsChart inherits VerticalLayout {
 
     padding: 16px; spacing: 10px;
 
-    // Header: avg left, delta right (title is in the app header bar)
-    HorizontalLayout {
-        if root.avg-label != "": Text {
+    // Summary lines wrap independently on narrow windows.
+    VerticalLayout {
+        spacing: 4px;
+        if root.avg-label != "": Text { wrap: word-wrap; min-width: 0px;
             text: root.avg-label;
             color: Palette.muted; font-size: 13px; vertical-alignment: center;
         }
-        Rectangle { horizontal-stretch: 1; }
-        if root.delta-label != "": Text {
+        if root.delta-label != "": Text { wrap: word-wrap; min-width: 0px;
             text: root.delta-label;
             color: root.delta-positive ? Palette.green : Palette.red;
             font-size: 13px; font-weight: 600; vertical-alignment: center;
@@ -32,38 +32,47 @@ export component StepsChart inherits VerticalLayout {
 
     Rectangle {
         background: Palette.surface; border-radius: 12px; height: 200px; clip: true;
-        HorizontalLayout {
-            spacing: 4px; padding: 14px;
-            for day in model: Rectangle {
-                horizontal-stretch: 1;
-                VerticalLayout {
-                    Rectangle { vertical-stretch: 1; }
-                    Rectangle {
-                        background: (root.selected-bar-start == -1 || root.selected-bar-start == day.bar-start)
-                                    ? Palette.accent : #4a9eff30;
-                        border-radius: 3px;
-                        height: max(4px, day.fraction * 148px);
-                        animate background { duration: 150ms; easing: ease-in-out; }
+        steps-plot := Flickable {
+            // Weekly overviews fit; dense hourly samples keep distinct touch targets.
+            content-width: max(self.width, (root.model.length > 7 ? root.model.length * 52px + 24px : 0px));
+            content-height: self.height;
+            HorizontalLayout {
+                width: steps-plot.content-width; height: steps-plot.height;
+                spacing: 4px; padding: 14px;
+                for day in model: Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        Rectangle { vertical-stretch: 1; }
+                        Rectangle {
+                            background: (root.selected-bar-start == -1 || root.selected-bar-start == day.bar-start)
+                                ? Palette.accent : #4a9eff30;
+                            border-radius: 3px;
+                            height: max(4px, day.fraction * 148px);
+                            animate background { duration: 150ms; easing: ease-in-out; }
+                        }
+                        Text { wrap: word-wrap; min-width: 0px;
+                            text: day.label; color: Palette.muted; font-size: 11px;
+                            horizontal-alignment: center; height: 18px;
+                        }
                     }
-                    Text {
-                        text: day.label; color: Palette.muted; font-size: 10px;
-                        horizontal-alignment: center; height: 18px;
-                    }
-                }
-                TouchArea {
-                    width: parent.width; height: parent.height;
-                    clicked => {
-                        if root.selected-bar-start == day.bar-start {
-                            root.selected-bar-start = -1;
-                            root.bar-tapped(-1, -1);
-                        } else {
-                            root.selected-bar-start = day.bar-start;
-                            root.bar-tapped(day.bar-start, day.bar-end);
+                    TouchArea {
+                        width: parent.width; height: parent.height;
+                        clicked => {
+                            if root.selected-bar-start == day.bar-start {
+                                root.selected-bar-start = -1;
+                                root.bar-tapped(-1, -1);
+                            } else {
+                                root.selected-bar-start = day.bar-start;
+                                root.bar-tapped(day.bar-start, day.bar-end);
+                            }
                         }
                     }
                 }
             }
         }
+    }
+    if (root.model.length > 7 ? root.model.length * 52px + 24px : 0px) > root.width - 32px: Text { min-width: 0px;
+        text: "Swipe chart sideways · Tap a bar for details"; color: Palette.muted; font-size: 11px; wrap: word-wrap;
     }
 }
 
@@ -90,117 +99,125 @@ export component SleepChart inherits VerticalLayout {
 
     padding: 16px; spacing: 12px;
 
-    Text { text: "Sleep + naps"; color: Palette.muted; font-size: 11px; }
-    HorizontalLayout {
-        Text { text: root.avg-label; color: Palette.text; font-size: 16px; font-weight: 600; }
-        Rectangle { horizontal-stretch: 1; }
-        if root.delta-label != "": Text {
+    Text { wrap: word-wrap; min-width: 0px; text: "Sleep + naps"; color: Palette.muted; font-size: 11px; }
+    VerticalLayout {
+        spacing: 4px;
+        Text { wrap: word-wrap; min-width: 0px; text: root.avg-label; color: Palette.text; font-size: 16px; font-weight: 600; }
+        if root.delta-label != "": Text { wrap: word-wrap; min-width: 0px;
             text: root.delta-label;
             color: root.delta-positive ? Palette.green : Palette.red;
             font-size: 13px; font-weight: 600; vertical-alignment: center;
         }
     }
-    if root.weekly-averages: Text {
+    if root.weekly-averages: Text { min-width: 0px;
         text: "Weekly bars average days with recorded sleep or naps.";
         color: Palette.muted; font-size: 11px; wrap: word-wrap;
     }
 
     Rectangle {
         background: Palette.surface; border-radius: 12px; height: 220px; clip: true;
-        HorizontalLayout {
-            padding: 12px; spacing: 8px;
-            VerticalLayout {
-                width: 34px; padding-top: 14px; padding-bottom: 22px;
-                Text { text: root.max-label; color: Palette.muted; font-size: 9px; }
-                Rectangle { vertical-stretch: 1; }
-                Text { text: root.mid-label; color: Palette.muted; font-size: 9px; }
-                Rectangle { vertical-stretch: 1; }
-                Text { text: "0m"; color: Palette.muted; font-size: 9px; }
-            }
-            for night[index] in root.model: Rectangle {
-                horizontal-stretch: 1;
-                opacity: root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start ? 1 : 0.3;
-                animate opacity { duration: 150ms; easing: ease-in-out; }
+        sleep-plot := Flickable {
+            content-width: max(self.width, (root.model.length > 7 ? root.model.length * 56px + 68px : 0px));
+            content-height: self.height;
+            HorizontalLayout {
+                width: sleep-plot.content-width; height: sleep-plot.height;
+                padding: 12px; spacing: 8px;
                 VerticalLayout {
-                    spacing: 4px;
-                    VerticalLayout {
-                        Rectangle { vertical-stretch: 1; }
-                        Rectangle {
-                            background: Palette.light-nap;
-                            height: root.nap-model[index].light-fraction * 160px;
-                        }
-                        Rectangle {
-                            background: Palette.deep-nap;
-                            height: root.nap-model[index].deep-fraction * 160px;
-                        }
-                        Rectangle {
-                            background: Palette.accent;
-                            height: night.light-fraction * 160px;
-                        }
-                        Rectangle {
-                            background: Palette.deep-sleep;
-                            height: night.deep-fraction * 160px;
-                            border-radius: 2px;
-                        }
-                    }
-                    Text {
-                        text: night.label; color: Palette.muted; font-size: 10px;
-                        horizontal-alignment: center; height: 18px;
-                    }
+                    width: 44px; padding-top: 14px; padding-bottom: 22px;
+                    Text { wrap: word-wrap; min-width: 0px; text: root.max-label; color: Palette.muted; font-size: 11px; }
+                    Rectangle { vertical-stretch: 1; }
+                    Text { wrap: word-wrap; min-width: 0px; text: root.mid-label; color: Palette.muted; font-size: 11px; }
+                    Rectangle { vertical-stretch: 1; }
+                    Text { wrap: word-wrap; min-width: 0px; text: "0m"; color: Palette.muted; font-size: 11px; }
                 }
-                TouchArea {
-                    clicked => {
-                        if root.selected-bar-start == night.bar-start {
-                            root.selected-bar-start = -1;
-                            root.bar-tapped(-1, -1);
-                        } else {
-                            root.selected-index = index;
-                            root.selected-bar-start = night.bar-start;
-                            root.bar-tapped(night.bar-start, night.bar-end);
+                for night[index] in root.model: Rectangle {
+                    horizontal-stretch: 1;
+                    opacity: root.selected-bar-start == -1 || root.selected-bar-start == night.bar-start ? 1 : 0.3;
+                    animate opacity { duration: 150ms; easing: ease-in-out; }
+                    VerticalLayout {
+                        spacing: 4px;
+                        VerticalLayout {
+                            Rectangle { vertical-stretch: 1; }
+                            Rectangle {
+                                background: Palette.light-nap;
+                                height: root.nap-model[index].light-fraction * 160px;
+                            }
+                            Rectangle {
+                                background: Palette.deep-nap;
+                                height: root.nap-model[index].deep-fraction * 160px;
+                            }
+                            Rectangle {
+                                background: Palette.accent;
+                                height: night.light-fraction * 160px;
+                            }
+                            Rectangle {
+                                background: Palette.deep-sleep;
+                                height: night.deep-fraction * 160px;
+                                border-radius: 2px;
+                            }
+                        }
+                        Text { wrap: word-wrap; min-width: 0px;
+                            text: night.label; color: Palette.muted; font-size: 11px;
+                            horizontal-alignment: center; height: 18px;
+                        }
+                    }
+                    TouchArea {
+                        clicked => {
+                            if root.selected-bar-start == night.bar-start {
+                                root.selected-bar-start = -1;
+                                root.bar-tapped(-1, -1);
+                            } else {
+                                root.selected-index = index;
+                                root.selected-bar-start = night.bar-start;
+                                root.bar-tapped(night.bar-start, night.bar-end);
+                            }
                         }
                     }
                 }
             }
         }
-        if !root.has-sleep && !root.has-naps: Text {
+        if !root.has-sleep && !root.has-naps: Text { wrap: word-wrap; min-width: 0px;
             text: "No sleep or naps in this period";
             color: Palette.muted; font-size: 12px;
             horizontal-alignment: center; vertical-alignment: center;
         }
     }
 
+    if (root.model.length > 7 ? root.model.length * 56px + 68px : 0px) > root.width - 32px: Text { min-width: 0px;
+        text: "Swipe chart sideways · Tap a bar for details"; color: Palette.muted; font-size: 11px; wrap: word-wrap;
+    }
     HorizontalLayout {
         spacing: 16px;
         VerticalLayout {
             spacing: 4px;
-            Text { text: "Sleep"; color: Palette.text; font-size: 12px; font-weight: 600; }
+            Text { wrap: word-wrap; min-width: 0px; text: "Sleep"; color: Palette.text; font-size: 12px; font-weight: 600; }
             HorizontalLayout {
                 spacing: 4px;
                 Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.accent; y: 3px; }
-                Text { text: "Light"; color: Palette.muted; font-size: 10px; }
+                Text { wrap: word-wrap; min-width: 0px; text: "Light"; color: Palette.muted; font-size: 11px; }
                 Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.deep-sleep; y: 3px; }
-                Text { text: "Deep"; color: Palette.muted; font-size: 10px; }
+                Text { wrap: word-wrap; min-width: 0px; text: "Deep"; color: Palette.muted; font-size: 11px; }
             }
         }
         VerticalLayout {
             spacing: 4px;
-            Text { text: "Naps"; color: Palette.text; font-size: 12px; font-weight: 600; }
+            Text { wrap: word-wrap; min-width: 0px; text: "Naps"; color: Palette.text; font-size: 12px; font-weight: 600; }
             HorizontalLayout {
                 spacing: 4px;
                 Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.light-nap; y: 3px; }
-                Text { text: "Light"; color: Palette.muted; font-size: 10px; }
+                Text { wrap: word-wrap; min-width: 0px; text: "Light"; color: Palette.muted; font-size: 11px; }
                 Rectangle { width: 8px; height: 8px; border-radius: 2px; background: Palette.deep-nap; y: 3px; }
-                Text { text: "Deep"; color: Palette.muted; font-size: 10px; }
+                Text { wrap: word-wrap; min-width: 0px; text: "Deep"; color: Palette.muted; font-size: 11px; }
             }
         }
     }
     if root.detail-index >= 0 && root.detail-index < root.model.length: HorizontalLayout {
-        Text {
+        Text { wrap: word-wrap; min-width: 0px;
             text: (root.weekly-averages ? "Avg sleep: " : "Sleep: ") + root.model[root.detail-index].total-label;
             color: Palette.accent; font-size: 12px;
         }
         Rectangle { horizontal-stretch: 1; }
-        Text {
+        Text { wrap: word-wrap; min-width: 0px;
             text: (root.weekly-averages ? "Avg naps: " : "Naps: ") + root.nap-model[root.detail-index].total-label;
             color: Palette.light-nap; font-size: 12px;
         }
@@ -226,7 +243,7 @@ export component NapSummaryCard inherits VerticalLayout {
             padding: 12px; spacing: 8px;
             HorizontalLayout {
                 spacing: 8px;
-                Text { text: "Naps"; color: Palette.text; font-size: 15px; font-weight: 600; }
+                Text { wrap: word-wrap; min-width: 0px; text: "Naps"; color: Palette.text; font-size: 15px; font-weight: 600; }
                 Rectangle { horizontal-stretch: 1; }
                 Text { text: root.summary.scope-label; color: Palette.text; font-size: 11px; wrap: word-wrap; horizontal-alignment: right; }
             }
@@ -236,11 +253,11 @@ export component NapSummaryCard inherits VerticalLayout {
                 NapMetric { value: root.summary.total-label; label: "Total time"; }
                 NapMetric { value: root.summary.avg-label; label: "Avg nap"; }
             }
-            if !root.summary.available || root.summary.count == 0: Text {
+            if !root.summary.available || root.summary.count == 0: Text { min-width: 0px;
                 text: root.summary.available ? "No naps recorded in these dates." : "Nap summary unavailable.";
                 color: Palette.text; font-size: 13px; wrap: word-wrap;
             }
-            if root.summary.available && root.summary.latest-label != "": Text {
+            if root.summary.available && root.summary.latest-label != "": Text { min-width: 0px;
                 text: root.summary.latest-label;
                 color: Palette.text; font-size: 12px; wrap: word-wrap;
             }
@@ -250,28 +267,23 @@ export component NapSummaryCard inherits VerticalLayout {
 
 // ─── Session list ─────────────────────────────────────────────────────────────
 
-export component SessionList inherits Flickable {
+export component SessionList inherits VerticalLayout {
     in property <[HealthSession]> model;
-    vertical-stretch: 1;
-    content-height: items.preferred-height;
-    items := VerticalLayout {
-        alignment: start;
-        for s in root.model: Rectangle {
-            height: s.has-metrics ? 108px : 80px;
-            Rectangle {
-                x: 16px; y: 4px; width: parent.width - 32px; height: parent.height - 8px;
-                background: Palette.surface; border-radius: 10px;
-                VerticalLayout {
-                    padding: 12px; spacing: 4px;
-                    HorizontalLayout {
-                        Text { text: s.type-name; color: Palette.text; font-size: 14px; font-weight: 600; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Text { text: s.start-label; color: Palette.muted; font-size: 12px; vertical-alignment: center; }
-                    }
-                    Text { text: s.duration-label; color: Palette.muted; font-size: 13px; }
-                    if s.has-metrics: Text { text: s.metrics-label; color: Palette.accent; font-size: 12px; }
-                }
-            }
+    alignment: start; spacing: 8px;
+    padding-left: 16px; padding-right: 16px; padding-bottom: 16px;
+    if root.model.length == 0: Text {
+        text: "No activity recorded in this period."; color: Palette.muted; font-size: 13px;
+        wrap: word-wrap; horizontal-alignment: center;
+    }
+    for s in root.model: Rectangle {
+        min-height: s.has-metrics ? 108px : 80px;
+        background: Palette.surface; border-radius: 10px;
+        VerticalLayout {
+            padding: 12px; spacing: 4px;
+            Text { text: s.type-name; color: Palette.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+            Text { text: s.start-label; color: Palette.muted; font-size: 12px; wrap: word-wrap; }
+            Text { text: s.duration-label; color: Palette.muted; font-size: 13px; wrap: word-wrap; }
+            if s.has-metrics: Text { text: s.metrics-label; color: Palette.accent; font-size: 12px; wrap: word-wrap; }
         }
     }
 }
@@ -281,13 +293,13 @@ export component SessionList inherits Flickable {
 export component SleepStatsPanel inherits VerticalLayout {
     in property <SleepStats> stats;
 
-    vertical-stretch: 1;
+    vertical-stretch: 0;
     padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 16px;
     spacing: 10px;
 
     // Header: title
     HorizontalLayout {
-        Text { text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+        Text { wrap: word-wrap; min-width: 0px; text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
     }
 
@@ -306,8 +318,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Avg Deep Sleep"; color: Palette.muted; font-size: 11px; }
-                        Text {
+                        Text { wrap: word-wrap; min-width: 0px; text: "Avg Deep Sleep"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px;
                             text: root.stats.deep-avg-label;
                             color: Palette.deep-sleep;
                             font-size: 18px; font-weight: 700;
@@ -320,23 +332,23 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Stage Mix"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Stage Mix"; color: Palette.muted; font-size: 11px; }
                         VerticalLayout {
                             spacing: 4px;
                             HorizontalLayout {
                                 spacing: 3px;
-                                Text { text: "" + round(root.stats.light-pct) + "%"; color: Palette.accent; font-size: 14px; font-weight: 700; }
-                                Text { text: "light"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "" + round(root.stats.light-pct) + "%"; color: Palette.accent; font-size: 14px; font-weight: 700; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "light"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                             }
                             HorizontalLayout {
                                 spacing: 3px;
-                                Text { text: "" + round(root.stats.deep-pct) + "%"; color: Palette.deep-sleep; font-size: 14px; font-weight: 700; }
-                                Text { text: "deep"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "" + round(root.stats.deep-pct) + "%"; color: Palette.deep-sleep; font-size: 14px; font-weight: 700; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "deep"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                             }
                             if root.stats.awake-pct > 0: HorizontalLayout {
                                 spacing: 3px;
-                                Text { text: "" + round(root.stats.awake-pct) + "%"; color: Palette.muted; font-size: 14px; font-weight: 700; }
-                                Text { text: "awake"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "" + round(root.stats.awake-pct) + "%"; color: Palette.muted; font-size: 14px; font-weight: 700; }
+                                Text { wrap: word-wrap; min-width: 0px; text: "awake"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                             }
                         }
                     }
@@ -351,8 +363,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Avg Bedtime"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.avg-bedtime; color: Palette.text; font-size: 16px; font-weight: 600; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Avg Bedtime"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.avg-bedtime; color: Palette.text; font-size: 16px; font-weight: 600; }
                     }
                 }
                 Rectangle {
@@ -360,8 +372,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Avg Wake-up"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.avg-wakeup; color: Palette.text; font-size: 16px; font-weight: 600; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Avg Wake-up"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.avg-wakeup; color: Palette.text; font-size: 16px; font-weight: 600; }
                     }
                 }
             }
@@ -374,8 +386,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Longest Night"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.highest-dur; color: Palette.green; font-size: 16px; font-weight: 600; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Longest Night"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.highest-dur; color: Palette.green; font-size: 16px; font-weight: 600; }
                     }
                 }
                 Rectangle {
@@ -383,8 +395,8 @@ export component SleepStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Shortest Night"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.lowest-dur; color: Palette.orange; font-size: 16px; font-weight: 600; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Shortest Night"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.lowest-dur; color: Palette.orange; font-size: 16px; font-weight: 600; }
                     }
                 }
             }
@@ -404,25 +416,25 @@ export component HeartTrendChart inherits VerticalLayout {
     in property <bool> has-data: false;
 
     Rectangle {
-        background: Palette.surface; border-radius: 12px; height: 260px; clip: true;
+        background: Palette.surface; border-radius: 12px; height: 286px; clip: true;
         VerticalLayout {
             padding: 14px; spacing: 8px;
 
-            HorizontalLayout {
-                height: 22px;
-                Text { text: "Heart Rate Trend"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+            VerticalLayout {
+                spacing: 8px;
+                Text { wrap: word-wrap; min-width: 0px; text: "Heart Rate Trend"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
                 HorizontalLayout {
                     spacing: 10px;
                     HorizontalLayout {
                         spacing: 4px;
                         Rectangle { width: 14px; height: 2px; background: Palette.red; y: 5px; }
-                        Text { text: "Average"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Average"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                     }
                     HorizontalLayout {
                         spacing: 4px;
                         Rectangle { width: 14px; height: 2px; background: Palette.accent; y: 5px; }
-                        Text { text: "Resting"; color: Palette.muted; font-size: 10px; vertical-alignment: center; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Resting"; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                     }
                 }
             }
@@ -433,11 +445,11 @@ export component HeartTrendChart inherits VerticalLayout {
                     height: 158px;
                     VerticalLayout {
                         width: 38px;
-                        Text { text: root.max-label; color: Palette.muted; font-size: 9px; vertical-alignment: top; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.max-label; color: Palette.muted; font-size: 11px; vertical-alignment: top; }
                         Rectangle { vertical-stretch: 1; }
-                        Text { text: root.mid-label; color: Palette.muted; font-size: 9px; vertical-alignment: center; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.mid-label; color: Palette.muted; font-size: 11px; vertical-alignment: center; }
                         Rectangle { vertical-stretch: 1; }
-                        Text { text: root.min-label; color: Palette.muted; font-size: 9px; vertical-alignment: bottom; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.min-label; color: Palette.muted; font-size: 11px; vertical-alignment: bottom; }
                     }
                     Rectangle {
                         horizontal-stretch: 1; clip: true;
@@ -446,12 +458,14 @@ export component HeartTrendChart inherits VerticalLayout {
                             width: parent.width; height: parent.height;
                             commands: "M 0 0 L 100 0 M 0 50 L 100 50 M 0 100 L 100 100";
                             viewbox-width: 100; viewbox-height: 100;
+                            fit: fill;
                             fill: #00000000; stroke: #6a6a9040; stroke-width: 1px;
                         }
                         if root.average-path != "": Path {
                             width: parent.width; height: parent.height;
                             commands: root.average-path;
                             viewbox-width: 100; viewbox-height: 100;
+                            fit: fill;
                             fill: #00000000; stroke: Palette.red; stroke-width: 2px;
                             stroke-line-cap: round; stroke-line-join: round;
                         }
@@ -459,23 +473,28 @@ export component HeartTrendChart inherits VerticalLayout {
                             width: parent.width; height: parent.height;
                             commands: root.resting-path;
                             viewbox-width: 100; viewbox-height: 100;
+                            fit: fill;
                             fill: #00000000; stroke: Palette.accent; stroke-width: 2px;
                             stroke-line-cap: round; stroke-line-join: round;
                         }
 
                     }
                 }
-                HorizontalLayout {
-                    padding-left: 38px;
-                    for point in root.model: Text {
-                        text: point.label; color: Palette.muted; font-size: 9px;
-                        horizontal-stretch: 1; horizontal-alignment: center;
+                Rectangle {
+                    height: 18px; clip: true;
+                    // Day has 24 cells, but only four hour labels. Do not wrap
+                    // a label into its narrow cell or let it change chart height.
+                    for point[index] in root.model: Text {
+                        x: 38px + (parent.width - 38px) * (index + 0.5) / root.model.length - self.width / 2;
+                        width: 44px; height: parent.height;
+                        text: point.label; color: Palette.muted; font-size: 11px;
+                        horizontal-alignment: center; vertical-alignment: center;
                     }
                 }
             }
             if !root.has-data: Rectangle {
                 vertical-stretch: 1;
-                Text { text: "No heart-rate trend data for this period"; color: Palette.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                Text { wrap: word-wrap; min-width: 0px; text: "No heart-rate trend data for this period"; color: Palette.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
             }
         }
     }
@@ -493,7 +512,7 @@ export component HeartStatsPanel inherits VerticalLayout {
     in property <string> trend-min-label;
     in property <bool> trend-has-data: false;
 
-    vertical-stretch: 1;
+    vertical-stretch: 0;
     padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 16px;
     spacing: 10px;
 
@@ -508,7 +527,7 @@ export component HeartStatsPanel inherits VerticalLayout {
     }
 
     HorizontalLayout {
-        Text { text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+        Text { wrap: word-wrap; min-width: 0px; text: "Key Stats"; color: Palette.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
     }
 
@@ -523,8 +542,8 @@ export component HeartStatsPanel inherits VerticalLayout {
                 background: #401e2a; border-radius: 8px;
                 VerticalLayout {
                     padding: 10px; spacing: 4px;
-                    Text { text: "Avg Heart Rate"; color: Palette.muted; font-size: 11px; }
-                    Text { text: root.stats.average-label; color: Palette.red; font-size: 18px; font-weight: 700; }
+                    Text { wrap: word-wrap; min-width: 0px; text: "Avg Heart Rate"; color: Palette.muted; font-size: 11px; }
+                    Text { wrap: word-wrap; min-width: 0px; text: root.stats.average-label; color: Palette.red; font-size: 18px; font-weight: 700; }
                 }
             }
 
@@ -536,8 +555,8 @@ export component HeartStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Avg Resting HR"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.resting-label; color: Palette.accent; font-size: 18px; font-weight: 700; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Avg Resting HR"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.resting-label; color: Palette.accent; font-size: 18px; font-weight: 700; }
                     }
                 }
                 Rectangle {
@@ -545,8 +564,8 @@ export component HeartStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Avg Sleeping HR"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.sleeping-label; color: Palette.deep-sleep; font-size: 18px; font-weight: 700; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Avg Sleeping HR"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.sleeping-label; color: Palette.deep-sleep; font-size: 18px; font-weight: 700; }
                     }
                 }
             }
@@ -559,8 +578,8 @@ export component HeartStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Lowest HR"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.lowest-label; color: Palette.green; font-size: 18px; font-weight: 700; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Lowest HR"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.lowest-label; color: Palette.green; font-size: 18px; font-weight: 700; }
                     }
                 }
                 Rectangle {
@@ -568,8 +587,8 @@ export component HeartStatsPanel inherits VerticalLayout {
                     background: #1e1e40; border-radius: 8px;
                     VerticalLayout {
                         padding: 10px; spacing: 4px;
-                        Text { text: "Highest HR"; color: Palette.muted; font-size: 11px; }
-                        Text { text: root.stats.highest-label; color: Palette.orange; font-size: 18px; font-weight: 700; }
+                        Text { wrap: word-wrap; min-width: 0px; text: "Highest HR"; color: Palette.muted; font-size: 11px; }
+                        Text { wrap: word-wrap; min-width: 0px; text: root.stats.highest-label; color: Palette.orange; font-size: 18px; font-weight: 700; }
                     }
                 }
             }
