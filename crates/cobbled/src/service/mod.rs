@@ -40,6 +40,7 @@
 //!     FactoryReset(b confirm)  (DESTRUCTIVE; requires confirm=true)
 //!     Forget()  remove the Bluetooth bond (unpair); re-pairs on next reconnect
 //!     PushWeather(ay location_key, s location_name, s forecast_short, n current_temp, y current_weather, n today_high, n today_low, y tomorrow_weather, n tomorrow_high, n tomorrow_low, b is_current_location)
+//!     PushWeatherForecast(ay location_key, s forecast_json) -> ()
 //!     ReprocessHealthData()
 //!     SyncWellness()
 //!     GetWellnessSyncStatus() -> a{sv}
@@ -91,6 +92,18 @@ use crate::notification::app_name_to_category;
 use crate::pkjs::PkjsManager;
 
 const MAX_APP_CONFIGURATION_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_WEATHER_FORECAST_JSON_BYTES: usize = 64 * 1024;
+
+/// Bound JSON input before decoding the forecast's limited daily and hourly arrays.
+fn parse_weather_forecast_json(json: &str) -> Result<libpebble_ble::WeatherForecast, DaemonError> {
+    if json.len() > MAX_WEATHER_FORECAST_JSON_BYTES {
+        return Err(DaemonError::Failed(format!(
+            "weather forecast JSON exceeds the {MAX_WEATHER_FORECAST_JSON_BYTES}-byte size limit"
+        )));
+    }
+    serde_json::from_str(json)
+        .map_err(|e| DaemonError::Failed(format!("invalid weather forecast: {e}")))
+}
 
 fn unix_timestamp() -> i64 {
     SystemTime::now()
@@ -2710,6 +2723,24 @@ impl CobbleDaemon {
             .map_err(|e| DaemonError::Failed(e.to_string()))
     }
 
+    /// Push a JSON-encoded WeatherForecast (Celsius inputs) with optional daily/hourly data.
+    /// Existing PushWeather callers can keep using the original method signature.
+    /// JSON is limited to 64 KiB; surplus daily/hourly entries are ignored.
+    pub(crate) async fn push_weather_forecast(
+        &self,
+        location_key: Vec<u8>,
+        forecast_json: &str,
+    ) -> Result<(), DaemonError> {
+        let key: [u8; 16] = location_key
+            .try_into()
+            .map_err(|_| DaemonError::Failed("location_key must be 16 bytes".into()))?;
+        let forecast = parse_weather_forecast_json(forecast_json)?;
+        self.require_pebble()?
+            .push_weather_forecast(&key, &forecast)
+            .await
+            .map_err(|e| DaemonError::Failed(e.to_string()))
+    }
+
     // ── Phone calls ───────────────────────────────────────────────────
 
     /// Push an incoming call to the watch (shows caller screen).
@@ -2919,6 +2950,78 @@ impl CobbleDaemon {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Check the inclusive byte limit, including multi-byte UTF-8 input.
+    #[test]
+    fn weather_json_size_is_bounded_before_decoding() {
+        let mut json = serde_json::to_string(&libpebble_ble::WeatherForecast::default()).unwrap();
+        json.push_str(&" ".repeat(MAX_WEATHER_FORECAST_JSON_BYTES - json.len()));
+        assert!(parse_weather_forecast_json(&json).is_ok());
+        json.push(' ');
+        assert!(
+            parse_weather_forecast_json(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("size limit")
+        );
+
+        let forecast = libpebble_ble::WeatherForecast {
+            location_name: "é".repeat(MAX_WEATHER_FORECAST_JSON_BYTES / 2),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&forecast).unwrap();
+        assert!(json.chars().count() < MAX_WEATHER_FORECAST_JSON_BYTES);
+        assert!(
+            parse_weather_forecast_json(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("size limit")
+        );
+    }
+
+    /// Accept surplus entries while retaining exactly the prefix encoded for the watch.
+    #[test]
+    fn weather_json_truncates_surplus_forecasts_without_changing_wire_data() {
+        use cobble_contracts::{
+            MAX_DAILY, MAX_HOURLY, WeatherDailyForecast, WeatherForecast, WeatherHourlyForecast,
+        };
+        use libpebble_ble::endpoints::weather::{WEATHER_DB_V4_CAPABILITY, build_weather_record};
+
+        let mut forecast = WeatherForecast {
+            daily: (0..20)
+                .map(|i| WeatherDailyForecast {
+                    high_temp: Some(i),
+                    ..Default::default()
+                })
+                .collect(),
+            today_hourly: (0..48)
+                .map(|i| WeatherHourlyForecast {
+                    temp: Some(i),
+                    ..Default::default()
+                })
+                .collect(),
+            tomorrow_hourly: (0..48)
+                .map(|i| WeatherHourlyForecast {
+                    temp: Some(-i),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let decoded =
+            parse_weather_forecast_json(&serde_json::to_string(&forecast).unwrap()).unwrap();
+        for capabilities in [0, WEATHER_DB_V4_CAPABILITY] {
+            assert_eq!(
+                build_weather_record(&decoded, 0, capabilities, true).unwrap(),
+                build_weather_record(&forecast, 0, capabilities, true).unwrap()
+            );
+        }
+        forecast.daily.truncate(MAX_DAILY);
+        forecast.today_hourly.truncate(MAX_HOURLY);
+        forecast.tomorrow_hourly.truncate(MAX_HOURLY);
+        assert_eq!(decoded, forecast);
+        assert!(parse_weather_forecast_json("{}").is_err());
+    }
 
     fn test_path() -> PathBuf {
         let unique = SystemTime::now()

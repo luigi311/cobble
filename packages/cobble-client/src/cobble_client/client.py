@@ -9,7 +9,9 @@ shapes its handlers have.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from dbus_fast import DBusError, Variant
@@ -30,6 +32,7 @@ from ._device_config import (
     HealthConfigPatch,
     decode_device_config,
 )
+from ._weather import WeatherForecast
 
 BUS_NAME = "org.cobble.Daemon"
 OBJECT_PATH = "/org/cobble/Daemon"
@@ -745,6 +748,30 @@ class CobbleClient:
                 tomorrow_low,
                 is_current_location,
             )
+        except DBusError as e:
+            raise self._translate(e) from e
+
+    async def push_weather_forecast(
+        self,
+        forecast: WeatherForecast,
+        *,
+        location_key: bytes | None = None,
+    ) -> None:
+        """Push extended weather using the watch's supported record format.
+
+        Temperatures are Celsius. The same location key replaces the previous
+        entry; omitting it uses the original PushWeather current-location slot.
+        That default slot sets is_current_location=True in the sent copy only.
+        """
+        self._require_iface()
+        if location_key is None:
+            location_key = bytes.fromhex("e4c75d6ae95f4b778c3251a1c2b1d5c4")
+            forecast = replace(forecast, is_current_location=True)
+        if len(location_key) != 16:
+            raise ValueError(f"location_key must be 16 bytes, got {len(location_key)}")
+        payload = json.dumps(asdict(forecast), allow_nan=False)
+        try:
+            await self._iface.call_push_weather_forecast(bytes(location_key), payload)
         except DBusError as e:
             raise self._translate(e) from e
 

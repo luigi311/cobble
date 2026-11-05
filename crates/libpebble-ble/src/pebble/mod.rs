@@ -32,9 +32,8 @@ use crate::{
         app_run_state::{AppRunStateCmd, build_app_run_state},
         blob_db::{
             BlobDB2Incoming, BlobDBId, BlobDBStatus, NotificationCategory, WeatherType,
-            build_blobdb_delete, build_blobdb_insert, build_blobdb_insert_with_timestamp,
-            build_blobdb_raw_str_insert, build_blobdb2_mark_all_dirty, build_notification,
-            build_preference_insert, build_weather_blob, build_weather_prefs_blob,
+            build_blobdb_delete, build_blobdb_insert, build_blobdb2_mark_all_dirty,
+            build_notification, build_preference_insert,
         },
         datalog::build_report_sessions,
         health::{build_activate_health_blob, build_health_sync_request, build_hrm_blob},
@@ -65,6 +64,7 @@ mod dispatch;
 mod inner;
 mod language;
 mod lifecycle;
+mod weather;
 
 use dispatch::rand_u16;
 pub use inner::{
@@ -84,6 +84,7 @@ pub struct Pebble {
     preference_operation: Arc<AsyncMutex<()>>,
     install_operation: Arc<AsyncMutex<()>>,
     language_operation: Arc<AsyncMutex<()>>,
+    weather_operation: Arc<AsyncMutex<()>>,
     lifecycle: Arc<lifecycle::ConnectionLifecycle>,
     cancel_epoch: std::sync::atomic::AtomicU64,
 }
@@ -304,6 +305,7 @@ impl Pebble {
             preference_operation: Arc::new(AsyncMutex::new(())),
             install_operation: Arc::new(AsyncMutex::new(())),
             language_operation: Arc::new(AsyncMutex::new(())),
+            weather_operation: Arc::new(AsyncMutex::new(())),
             lifecycle: lifecycle::ConnectionLifecycle::shared(adapter, address),
             cancel_epoch: std::sync::atomic::AtomicU64::new(0),
         }
@@ -446,6 +448,7 @@ impl Pebble {
             inner.blobdb2_pending.clear();
             inner.blobdb_pending.clear();
             inner.watch_version_pending.clear();
+            inner.watch_capabilities = None;
             inner.watch_color_pending.clear();
             inner.language_pending.clear();
             inner.app_fetch_pending.clear();
@@ -1201,7 +1204,8 @@ impl Pebble {
     ///
     /// Uses `InsertWithTimestamp` (cmd=0x0D) when BlobDB2 v1 was negotiated at
     /// connect time, and falls back to plain `Insert` otherwise. Temperatures
-    /// are in Celsius.
+    /// are supplied in Celsius and converted to the watch's temperature preference.
+    /// The record format is capability-selected, with unknown extended readings.
     ///
     /// `location_key` is a 16-byte UUID that identifies the weather location.
     /// Re-using the same UUID on subsequent calls updates the existing entry.
@@ -1220,51 +1224,23 @@ impl Pebble {
         tomorrow_low: i16,
         is_current_location: bool,
     ) -> Result<(), PebbleError> {
-        if !self.is_connected() {
-            return Err(PebbleError::NotConnected);
-        }
-        let now = chrono::Local::now().timestamp() as u32;
-        let blob = build_weather_blob(
-            location_name,
-            forecast_short,
-            current_temp,
-            current_weather,
-            today_high,
-            today_low,
-            tomorrow_weather,
-            tomorrow_high,
-            tomorrow_low,
-            now,
-            is_current_location,
-        );
-        let token = rand_u16();
-        let blob_db_version = self.inner.lock().unwrap().blob_db_version;
-        let payload = if blob_db_version >= 1 {
-            build_blobdb_insert_with_timestamp(BlobDBId::Weather, location_key, &blob, now, token)
-        } else {
-            build_blobdb_insert(BlobDBId::Weather, location_key, &blob, token)
-        }
-        .map_err(|e| PebbleError::Other(e.to_string()))?;
-        debug!(
-            "push_weather token={token} location={location_name:?} \
-             temp={current_temp}°C blobdb_version={blob_db_version}"
-        );
-        self.send_pebble(Endpoint::BlobDb, &payload)?;
-
-        // Write the "weatherApp" AppConfigs entry so the watch knows which
-        // location UUIDs are active. Without this the weather app shows
-        // "no location information" even though the Weather BlobDB insert succeeds.
-        let prefs_token = rand_u16();
-        let prefs_blob = build_weather_prefs_blob(&[*location_key]);
-        let prefs_payload = build_blobdb_raw_str_insert(
-            BlobDBId::AppConfigs,
-            "weatherApp",
-            &prefs_blob,
-            prefs_token,
+        self.push_weather_forecast(
+            location_key,
+            &crate::WeatherForecast {
+                location_name: location_name.into(),
+                forecast_short: forecast_short.into(),
+                current_temp,
+                current_weather: current_weather as u8,
+                today_high,
+                today_low,
+                tomorrow_weather: tomorrow_weather as u8,
+                tomorrow_high,
+                tomorrow_low,
+                is_current_location,
+                ..Default::default()
+            },
         )
-        .map_err(|e| PebbleError::Other(e.to_string()))?;
-        debug!("push_weather prefs token={prefs_token}");
-        self.send_pebble(Endpoint::BlobDb, &prefs_payload)
+        .await
     }
 
     /// Write "activityPreferences" (and optionally "hrmPreferences") to the

@@ -5,6 +5,7 @@ edition = "2024"
 description = "Talk to a Pebble smartwatch over Bluetooth Low Energy from Linux."
 
 [dependencies]
+cobble-contracts = { path = "../cobble-contracts" }
 bluer = { version = "0.17", features = ["full"] }
 dbus = { version = "0.9", features = ["vendored"] }
 dbus-tokio = "0.7"

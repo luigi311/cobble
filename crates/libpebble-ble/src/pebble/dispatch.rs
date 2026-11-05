@@ -63,8 +63,11 @@ pub(crate) fn on_pebble_message(message: Vec<u8>, inner: &Arc<Mutex<PebbleInner>
                             "watch version: fw={} board={} serial={}",
                             info.running.string_version, info.board, info.serial
                         );
-                        let waiters =
-                            std::mem::take(&mut inner.lock().unwrap().watch_version_pending);
+                        let waiters = {
+                            let mut state = inner.lock().unwrap();
+                            state.watch_capabilities = Some(info.capabilities);
+                            std::mem::take(&mut state.watch_version_pending)
+                        };
                         for w in waiters {
                             let _ = w.send(info.clone());
                         }
@@ -515,9 +518,18 @@ fn on_blobdb2_message(payload: Vec<u8>, inner: &Arc<Mutex<PebbleInner>>) {
             blobdb2_send(inner, resp);
             let handlers: Vec<_> = {
                 let mut state = inner.lock().unwrap();
+                let previous_units = super::weather::observed_units(&state);
                 state
                     .observed_preferences
                     .insert((w.db, key.clone()), w.value.clone());
+                if w.db == 12
+                    && matches!(key.as_str(), "unitsTemperature" | "unitsDistance")
+                    && previous_units != super::weather::observed_units(&state)
+                {
+                    state
+                        .weather_units_tx
+                        .send_modify(|revision| *revision = revision.wrapping_add(1));
+                }
                 state.watch_pref_handlers.clone()
             };
             for h in handlers {

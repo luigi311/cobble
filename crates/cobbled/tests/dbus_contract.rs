@@ -53,6 +53,8 @@ exit 1
         "CreateCoreDump",
         "FactoryReset",
         "Forget",
+        "PushWeather",
+        "PushWeatherForecast",
         "InstallPbw",
         "ListInstalledApps",
         "UninstallApp",
@@ -82,5 +84,6 @@ exit 1
     assert!(xml.contains("<arg name=\"transferred_bytes\" type=\"u\"/>"));
     assert!(xml.contains("<arg name=\"total_bytes\" type=\"u\"/>"));
     assert!(xml.contains("<arg name=\"app_uuid\" type=\"s\" direction=\"in\"/>"));
+    assert!(xml.contains("<arg name=\"forecast_json\" type=\"s\" direction=\"in\"/>"));
     assert!(xml.contains("type=\"aa{sv}\" direction=\"out\""));
 }
