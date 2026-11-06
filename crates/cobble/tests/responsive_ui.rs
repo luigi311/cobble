@@ -209,6 +209,7 @@ fn scroll(sw: &MinimalSoftwareWindow, x: f32, y: f32, amount: f32) {
     });
 }
 
+/// Settle animations and render the window, optionally saving a named PNG fixture.
 fn snapshot(
     w: &AppWindow,
     clock: &Cell<u64>,
@@ -253,6 +254,58 @@ fn disabled_period_controls_ignore_taps() {
     assert_eq!(period.get_forwards(), 1, "enabled Next must respond");
 }
 
+/// Preserve open Settings forms and staged edits when navigating during an action.
+#[test]
+fn settings_navigation_remains_available_during_actions() {
+    let sw = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    let clock = Rc::new(Cell::new(0));
+    slint::platform::set_platform(Box::new(Headless(sw.clone(), clock.clone()))).unwrap();
+    let w = AppWindow::new().unwrap();
+    w.set_cfg_adapter("hci-staged".into());
+    w.set_dc_dirty(true);
+    w.set_action_busy(true);
+    w.set_action_cancellable(true);
+    w.set_action_status("Waiting for app configuration…".into());
+    w.show().unwrap();
+
+    for (width, height) in [(360, 720), (720, 360)] {
+        resize(&sw, width, height, 2.);
+        let (device_x, device_y, settings_x, settings_y) = if width > height {
+            (40., 40., 40., 296.)
+        } else {
+            (36., 688., 324., 688.)
+        };
+        for page in [1, 2, 3] {
+            w.set_active_tab(4);
+            w.set_settings_page(page);
+            snapshot(&w, &clock, "navigation");
+            click(&sw, device_x, device_y);
+            assert_eq!(w.get_active_tab(), 0);
+            snapshot(&w, &clock, "navigation");
+            click(&sw, settings_x, settings_y);
+            assert_eq!(
+                w.get_active_tab(),
+                4,
+                "Settings must remain reachable while busy"
+            );
+            assert_eq!(w.get_settings_page(), page);
+            snapshot(&w, &clock, "navigation");
+            click(&sw, settings_x, settings_y);
+            assert_eq!(
+                w.get_settings_page(),
+                page,
+                "reselecting Settings must preserve its form"
+            );
+            assert_eq!(w.get_cfg_adapter(), "hci-staged");
+            assert!(w.get_dc_dirty());
+            assert!(w.get_action_busy());
+            assert!(w.get_action_cancellable());
+            assert_eq!(w.get_action_status(), "Waiting for app configuration…");
+        }
+    }
+}
+
+/// Exercise responsive rendering, navigation, scrolling, and state preservation across scales.
 #[test]
 fn responsive_pages_and_rotation() {
     let sw = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);

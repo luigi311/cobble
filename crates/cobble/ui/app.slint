@@ -1184,11 +1184,8 @@ export component AppWindow inherits Window {
         height: root.use-rail ? root.height : 64px;
         active-index: root.active-tab;
         selected(index) => {
-            if index != 4 { root.active-tab = index; }
-            else if !root.action-busy {
-                // Re-selecting Settings keeps the current form and staged edits.
-                root.active-tab = 4;
-            }
+            // Selecting Settings keeps the current form and staged edits, even during an action.
+            root.active-tab = index;
         }
     }
 
