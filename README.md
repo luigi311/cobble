@@ -264,6 +264,32 @@ uv sync --all-packages
 uv run pytest
 ```
 
+The Slint GUI adapts to the window's logical size, including compositor scaling.
+Phone portrait and near-square windows use bottom navigation; short landscape
+and wide desktop windows use a side rail. Pages scroll vertically, while dense
+bar charts scroll horizontally to keep each bar tappable. Rotating the window
+preserves the current form and staged settings.
+
+On the NixOS development host, GUI builds and tests require the `debian`
+distrobox (see `.rules`). The native responsive UI test uses the software
+renderer without a display server, daemon, or watch:
+
+```sh
+distrobox enter debian -- cargo test -p cobble
+
+# Optional PNG fixtures for all tabs and settings pages, at both scroll ends.
+# Use an absolute output path shared with the container.
+distrobox enter debian -- env COBBLE_UI_SNAPSHOTS="$PWD/target/responsive-ui" \
+    cargo test -p cobble --test responsive_ui
+```
+
+Fixtures cover 360×720 and 720×360 phone windows at 2× scale, the Comet's
+1080×1240 display shape in both orientations at 1×, 2×, 2.5× and approximately
+3× scale, a 320-pixel-wide window, short 640×280 and 720×150 windows, and
+desktop. Real-device Wayland checks are
+still needed for compositor decorations, software keyboard behavior, and touch
+gestures.
+
 ## Installing the daemon
 
 HTTPS clients use the operating system's CA certificate store. Install and

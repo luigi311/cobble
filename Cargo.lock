@@ -839,6 +839,7 @@ dependencies = [
  "anyhow",
  "cobble-client",
  "cobble-db",
+ "png",
  "rfd",
  "serde",
  "serde_json",
